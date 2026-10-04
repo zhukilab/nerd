@@ -140,11 +140,18 @@ export interface PlanStepOptions {
 	answer?: string;
 	/** The tools of the work, given back after the plan. */
 	workTools: string[];
+	/** The tools of the plan turn: PLAN_TOOLS and the packages' read-only ones. */
+	planTools: string[];
 }
 
-export function planStepOptions(operator: boolean, workTools: string[], env = process.env): PlanStepOptions | undefined {
+export function planStepOptions(
+	operator: boolean,
+	workTools: string[],
+	env = process.env,
+	planTools: string[] = PLAN_TOOLS,
+): PlanStepOptions | undefined {
 	if (env.NERD_PLAN_STEP === "0") return undefined;
-	return { operator, workTools, answer: env.NERD_PLAN_ANSWER || DEFAULT_PLAN_ANSWER };
+	return { operator, workTools, planTools, answer: env.NERD_PLAN_ANSWER || DEFAULT_PLAN_ANSWER };
 }
 
 /**
@@ -192,7 +199,7 @@ export function planStep(pi: ExtensionAPI, opts: PlanStepOptions) {
 			questions = [];
 			assumptions = "";
 			answer = "";
-			pi.setActiveTools(PLAN_TOOLS);
+			pi.setActiveTools(opts.planTools);
 			return { message: { customType: "nerd-plan", content: planStepPrompt(), display: true } };
 		}
 		if (phase === "plan") {

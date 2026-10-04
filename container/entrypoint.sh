@@ -35,6 +35,8 @@
 #                       and its context from it.
 #   NERD_SSH_PORT       sshd's port in tui mode (2222)
 #   NERD_HEALTH_TIMEOUT seconds to wait for the server (task 900; tui 0 = no limit)
+#   NERD_WEB            1 (default): SearXNG on loopback for web_search; 0: off
+#   NERD_SEARXNG_PORT   its port (8888)
 # plus the agent's own NERD_* variables (agent/src/run.ts). Logs: /logs.
 set -uo pipefail
 
@@ -135,6 +137,24 @@ start_sshd() {
 }
 ssh_port=${NERD_SSH_PORT:-2222}
 
+# SearXNG for web_search (ticket 041), on loopback in this container, unless
+# NERD_WEB=0. Not fatal: without it web_search reports an error and the agent
+# still works; the log says why.
+start_searxng() {
+  [ "${NERD_WEB:-1}" = 0 ] && return 0
+  [ -x /opt/searxng/venv/bin/python ] || return 0
+  local port=${NERD_SEARXNG_PORT:-8888}
+  SEARXNG_SETTINGS_PATH=/opt/searxng/settings.yml SEARXNG_PORT=$port SEARXNG_BIND_ADDRESS=127.0.0.1 \
+    SEARXNG_SECRET=$(head -c 24 /dev/urandom | base64) PYTHONPATH=/opt/searxng/src \
+    /opt/searxng/venv/bin/python -m searx.webapp > /logs/searxng.log 2>&1 &
+  export SEARXNG_URL=http://127.0.0.1:$port WEB_SEARCH_PROVIDER=searxng
+  for _ in $(seq 30); do
+    curl -sf -m 2 "$SEARXNG_URL/healthz" >/dev/null && { say "SearXNG on $SEARXNG_URL (log /logs/searxng.log)"; return 0; }
+    sleep 1
+  done
+  say "SearXNG did not answer on $SEARXNG_URL in 30 s; web_search will fail (/logs/searxng.log)"
+}
+
 mode=task
 if [ "${1:-}" = tui ]; then
   mode=tui
@@ -143,6 +163,7 @@ else
   task=${*:-${NERD_TASK:-}}
   [ -n "$task" ] || die 'no task: docker run ... nerd:agent "<task>" (or NERD_TASK, or "tui")'
 fi
+start_searxng
 
 # The server is another container's (or the host's) to start: wait for it as
 # long as it may take to download and load the model, and say where it is if

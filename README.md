@@ -237,7 +237,7 @@ Server defaults, each overridable with `-e` on the server's container (through
 `NERD_SLOTS=1`, prompt cache off (`--cache-ram 0`: its KV snapshots overflow an
 8 GB card), extra flags in `NERD_LLAMA_ARGS`. The agent's own variables
 (`NERD_THINKING`, `NERD_VERIFY_N`, `NERD_SPEC_CHECK`, `NERD_BASH_TIMEOUT`,
-`NERD_PLAN_STEP`, `NERD_PLAN_ANSWER`, `NERD_LOOP_GUARD_N`, `NERD_PI_VCC`) are described in
+`NERD_PLAN_STEP`, `NERD_PLAN_ANSWER`, `NERD_LOOP_GUARD_N`, `NERD_PI_VCC`, `NERD_WEB`) are described in
 [`agent/src/run.ts`](agent/src/run.ts). `HF_TOKEN` is sent to Hugging Face if
 set. Header comments of [`Dockerfile`](Dockerfile) and
 [`container/entrypoint.sh`](container/entrypoint.sh) list the rest.
@@ -261,6 +261,21 @@ from 2 to 12 minutes each and growing with its summary; pi-vcc's 8 took no
 measurable time, its summaries stayed under 8.3K characters, and both agents
 finished the same requests. `NERD_PI_VCC=0` brings Pi's compaction back
 ([`agent/src/packages.ts`](agent/src/packages.ts)).
+
+**Web search.** The agent has `web_search` and `web_fetch`
+([rpiv-web-tools](https://www.npmjs.com/package/@juicesharp/rpiv-web-tools)),
+also in the plan step, since both only read. Search goes through
+[SearXNG](https://docs.searxng.org/), which runs inside the agent's container
+on `127.0.0.1:8888` (`NERD_SEARXNG_PORT`) and asks public engines (DuckDuckGo,
+Brave, Startpage, Mojeek, Wikipedia) without an account or key; nothing else in
+the image goes to the network on its own. `web_fetch` reads a page as text; it
+refuses localhost and private addresses (the agent checks its own app with
+`browse`). Cost: 526 tokens in every request (the tools' schemas and a
+shortened guidance). Asked to find the canonical wuxing cycles and cite its
+sources, the agent searched, read three Wikipedia pages and wrote both cycles
+correctly with the URLs. Public engines rate-limit and show CAPTCHAs at times;
+SearXNG then answers with what the others found. `NERD_WEB=0` turns both the
+tools and SearXNG off.
 
 ## Acceptance check
 

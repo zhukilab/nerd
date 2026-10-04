@@ -90,6 +90,27 @@ RUN set -eu; \
     curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" | grep " $f\$" | sha256sum -c -; \
     mkdir -p /opt/node; tar -xJf "$f" -C /opt/node --strip-components=1; rm "$f"
 
+# SearXNG for the agent's web_search (ticket 041; operator's permission to
+# install it, 2026-10-04): a metasearch engine that runs in the agent's
+# container on loopback and needs no cloud account or key. Source at a pinned
+# commit, its Python requirements (pinned by SearXNG) in a venv; the agent
+# image runs it with python3.11 from Ubuntu 22.04's universe (SearXNG imports
+# tomllib, 3.11+, although its setup.py says 3.10) and its built-in server:
+# one user, so no uWSGI/granian.
+FROM ubuntu:${UBUNTU_VERSION} AS searxng
+ARG SEARXNG_REPO=https://github.com/searxng/searxng
+ARG SEARXNG_REF=44b98e61024e27f625c69dfa27d47a79a4acfd50
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git ca-certificates python3.11 python3.11-venv \
+ && rm -rf /var/lib/apt/lists/*
+RUN set -eu; \
+    git init -q /opt/searxng/src; cd /opt/searxng/src; \
+    git fetch -q --depth 1 "${SEARXNG_REPO}" "${SEARXNG_REF}"; git checkout -q FETCH_HEAD; \
+    git rev-parse HEAD > /opt/searxng/REF; rm -rf .git docs tests client; \
+    python3.11 -m venv /opt/searxng/venv; \
+    /opt/searxng/venv/bin/pip install -q --no-cache-dir -U pip; \
+    /opt/searxng/venv/bin/pip install -q --no-cache-dir -r requirements.txt
+
 FROM node AS agent-build
 ENV PATH=/opt/node/bin:$PATH
 WORKDIR /opt/nerd/agent
@@ -103,7 +124,7 @@ FROM ubuntu:${UBUNTU_VERSION} AS agent
 # sshd and tmux (ncurses-term has tmux-256color); Pi's TUI looks for fd and rg
 # for file completion and would warn without them.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        tini curl ca-certificates git python3 procps less xz-utils \
+        tini curl ca-certificates git python3 python3.11 procps less xz-utils \
         openssh-server tmux ncurses-term ripgrep fd-find \
         iproute2 tcpdump netcat-openbsd socat \
  && rm -rf /var/lib/apt/lists/* \
@@ -130,6 +151,8 @@ RUN --mount=type=bind,from=agent-build,source=/opt/nerd/agent/node_modules/playw
     PLAYWRIGHT_BROWSERS_PATH=/opt/nerd/browsers /opt/node/bin/node /tmp/pw/cli.js install --with-deps --only-shell chromium \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=agent-build /opt/nerd/agent /opt/nerd/agent
+COPY --from=searxng /opt/searxng /opt/searxng
+COPY container/searxng.yml /opt/searxng/settings.yml
 COPY container/entrypoint.sh container/model.sh container/ssh-login.sh container/sshd_config /opt/nerd/
 COPY container/tmux.conf /etc/tmux.conf
 # pkill/pgrep that refuse -f/--full: a full-command-line pattern also matches

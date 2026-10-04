@@ -1,0 +1,31 @@
+# SearXNG for the agent's web_search (ticket 041): the entrypoint starts it in
+# the container, on loopback only, and points rpiv-web-tools at it
+# (SEARXNG_URL). Everything not set here is SearXNG's own default
+# (use_default_settings). The secret key comes from SEARXNG_SECRET, generated
+# on every start; the port from SEARXNG_PORT (NERD_SEARXNG_PORT, 8888).
+use_default_settings:
+  engines:
+    # General web search engines that need no key; fewer engines, fewer
+    # requests per query and fewer to be rate-limited by.
+    keep_only:
+      - duckduckgo
+      - brave
+      - startpage
+      - mojeek
+      - wikipedia
+general:
+  enable_metrics: false
+search:
+  safe_search: 0
+  # json is what web_search asks for; the default is html only (403 otherwise).
+  formats:
+    - html
+    - json
+server:
+  bind_address: "127.0.0.1"
+  # One user on loopback: the bot limiter would need valkey and protects nothing.
+  limiter: false
+  public_instance: false
+  image_proxy: false
+outgoing:
+  request_timeout: 5.0

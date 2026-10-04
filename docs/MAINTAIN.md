@@ -12,9 +12,10 @@ then a rebuild and the checks below. Nothing updates itself.
 | CUDA | `Dockerfile`: `CUDA_VERSION` (default), `./UP` picks 13.0.1 for sm_100+ | |
 | Ubuntu base | `Dockerfile`: `UBUNTU_VERSION` | |
 | Node.js | `Dockerfile`: `NODE_VERSION` | official tarball, hash checked |
-| Pi, Pi packages, Playwright, undici | `agent/package.json` (exact) + `agent/package-lock.json` | Pi packages: `@sting8k/pi-vcc` (`agent/src/packages.ts`) |
+| Pi, Pi packages, Playwright, undici | `agent/package.json` (exact) + `agent/package-lock.json` | Pi packages: `@sting8k/pi-vcc`, `@juicesharp/rpiv-web-tools` (`agent/src/packages.ts`) |
 | Chromium for `browse` | follows `playwright-core` | installed by Playwright's own installer |
 | the model | `container/model.sh`: `repo`, file, `size`, `sha` per variant; llama-server's arguments | used by the image and by `tools/llama-host.sh` |
+| SearXNG (web search) | `Dockerfile`: `SEARXNG_REPO`, `SEARXNG_REF` (a commit); its Python requirements are pinned by SearXNG itself | settings: `container/searxng.yml`; runs on python3.11 |
 
 ## Rebuild
 

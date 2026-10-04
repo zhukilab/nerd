@@ -197,9 +197,10 @@ async function runHeadless(
 	return cwd;
 }
 
-const READ_ONLY = ["find", "grep", "ls", "read"];
-// vcc_recall: pi-vcc is on by default (packages.ts).
-const WORK = ["bash", "edit", "read", "vcc_recall", "write"];
+// web_fetch, web_search: rpiv-web-tools is on by default and reads only, so
+// the plan turn has them too; vcc_recall: pi-vcc is on by default (packages.ts).
+const READ_ONLY = ["find", "grep", "ls", "read", "web_fetch", "web_search"];
+const WORK = ["bash", "edit", "read", "vcc_recall", "web_fetch", "web_search", "write"];
 
 test("headless: questions get NERD_PLAN_ANSWER, the final plan is committed, then the work has its tools", async () => {
 	const srv = await scriptedServer((n) =>
@@ -312,10 +313,17 @@ test("pi-vcc (default): loaded from node_modules, vcc_recall searches the sessio
 	}
 	const off = await scriptedServer(() => ({ text: "done" }));
 	try {
-		await runHeadless(off.url, "Hi", { NERD_PLAN_STEP: "0", NERD_PI_VCC: "0" });
-		assert.deepEqual(off.seen[0].tools, ["bash", "edit", "read", "write"], "NERD_PI_VCC=0: Pi's own compaction, no recall tool");
+		await runHeadless(off.url, "Hi", { NERD_PLAN_STEP: "0", NERD_PI_VCC: "0", NERD_WEB: "0" });
+		assert.deepEqual(off.seen[0].tools, ["bash", "edit", "read", "write"], "NERD_PI_VCC=0 NERD_WEB=0: no package tools");
 	} finally {
 		off.close();
+	}
+	const noweb = await scriptedServer(() => ({ text: "done" }));
+	try {
+		await runHeadless(noweb.url, "Hi", { NERD_PLAN_STEP: "0", NERD_WEB: "0" });
+		assert.deepEqual(noweb.seen[0].tools, ["bash", "edit", "read", "vcc_recall", "write"], "NERD_WEB=0: no web tools");
+	} finally {
+		noweb.close();
 	}
 });
 
