@@ -8,13 +8,13 @@ then a rebuild and the checks below. Nothing updates itself.
 
 | what | pinned in | |
 |---|---|---|
-| llama.cpp fork | `Dockerfile`: `LLAMA_REPO`, `LLAMA_REF` | PrismML's fork; stock llama.cpp cannot run the model |
+| llama.cpp fork | `Dockerfile`: `LLAMA_REPO`, `LLAMA_REF` | PrismML's fork; stock llama.cpp cannot run the model. `tools/llama-host.sh` (macOS) builds the same tag, read from the Dockerfile |
 | CUDA | `Dockerfile`: `CUDA_VERSION` (default), `./UP` picks 13.0.1 for sm_100+ | |
 | Ubuntu base | `Dockerfile`: `UBUNTU_VERSION` | |
 | Node.js | `Dockerfile`: `NODE_VERSION` | official tarball, hash checked |
 | Pi, Pi packages, Playwright, undici | `agent/package.json` (exact) + `agent/package-lock.json` | Pi packages: `@sting8k/pi-vcc` (`agent/src/packages.ts`) |
 | Chromium for `browse` | follows `playwright-core` | installed by Playwright's own installer |
-| the model | `container/entrypoint.sh`: `repo`, file, `size`, `sha` per variant | |
+| the model | `container/model.sh`: `repo`, file, `size`, `sha` per variant; llama-server's arguments | used by the image and by `tools/llama-host.sh` |
 
 ## Rebuild
 
@@ -42,7 +42,7 @@ layer cache makes a rebuild after an agent-only change take a minute; a new
 
 ## Updating the model
 
-The model files and their hashes are in `container/entrypoint.sh`. For a new
+The model files and their hashes are in `container/model.sh`. For a new
 upload of Bonsai 2, or another model in the same format:
 
 1. Read the file list with sizes and hashes from the Hugging Face API:

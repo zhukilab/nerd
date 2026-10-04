@@ -22,7 +22,19 @@ esac
 
 # Inside the container: works the same with published ports and with --network container:.
 inside() { docker exec "$NERD_NAME" "$@" 2>/dev/null; }
-if inside curl -sf -m 3 "http://127.0.0.1:$NERD_LLAMA_PORT/health" >/dev/null; then
+if [ "$NERD_LLAMA" = host ]; then
+  # The server on the host, seen from the container as the agent sees it.
+  base=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$NERD_NAME" 2>/dev/null | sed -n 's/^NERD_BASE_URL=//p')
+  base=${base:-$NERD_LLAMA_URL}
+  if inside curl -sf -m 3 "${base%/v1}/health" >/dev/null; then
+    model=$(inside curl -sf -m 3 "$base/models" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+    row OK llama "on the host, $base reached from the container, model ${model:-?}"
+  elif nerd_host_llama_up; then
+    row DOWN llama "answers on the host's 127.0.0.1:$NERD_LLAMA_PORT, but not from the container at $base (docs/MACOS.md, troubleshooting)"
+  else
+    row DOWN llama "no llama-server on the host: tools/llama-host.sh start"
+  fi
+elif inside curl -sf -m 3 "http://127.0.0.1:$NERD_LLAMA_PORT/health" >/dev/null; then
   model=$(inside curl -sf -m 3 "http://127.0.0.1:$NERD_LLAMA_PORT/v1/models" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
   row OK llama "/health ok on :$NERD_LLAMA_PORT, model ${model:-?}"
 elif docker logs "$NERD_NAME" 2>&1 | tr '\r' '\n' | grep -q 'downloading'; then

@@ -37,11 +37,20 @@ grep -q '^\(ssh-\|ecdsa-\|sk-\)' "$keys" || die "'$keys' does not look like a pu
 
 case "$NERD_MODEL_VARIANT" in q1|q2) ;; *) die "NERD_MODEL_VARIANT must be q1 or q2" ;; esac
 
+# llama-server on the host (macOS): it must be up before the agent starts.
+if [ "$NERD_LLAMA" = host ] && [ "$dry" = 0 ] && ! nerd_host_llama_up; then
+  die "NERD_LLAMA=host, but no llama-server answers on 127.0.0.1:$NERD_LLAMA_PORT: tools/llama-host.sh start (docs/MACOS.md)"
+fi
+
 # Image.
+read -r -a bargs <<< "$(nerd_build_args)"
 if [ "$build" = 1 ] || ! docker image inspect "$NERD_IMAGE" >/dev/null 2>&1; then
-  say "building $NERD_IMAGE (CUDA_ARCH=$NERD_CUDA_ARCH, CUDA_VERSION=$NERD_CUDA_VERSION, $(uname -m)); first build: 5-15 min plus the CUDA base image download"
-  run docker build -t "$NERD_IMAGE" \
-    --build-arg "CUDA_ARCH=$NERD_CUDA_ARCH" --build-arg "CUDA_VERSION=$NERD_CUDA_VERSION" "$NERD_ROOT"
+  if [ "$NERD_LLAMA" = host ]; then
+    say "building $NERD_IMAGE (without llama-server and CUDA: the server runs on the host; $(uname -m)); first build: 5-10 min"
+  else
+    say "building $NERD_IMAGE (CUDA_ARCH=$NERD_CUDA_ARCH, CUDA_VERSION=$NERD_CUDA_VERSION, $(uname -m)); first build: 5-15 min plus the CUDA base image download"
+  fi
+  run docker build -t "$NERD_IMAGE" "${bargs[@]}" "$NERD_ROOT"
 fi
 
 # Container: replaced if it exists (volumes are kept).
@@ -51,18 +60,27 @@ if docker container inspect "$NERD_NAME" >/dev/null 2>&1; then
 fi
 
 read -r -a gpu <<< "$(nerd_gpu_args)"
-args=(-d --name "$NERD_NAME" --restart unless-stopped "${gpu[@]}"
-  -e "NERD_MODEL_VARIANT=$NERD_MODEL_VARIANT" -e "NERD_CTX=$NERD_CTX"
-  -e "NERD_SSH_PORT=$NERD_SSH_PORT" -e "NERD_APP_PORT=$NERD_APP_PORT" -e "NERD_LLAMA_PORT=$NERD_LLAMA_PORT"
+args=(-d --name "$NERD_NAME" --restart unless-stopped ${gpu[@]+"${gpu[@]}"}
+  -e "NERD_SSH_PORT=$NERD_SSH_PORT" -e "NERD_APP_PORT=$NERD_APP_PORT"
   -e "NERD_AUTHORIZED_KEYS=$(cat "$keys")"
-  -v "$NERD_MODELS_VOLUME:/models" -v "$NERD_NAME-ssh:/ssh" -v "$NERD_NAME-logs:/logs")
+  -v "$NERD_NAME-ssh:/ssh" -v "$NERD_NAME-logs:/logs")
+if [ "$NERD_LLAMA" = host ]; then
+  # The model and its context are the host server's; the agent asks it.
+  # host-gateway: Docker Desktop resolves host.docker.internal itself, Linux
+  # needs the mapping.
+  args+=(-e "NERD_BASE_URL=$NERD_LLAMA_URL" --add-host host.docker.internal:host-gateway)
+else
+  args+=(-e "NERD_MODEL_VARIANT=$NERD_MODEL_VARIANT" -e "NERD_CTX=$NERD_CTX" -e "NERD_LLAMA_PORT=$NERD_LLAMA_PORT"
+    -v "$NERD_MODELS_VOLUME:/models")
+fi
 [ -n "${NERD_OPERATOR_URL:-}" ] && args+=(-e "NERD_OPERATOR_URL=$NERD_OPERATOR_URL")
 [ -n "${HF_TOKEN:-}" ] && args+=(-e "HF_TOKEN=$HF_TOKEN")
 if [ -n "${NERD_WORKSPACE:-}" ]; then
   ws=${NERD_WORKSPACE/#\~/$HOME}
   run mkdir -p "$ws"
+  # Docker Desktop (macOS) maps file owners itself; on Linux uid 1000 must own it.
   owner=$(stat -c %u "$ws" 2>/dev/null || echo "?")
-  [ "$owner" = 1000 ] || say "warning: $ws is owned by uid $owner; the agent (uid 1000) must be able to write it (sudo chown 1000:1000 '$ws')"
+  [ "$owner" = 1000 ] || [ "$(uname -s)" = Darwin ] || say "warning: $ws is owned by uid $owner; the agent (uid 1000) must be able to write it (sudo chown 1000:1000 '$ws')"
   args+=(-v "$ws:/workspace")
 else
   args+=(-v "$NERD_NAME-ws:/workspace")
@@ -80,7 +98,11 @@ if [ -n "${NERD_DOCKER_ARGS:-}" ]; then
   args+=("${extra[@]}")
 fi
 
-say "starting $NERD_NAME from $NERD_IMAGE ($NERD_MODEL_VARIANT, context $NERD_CTX, GPU: ${gpu[*]})"
+if [ "$NERD_LLAMA" = host ]; then
+  say "starting $NERD_NAME from $NERD_IMAGE (llama-server on the host: $NERD_LLAMA_URL)"
+else
+  say "starting $NERD_NAME from $NERD_IMAGE ($NERD_MODEL_VARIANT, context $NERD_CTX, GPU: ${gpu[*]})"
+fi
 run docker run "${args[@]}" "$NERD_IMAGE" tui >/dev/null
 
 host=$(nerd_host_name)
@@ -102,6 +124,8 @@ connect() {
     echo "  what the agent builds: http://$host:$NERD_APP_PORT  (set NERD_OPERATOR_URL so the agent names it too)"
   fi
   echo "  status: ./STATUS    stop: ./DOWN    logs: docker logs -f $NERD_NAME"
+  [ "$NERD_LLAMA" = host ] && echo "  the model: tools/llama-host.sh status | stop | logs (not stopped by ./DOWN)"
+  return 0
 }
 
 [ "$dry" = 1 ] && { connect; exit 0; }

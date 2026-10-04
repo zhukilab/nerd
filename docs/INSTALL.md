@@ -1,7 +1,9 @@
 # Installing nerd
 
 nerd needs a Linux machine with an NVIDIA GPU, Docker, and the NVIDIA
-Container Toolkit. Everything else (CUDA runtime, llama-server, Node.js, the
+Container Toolkit. **macOS on Apple silicon** runs the model on the Mac itself
+and the agent in its container: [MACOS.md](MACOS.md) (new, untested on a real
+Mac). Everything else (CUDA runtime, llama-server, Node.js, the
 agent, a headless browser) is inside the image, and the model is downloaded on
 first start.
 

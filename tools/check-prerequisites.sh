@@ -40,8 +40,14 @@ printf '%-8s %-16s %s\n' ------ ---- ------
 os=$(uname -s) arch=$(uname -m) wsl=0
 grep -qi microsoft /proc/version 2>/dev/null && wsl=1
 pretty=$( (. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-}") )
-if [ "$os" != Linux ]; then
-  row MISSING os "$os $arch" "nerd runs on Linux (or Windows through WSL2); see docs/INSTALL.md"
+if [ "$os" = Darwin ]; then
+  if [ "$arch" = arm64 ]; then row OK os "macOS $(sw_vers -productVersion 2>/dev/null) $arch (llama-server on the host with Metal, docs/MACOS.md)"
+  else row MISSING os "macOS $arch" "only Apple silicon Macs: an Intel Mac has no Metal GPU fast enough for the model"; fi
+  [ "$NERD_LLAMA" = host ] || row MISSING llama-mode "NERD_LLAMA=$NERD_LLAMA" "on macOS the server must run on the host: NERD_LLAMA=host (or leave it unset)"
+  bv=${BASH_VERSINFO[0]}
+  [ "$bv" -ge 4 ] || row MISSING bash "bash $BASH_VERSION (macOS ships 3.2)" "brew install bash (./UP and ./STATUS need bash 4+, first in PATH)"
+elif [ "$os" != Linux ]; then
+  row MISSING os "$os $arch" "nerd runs on Linux (or Windows through WSL2), or macOS on Apple silicon; see docs/INSTALL.md"
 else
   case "$arch" in
     x86_64|aarch64) row OK os "${pretty:-Linux} $arch$([ $wsl = 1 ] && echo ', WSL2')" ;;
@@ -78,9 +84,29 @@ else
   fi
 fi
 
-# --- NVIDIA driver and GPU ---------------------------------------------------------
+# --- llama-server on the host (NERD_LLAMA=host) ------------------------------------
 gpu_ok=0 vram_mib="" cc=""
-if ! command -v nvidia-smi >/dev/null 2>&1; then
+if [ "$NERD_LLAMA" = host ]; then
+  for t in cmake c++; do
+    if command -v "$t" >/dev/null 2>&1; then row OK "$t" "$(command -v "$t") (to build llama-server)"
+    else row MISSING "$t" "not found (tools/llama-host.sh build needs it)" "macOS: xcode-select --install; brew install cmake"; fi
+  done
+  hd=${NERD_HOST_DIR:-$HOME/.nerd}
+  if nerd_host_llama_up; then row OK llama-host "a llama-server answers on 127.0.0.1:$NERD_LLAMA_PORT"
+  elif [ -x "$hd/llama.cpp/build/bin/llama-server" ]; then row WARN llama-host "built, not running" "tools/llama-host.sh start, before ./UP"
+  else row WARN llama-host "not built yet" "tools/llama-host.sh start (builds, downloads the model, starts), before ./UP"; fi
+  # Unified memory: the model and its KV cache come out of RAM, and macOS lets
+  # the GPU have about two thirds of it.
+  case "$NERD_MODEL_VARIANT" in q2) base=7200 ;; *) base=5900 ;; esac
+  need_mib=$(( base + NERD_CTX * 23 / 1024 ))
+  mem=$(sysctl -n hw.memsize 2>/dev/null || echo 0)
+  gpu_mib=$(( mem / 1024 / 1024 * 2 / 3 ))
+  if [ "$gpu_mib" -gt 0 ] && [ "$need_mib" -gt "$gpu_mib" ]; then
+    row MISSING memory "$NERD_MODEL_VARIANT at context $NERD_CTX needs about $need_mib MiB; the GPU may use about $gpu_mib" "NERD_CTX=32768 in .env, or NERD_MODEL_VARIANT=q1"
+  elif [ "$gpu_mib" -gt 0 ]; then
+    row OK memory "$NERD_MODEL_VARIANT at context $NERD_CTX needs about $need_mib MiB of about $gpu_mib the GPU may use"
+  fi
+elif ! command -v nvidia-smi >/dev/null 2>&1; then
   if [ $wsl = 1 ]; then hint="install the NVIDIA driver on Windows (it provides the GPU to WSL2); do not install one inside WSL"
   else hint="install the NVIDIA driver for your GPU: https://www.nvidia.com/Download/index.aspx (Ubuntu: sudo ubuntu-drivers install)"; fi
   row MISSING nvidia-driver "nvidia-smi not found" "$hint"
@@ -110,7 +136,9 @@ else
 fi
 
 # --- container toolkit / CDI --------------------------------------------------------
-if [ $docker_ok = 1 ]; then
+if [ "$NERD_LLAMA" = host ]; then
+  :   # no GPU in the container
+elif [ $docker_ok = 1 ]; then
   cdi=0 rt=0
   nerd_have_cdi && nerd_docker_cdi && cdi=1
   docker info --format '{{json .Runtimes}}' 2>/dev/null | grep -q nvidia && rt=1
@@ -154,6 +182,8 @@ fi
 
 # --- RAM -----------------------------------------------------------------------------
 ram_kib=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null)
+[ -z "$ram_kib" ] && ram_kib=$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1024 ))
+[ "$ram_kib" = 0 ] && ram_kib=""
 if [ -n "$ram_kib" ]; then
   ram_gib=$((ram_kib / 1024 / 1024))
   if [ "$ram_gib" -lt 8 ]; then row MISSING ram "${ram_gib} GiB" "at least 8 GiB, 16 recommended (model file, Node, Chromium, the build)"
@@ -181,13 +211,13 @@ if [ -n "${NERD_NETWORK:-}" ]; then
 else
   ours=""; [ $docker_ok = 1 ] && ours=$(docker port "$NERD_NAME" 2>/dev/null)
   for pair in "ssh:$NERD_SSH_PORT" "app:$NERD_APP_PORT"; do
-    what=${pair%%:*} p=${pair#*:}
+    what=${pair%%:*} p=${pair#*:} WHAT=$(echo "${pair%%:*}" | tr a-z A-Z)
     if ! [[ "$p" =~ ^[0-9]+$ ]] || [ "$p" -lt 1 ] || [ "$p" -gt 65535 ]; then
-      row MISSING "port-$what" "'$p' is not a port" "fix NERD_${what^^}_PORT in .env"
+      row MISSING "port-$what" "'$p' is not a port" "fix NERD_${WHAT}_PORT in .env"
     elif grep -q ":$p\$" <<< "$ours"; then
       row OK "port-$what" "$p (published by the running $NERD_NAME)"
     elif nerd_port_busy "$p"; then
-      row MISSING "port-$what" "$p is in use" "choose a free port: NERD_${what^^}_PORT in .env (ss -ltnp shows who has it)"
+      row MISSING "port-$what" "$p is in use" "choose a free port: NERD_${WHAT}_PORT in .env (ss -ltnp shows who has it)"
     else
       row OK "port-$what" "$p free"
     fi

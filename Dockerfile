@@ -16,14 +16,22 @@
 #   docker build -t nerd --build-arg CUDA_ARCH=89 .                # sm_89
 #   docker build -t nerd --build-arg CUDA_ARCH=121 --build-arg CUDA_VERSION=13.0.1 .
 #                                                                  # GB10, aarch64
+#   docker build -t nerd:host --build-arg LLAMA=none --build-arg RUNTIME_BASE=ubuntu:22.04 .
+#                  # no llama-server and no CUDA: the server runs outside the
+#                  # container (macOS: on the host with Metal, docs/MACOS.md)
 #
 # Stock llama.cpp must not be substituted: it rejects Bonsai 2's PTQ1_0/PQ2_0,
-# or loads them silently and produces garbage. The fork's tag is pinned.
+# or loads them silently and produces garbage. The fork's tag is pinned
+# (tools/llama-host.sh builds the same tag on a Mac, reading it from here).
 
 ARG CUDA_VERSION=12.4.1
 ARG UBUNTU_VERSION=22.04
+# cuda: llama-server built here, in the image. none: a stub that says the
+# server is elsewhere; BuildKit then skips the CUDA build stage altogether.
+ARG LLAMA=cuda
+ARG RUNTIME_BASE=nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION}
 
-FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS llama
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS llama-cuda
 ARG CUDA_ARCH=86
 ARG LLAMA_REPO=https://github.com/PrismML-Eng/llama.cpp
 ARG LLAMA_REF=prism-b10743-adfffbe
@@ -41,6 +49,16 @@ RUN cmake -S /src -B /src/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
  && cmake --build /src/build -j "$(nproc)" --target llama-server \
  && install -D /src/build/bin/llama-server /out/llama-server \
  && git -C /src rev-parse HEAD > /out/llama-ref
+
+FROM ubuntu:${UBUNTU_VERSION} AS llama-none
+RUN mkdir /out \
+ && printf '%s\n' '#!/bin/sh' \
+        'echo "llama-server: not in this image (built with LLAMA=none); it runs outside, see NERD_BASE_URL" >&2' \
+        'exit 1' > /out/llama-server \
+ && chmod 755 /out/llama-server \
+ && echo none > /out/llama-ref
+
+FROM llama-${LLAMA} AS llama
 
 FROM ubuntu:${UBUNTU_VERSION} AS node
 ARG NODE_VERSION=24.21.0
@@ -62,7 +80,7 @@ COPY agent/package.json agent/package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund
 COPY agent/src ./src
 
-FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION}
+FROM ${RUNTIME_BASE}
 # What the agent's bash tool is likely to need for small projects, and what
 # the entrypoint uses (curl for the download and /health, tini as PID 1), and
 # for the tui mode sshd and tmux (ncurses-term has tmux-256color); Pi's TUI
@@ -97,7 +115,7 @@ RUN --mount=type=bind,from=agent,source=/opt/nerd/agent/node_modules/playwright-
 COPY --from=llama /out/llama-server /opt/llama/llama-server
 COPY --from=llama /out/llama-ref /opt/llama/REF
 COPY --from=agent /opt/nerd/agent /opt/nerd/agent
-COPY container/entrypoint.sh container/ssh-login.sh container/sshd_config /opt/nerd/
+COPY container/entrypoint.sh container/model.sh container/ssh-login.sh container/sshd_config /opt/nerd/
 COPY container/tmux.conf /etc/tmux.conf
 # pkill/pgrep that refuse -f/--full: a full-command-line pattern also matches
 # the agent's own shell, which then kills itself (container/pkill-guard.sh).

@@ -16,7 +16,8 @@ no cloud, no API key, nothing leaves the machine except the model download.
 
 ## Quick start
 
-On a Linux machine (or WSL2) with an NVIDIA GPU of 8 GB or more:
+On a Linux machine (or WSL2) with an NVIDIA GPU of 8 GB or more (a Mac with
+Apple silicon: [docs/MACOS.md](docs/MACOS.md)):
 
 ```sh
 git clone --depth=1 https://github.com/zhukilab/nerd && cd nerd
@@ -43,6 +44,7 @@ the address you open the app at) go in `.env`: `cp env.example .env`.
 | | |
 |---|---|
 | [docs/INSTALL.md](docs/INSTALL.md) | platforms (x86_64 + NVIDIA, WSL2, aarch64 GB10), VRAM/disk/RAM per model variant, prerequisites |
+| [docs/MACOS.md](docs/MACOS.md) | macOS on Apple silicon: the model on the Mac (Metal), the agent in its container — new, untested on a real Mac |
 | [docs/OPERATE.md](docs/OPERATE.md) | `./UP` `./DOWN` `./STATUS`, `.env`, connecting, keys, ports, the operator address, PuTTY, headless runs |
 | [docs/MAINTAIN.md](docs/MAINTAIN.md) | updating the model, Pi, the llama.cpp fork, Node; rebuilding; troubleshooting |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | what runs where and why |

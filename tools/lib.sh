@@ -89,7 +89,30 @@ nerd_settings() {
     # Blackwell (10.0 and up) needs CUDA 12.8+; 13.0.1 is the tested one (GB10).
     if [ "${NERD_CUDA_ARCH:0:3}" -ge 100 ] 2>/dev/null; then NERD_CUDA_VERSION=13.0.1; else NERD_CUDA_VERSION=12.4.1; fi
   fi
-  NERD_IMAGE=${NERD_IMAGE:-nerd:sm${NERD_CUDA_ARCH//;/-}}
+  # Where llama-server runs: container (this image, with CUDA) or host (on the
+  # machine itself, tools/llama-host.sh; the image is built without CUDA).
+  # auto: host on macOS, where docker cannot reach the GPU, container elsewhere.
+  NERD_LLAMA=${NERD_LLAMA:-auto}
+  if [ "$NERD_LLAMA" = auto ]; then
+    if [ "$(uname -s)" = Darwin ]; then NERD_LLAMA=host; else NERD_LLAMA=container; fi
+  fi
+  if [ "$NERD_LLAMA" = host ]; then
+    NERD_IMAGE=${NERD_IMAGE:-nerd:host}
+  else
+    NERD_IMAGE=${NERD_IMAGE:-nerd:sm${NERD_CUDA_ARCH//;/-}}
+  fi
+  # The host's llama-server as the container reaches it (Docker Desktop names
+  # the host host.docker.internal; on Linux ./UP maps it to the host gateway).
+  NERD_LLAMA_URL=${NERD_LLAMA_URL:-http://host.docker.internal:$NERD_LLAMA_PORT/v1}
+}
+
+# docker build arguments for the image of this NERD_LLAMA.
+nerd_build_args() {
+  if [ "$NERD_LLAMA" = host ]; then
+    echo "--build-arg LLAMA=none --build-arg RUNTIME_BASE=ubuntu:22.04"
+  else
+    echo "--build-arg CUDA_ARCH=$NERD_CUDA_ARCH --build-arg CUDA_VERSION=$NERD_CUDA_VERSION"
+  fi
 }
 
 # The docker daemon resolves CDI devices (docker info lists spec directories:
@@ -98,8 +121,9 @@ nerd_docker_cdi() {
   docker info --format '{{json .CDISpecDirs}}' 2>/dev/null | grep -q '/'
 }
 
-# docker run arguments that pass the GPU.
+# docker run arguments that pass the GPU (none when llama-server is on the host).
 nerd_gpu_args() {
+  [ "$NERD_LLAMA" = host ] && return 0
   case "$NERD_GPU" in
     cdi) echo "--device nvidia.com/gpu=all" ;;
     gpus) echo "--gpus all" ;;
@@ -110,6 +134,11 @@ nerd_gpu_args() {
 # The name under which this machine is probably reached (for the hints only).
 nerd_host_name() {
   hostname -f 2>/dev/null || hostname 2>/dev/null || echo "<this-host>"
+}
+
+# The host's llama-server answers /health (NERD_LLAMA=host).
+nerd_host_llama_up() {
+  curl -sf -m 3 "http://127.0.0.1:$NERD_LLAMA_PORT/health" >/dev/null 2>&1
 }
 
 # Port $1 has a listener on this host (TCP, any address).

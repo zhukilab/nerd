@@ -29,6 +29,12 @@ and cannot reach the host's processes or files. One image is also one thing to
 build, pin and move between machines. The cost is a large image (CUDA
 runtime libraries are most of it) and one model server per instance.
 
+The exception is macOS ([MACOS.md](MACOS.md)): docker there cannot reach the
+GPU, so llama-server runs on the Mac itself (Metal, `tools/llama-host.sh`) and
+the container, built without CUDA (`LLAMA=none`), gets it as `NERD_BASE_URL`.
+The sandbox is unchanged: the agent and what it starts are still in the
+container; only the model server, which runs no commands, is outside.
+
 ## The pieces
 
 **Model.** Bonsai 2 27B by PrismML, a ternary-quantized 27B model (PTQ1_0,

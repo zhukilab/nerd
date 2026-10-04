@@ -28,23 +28,22 @@
 #   NERD_SSH_PORT       sshd's port in tui mode (2222)
 #   NERD_HEALTH_TIMEOUT seconds to wait for the server (900)
 #   HF_TOKEN            sent to Hugging Face if set
+#   NERD_BASE_URL       llama-server outside the container, e.g.
+#                       http://host.docker.internal:8080/v1 (macOS: the server
+#                       runs on the host with Metal, tools/llama-host.sh). Then
+#                       no model is downloaded and no server started here; the
+#                       agent takes the model and context from that server.
+#                       An image built with LLAMA=none needs it.
 # plus the agent's own NERD_* variables (agent/src/run.ts). Logs: /logs.
 set -uo pipefail
 
 say() { echo "[nerd $(date +%H:%M:%S)] $*" >&2; }
 die() { say "ERROR: $*"; exit 1; }
 
-repo=prism-ml/Ternary-Bonsai-2-27B-gguf
-# File, size and sha256 as the Hugging Face API lists them
-# (/api/models/<repo>/tree/main, lfs.oid is the sha256), pinned so a changed
-# upstream file is noticed rather than used.
-case "${NERD_MODEL_VARIANT:-q1}" in
-  q1) file=Ternary-Bonsai-2-27B-PTQ1_0.gguf; size=5946648928
-      sha=53107f530aa52eb00912263ab1ee29bd199261c87cd7b4ad4ca1318c1fe33ee3 ;;
-  q2) file=Ternary-Bonsai-2-27B-PQ2_0.gguf; size=7206168928
-      sha=3907dc1658db1f78a9826bf8d5bcb8dc65db0d466388937af57f2294fae62ec1 ;;
-  *) die "NERD_MODEL_VARIANT must be q1 or q2, not '${NERD_MODEL_VARIANT}'" ;;
-esac
+# repo, file, size, sha of the variant; llama-server's arguments (model.sh).
+# shellcheck source=container/model.sh
+. "$(dirname "$0")/model.sh"
+nerd_model "${NERD_MODEL_VARIANT:-q1}" || die "NERD_MODEL_VARIANT must be q1 or q2, not '${NERD_MODEL_VARIANT}'"
 
 fetch_model() {
   local m=/models/$file part=/models/$file.part ok=/models/$file.sha256-ok
@@ -108,7 +107,16 @@ export HOME=${HOME:-/home/nerd}
 mkdir -p /logs 2>/dev/null
 [ "${1:-}" = tui ] && start_sshd
 
-if [ -n "${NERD_MODEL_FILE:-}" ]; then
+external=${NERD_BASE_URL:-}
+if [ -n "$external" ]; then
+  case "${1:-}" in serve|fetch) die "$1: NERD_BASE_URL is set, the server is outside this container ($external)" ;; esac
+elif [ ! -s /opt/llama/REF ] || [ "$(cat /opt/llama/REF)" = none ]; then
+  die "this image has no llama-server (built with LLAMA=none): set NERD_BASE_URL to a server outside it (docs/MACOS.md)"
+fi
+
+if [ -n "$external" ]; then
+  :
+elif [ -n "${NERD_MODEL_FILE:-}" ]; then
   model=/models/$NERD_MODEL_FILE
   [ -f "$model" ] || die "NERD_MODEL_FILE: $model not found"
 else
@@ -119,13 +127,8 @@ fi
 [ "${1:-}" = fetch ] && exit 0
 
 port=${NERD_LLAMA_PORT:-${NERD_PORT:-8080}}; host=${NERD_HOST:-127.0.0.1}
-# --cache-ram 0: llama-server's prompt cache keeps KV snapshots of earlier
-# prompts in device memory (1.3 GiB each at 32K); one of them on top of
-# Bonsai 2 at 32K overflows an 8 GB card, silently on WDDM drivers.
 # shellcheck disable=SC2206
-server=(llama-server -m "$model" --alias "bonsai2-${NERD_MODEL_VARIANT:-q1}"
-  -c "${NERD_CTX:-65536}" -ctk "${NERD_KV:-q4_0}" -ctv "${NERD_KV:-q4_0}"
-  -ngl "${NERD_NGL:-99}" -fa on -np "${NERD_SLOTS:-1}" --cache-ram 0 --jinja
+server=(llama-server -m "${model:-}" $(nerd_server_args)
   --host "$host" --port "$port" ${NERD_LLAMA_ARGS:-})
 
 if [ "${1:-}" = serve ]; then say "serving: ${server[*]}"; exec "${server[@]}"; fi
@@ -139,28 +142,42 @@ else
 fi
 
 stamp=$(date +%Y%m%d-%H%M%S)
-slog=/logs/server-$stamp.log
-say "starting llama-server (log $slog): ${server[*]}"
 t0=$SECONDS
-"${server[@]}" > "$slog" 2>&1 &
-spid=$!
+spid=""
 stop_server() {
-  kill -0 "$spid" 2>/dev/null || return 0
+  [ -n "$spid" ] && kill -0 "$spid" 2>/dev/null || return 0
   kill "$spid"; for _ in $(seq 30); do kill -0 "$spid" 2>/dev/null || return 0; sleep 1; done
   kill -9 "$spid" 2>/dev/null
 }
 trap stop_server EXIT
 trap 'exit 143' TERM INT
 
-for _ in $(seq "${NERD_HEALTH_TIMEOUT:-900}"); do
-  kill -0 "$spid" 2>/dev/null || { tail -30 "$slog" >&2; die "llama-server exited during startup"; }
-  curl -sf -m 2 "http://127.0.0.1:$port/health" >/dev/null && break
-  sleep 1
-done
-curl -sf -m 2 "http://127.0.0.1:$port/health" >/dev/null || { tail -30 "$slog" >&2; die "llama-server not healthy"; }
-say "llama-server healthy in $((SECONDS - t0)) s"
-
-export NERD_BASE_URL="http://127.0.0.1:$port/v1"
+if [ -n "$external" ]; then
+  # The server is someone else's to start; wait for it as for our own (it may
+  # still be loading the model), and say where it is if it never answers.
+  health=${external%/}; health=${health%/v1}/health
+  say "llama-server outside the container: $external; waiting for $health"
+  for _ in $(seq "${NERD_HEALTH_TIMEOUT:-900}"); do
+    curl -sf -m 2 "$health" >/dev/null && break
+    sleep 1
+  done
+  curl -sf -m 2 "$health" >/dev/null || die "no llama-server at $health (on macOS: tools/llama-host.sh start on the host; docs/MACOS.md)"
+  say "llama-server at $external healthy after $((SECONDS - t0)) s"
+  export NERD_BASE_URL=$external
+else
+  slog=/logs/server-$stamp.log
+  say "starting llama-server (log $slog): ${server[*]}"
+  "${server[@]}" > "$slog" 2>&1 &
+  spid=$!
+  for _ in $(seq "${NERD_HEALTH_TIMEOUT:-900}"); do
+    kill -0 "$spid" 2>/dev/null || { tail -30 "$slog" >&2; die "llama-server exited during startup"; }
+    curl -sf -m 2 "http://127.0.0.1:$port/health" >/dev/null && break
+    sleep 1
+  done
+  curl -sf -m 2 "http://127.0.0.1:$port/health" >/dev/null || { tail -30 "$slog" >&2; die "llama-server not healthy"; }
+  say "llama-server healthy in $((SECONDS - t0)) s"
+  export NERD_BASE_URL="http://127.0.0.1:$port/v1"
+fi
 
 if [ "$mode" = tui ]; then
   # Pi's TUI in tmux session "nerd"; it restarts with --continue if it exits,
@@ -173,8 +190,10 @@ if [ "$mode" = tui ]; then
     "while :; do node /opt/nerd/agent/src/tui.ts /workspace --continue; echo '[pi exited; restarting in 3 s]'; sleep 3; done" \
     || die "tmux session did not start"
   say "Pi in tmux session 'nerd'; ssh -p $ssh_port nerd@<host> attaches to it"
-  # Up while sshd runs; if llama-server dies, the container ends too.
-  wait -n "$sshd_pid" "$spid"
+  # Up while sshd runs; if our llama-server dies, the container ends too. An
+  # outside server going away is not ours to restart: Pi reports it and
+  # retries, and works again when it is back.
+  if [ -n "$spid" ]; then wait -n "$sshd_pid" "$spid"; else wait "$sshd_pid"; fi
   rc=$?
   say "sshd or llama-server exited ($rc)"
   tmux kill-server 2>/dev/null
