@@ -1,0 +1,29 @@
+# sshd of the `tui` mode. It runs as the unprivileged user nerd (the agent's
+# user), so it can log in only as nerd, listens on an unprivileged port, and
+# cannot use PAM; keys only.
+# The entrypoint passes -p $NERD_SSH_PORT (default 2222), which overrides this.
+Port 2222
+HostKey /ssh/ssh_host_ed25519_key
+HostKey /ssh/ssh_host_rsa_key
+PidFile none
+AuthorizedKeysFile .ssh/authorized_keys
+PubkeyAuthentication yes
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+UsePAM no
+PermitRootLogin no
+AllowUsers nerd
+# Without PAM /etc/environment is not read; the locale is set here and again
+# in the login script. Without a UTF-8 LANG, tmux draws borders as "qqqq" in PuTTY.
+SetEnv LANG=C.UTF-8 LC_ALL=C.UTF-8
+# A login attaches to the agent's tmux session; a command (ssh host tmux ...)
+# runs as it is.
+ForceCommand /opt/nerd/ssh-login.sh
+# Port forwarding stays on: `ssh -L 8000:127.0.0.1:8000` reaches the app port
+# without publishing it.
+AllowTcpForwarding yes
+X11Forwarding no
+PrintMotd no
+PrintLastLog no
+ClientAliveInterval 30
+ClientAliveCountMax 4

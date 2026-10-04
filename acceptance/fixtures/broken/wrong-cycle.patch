@@ -1,0 +1,24 @@
+diff -ruN a/core.js wrong-cycle/core.js
+--- a/core.js	2026-10-02 20:29:39.155503857 +0200
++++ wrong-cycle/core.js	2026-10-02 20:29:42.965450968 +0200
+@@ -13,7 +13,7 @@
+ export const GLYPHS = { wood: "木", fire: "火", earth: "土", metal: "金", water: "水" };
+ 
+ // Generation (sheng): each element feeds the next.
+-export const GENERATES = { wood: "fire", fire: "earth", earth: "metal", metal: "water", water: "wood" };
++export const GENERATES = { wood: "fire", fire: "earth", earth: "water", water: "metal", metal: "wood" };
+ 
+ // Overcoming (ke): each element overcomes the one two steps ahead.
+ export const OVERCOMES = { wood: "earth", earth: "water", water: "fire", fire: "metal", metal: "wood" };
+diff -ruN a/test/core.test.js wrong-cycle/test/core.test.js
+--- a/test/core.test.js	2026-10-02 20:29:39.158837144 +0200
++++ wrong-cycle/test/core.test.js	2026-10-02 20:29:45.382084087 +0200
+@@ -4,7 +4,7 @@
+ import { makeBot } from "../bots.js";
+ 
+ test("generation cycle", () => {
+-	assert.deepEqual(GENERATES, { wood: "fire", fire: "earth", earth: "metal", metal: "water", water: "wood" });
++	assert.deepEqual(GENERATES, { wood: "fire", fire: "earth", earth: "water", water: "metal", metal: "wood" });
+ });
+ 
+ test("overcoming cycle", () => {

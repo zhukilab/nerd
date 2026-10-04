@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# Start nerd: build the image if it is missing, (re)create the container in
+# tui mode with a restart policy, wait until the model is served, and print how
+# to connect. Settings: .env (see env.example). Docs: docs/OPERATE.md.
+#
+#   ./UP              build if needed, start, wait for the model
+#   ./UP --build      rebuild the image first (after git pull)
+#   ./UP --no-wait    start and return; ./STATUS tells when it is ready
+#   ./UP --dry-run    print the docker commands, run nothing
+set -euo pipefail
+# shellcheck source=tools/lib.sh
+. "$(dirname "$0")/tools/lib.sh"
+
+build=0 wait=1 dry=0
+for a in "$@"; do
+  case "$a" in
+    --build) build=1 ;;
+    --no-wait) wait=0 ;;
+    --dry-run) dry=1 ;;
+    -h|--help) sed -n '2,10p' "$0"; exit 0 ;;
+    *) echo "UP: unknown argument '$a' (--build, --no-wait, --dry-run)" >&2; exit 2 ;;
+  esac
+done
+
+nerd_load_env
+nerd_settings
+say() { echo "[UP] $*"; }
+die() { echo "[UP] ERROR: $*" >&2; exit 1; }
+run() { if [ "$dry" = 1 ]; then { printf '+'; printf ' %q' "$@"; echo; } >&2; else "$@"; fi; }
+
+command -v docker >/dev/null || die "docker not found: tools/install-prerequisites.sh"
+docker info >/dev/null 2>&1 || die "docker is not usable by $(id -un) (daemon down, or not in group docker): tools/check-prerequisites.sh"
+
+keys=$(nerd_keys_file) || die "no ssh public key: set NERD_AUTHORIZED_KEYS_FILE in .env, or ssh-keygen -t ed25519"
+[ -s "$keys" ] || die "public key file '$keys' is missing or empty"
+grep -q '^\(ssh-\|ecdsa-\|sk-\)' "$keys" || die "'$keys' does not look like a public key (ssh-ed25519 ...)"
+
+case "$NERD_MODEL_VARIANT" in q1|q2) ;; *) die "NERD_MODEL_VARIANT must be q1 or q2" ;; esac
+
+# Image.
+if [ "$build" = 1 ] || ! docker image inspect "$NERD_IMAGE" >/dev/null 2>&1; then
+  say "building $NERD_IMAGE (CUDA_ARCH=$NERD_CUDA_ARCH, CUDA_VERSION=$NERD_CUDA_VERSION, $(uname -m)); first build: 5-15 min plus the CUDA base image download"
+  run docker build -t "$NERD_IMAGE" \
+    --build-arg "CUDA_ARCH=$NERD_CUDA_ARCH" --build-arg "CUDA_VERSION=$NERD_CUDA_VERSION" "$NERD_ROOT"
+fi
+
+# Container: replaced if it exists (volumes are kept).
+if docker container inspect "$NERD_NAME" >/dev/null 2>&1; then
+  say "replacing the existing container $NERD_NAME (volumes kept)"
+  run docker rm -f "$NERD_NAME" >/dev/null
+fi
+
+read -r -a gpu <<< "$(nerd_gpu_args)"
+args=(-d --name "$NERD_NAME" --restart unless-stopped "${gpu[@]}"
+  -e "NERD_MODEL_VARIANT=$NERD_MODEL_VARIANT" -e "NERD_CTX=$NERD_CTX"
+  -e "NERD_SSH_PORT=$NERD_SSH_PORT" -e "NERD_APP_PORT=$NERD_APP_PORT" -e "NERD_LLAMA_PORT=$NERD_LLAMA_PORT"
+  -e "NERD_AUTHORIZED_KEYS=$(cat "$keys")"
+  -v "$NERD_MODELS_VOLUME:/models" -v "$NERD_NAME-ssh:/ssh" -v "$NERD_NAME-logs:/logs")
+[ -n "${NERD_OPERATOR_URL:-}" ] && args+=(-e "NERD_OPERATOR_URL=$NERD_OPERATOR_URL")
+[ -n "${HF_TOKEN:-}" ] && args+=(-e "HF_TOKEN=$HF_TOKEN")
+if [ -n "${NERD_WORKSPACE:-}" ]; then
+  ws=${NERD_WORKSPACE/#\~/$HOME}
+  run mkdir -p "$ws"
+  owner=$(stat -c %u "$ws" 2>/dev/null || echo "?")
+  [ "$owner" = 1000 ] || say "warning: $ws is owned by uid $owner; the agent (uid 1000) must be able to write it (sudo chown 1000:1000 '$ws')"
+  args+=(-v "$ws:/workspace")
+else
+  args+=(-v "$NERD_NAME-ws:/workspace")
+fi
+if [ -n "${NERD_NETWORK:-}" ]; then
+  args+=(--network "$NERD_NETWORK")
+else
+  for p in "$NERD_SSH_PORT" "$NERD_APP_PORT"; do
+    if nerd_port_busy "$p"; then die "port $p is in use on this host: choose another in .env"; fi
+    args+=(-p "$NERD_BIND:$p:$p")
+  done
+fi
+if [ -n "${NERD_DOCKER_ARGS:-}" ]; then
+  read -r -a extra <<< "$NERD_DOCKER_ARGS"
+  args+=("${extra[@]}")
+fi
+
+say "starting $NERD_NAME from $NERD_IMAGE ($NERD_MODEL_VARIANT, context $NERD_CTX, GPU: ${gpu[*]})"
+run docker run "${args[@]}" "$NERD_IMAGE" tui >/dev/null
+
+host=$(nerd_host_name)
+connect() {
+  echo
+  echo "Connect:"
+  if [ -n "${NERD_NETWORK:-}" ]; then
+    echo "  ssh -p $NERD_SSH_PORT nerd@<address of $NERD_NETWORK>"
+  elif [ "$NERD_BIND" = 127.0.0.1 ]; then
+    echo "  ssh -p $NERD_SSH_PORT nerd@localhost        (ports bound to 127.0.0.1: this machine only)"
+  else
+    echo "  ssh -p $NERD_SSH_PORT nerd@$host        (from this machine: nerd@localhost)"
+  fi
+  echo "  log in with the private key that matches $keys; detach with Ctrl-b d"
+  if [ -n "${NERD_OPERATOR_URL:-}" ]; then
+    echo "  what the agent builds: $NERD_OPERATOR_URL"
+  else
+    [ "$NERD_BIND" = 127.0.0.1 ] && host=localhost
+    echo "  what the agent builds: http://$host:$NERD_APP_PORT  (set NERD_OPERATOR_URL so the agent names it too)"
+  fi
+  echo "  status: ./STATUS    stop: ./DOWN    logs: docker logs -f $NERD_NAME"
+}
+
+[ "$dry" = 1 ] && { connect; exit 0; }
+if [ "$wait" = 0 ]; then
+  say "started; the model may still be downloading (docker logs -f $NERD_NAME)"; connect; exit 0
+fi
+
+# Wait for "Pi in tmux session" in the log: the model is downloaded, checked
+# and served. A first start downloads 6-7 GB.
+say "waiting for the model (first start downloads 6-7 GB; Ctrl-C stops waiting, not the container)"
+# The entrypoint's own lines ("[nerd hh:mm:ss] ...") are shown as they come;
+# curl's progress meter once a minute.
+seen=0 tick=0
+while :; do
+  state=$(docker inspect -f '{{.State.Status}} {{.RestartCount}}' "$NERD_NAME" 2>/dev/null || echo "gone 0")
+  if [ "${state%% *}" != running ] || [ "${state##* }" != 0 ]; then
+    docker logs --tail 30 "$NERD_NAME" 2>&1 | tr '\r' '\n' | tail -30 | sed 's/^/  | /'
+    die "the container stopped or restarted ($state); see the log above and docs/MAINTAIN.md#troubleshooting"
+  fi
+  logs=$(docker logs "$NERD_NAME" 2>&1 | tr '\r' '\n')
+  lines=$(grep '^\[nerd ' <<< "$logs" || true)
+  n=$(grep -c . <<< "$lines" || true)
+  if [ "$n" -gt "$seen" ]; then tail -n "$((n - seen))" <<< "$lines" | sed 's/^/  | /'; seen=$n; fi
+  grep -q "Pi in tmux session" <<< "$lines" && break
+  tick=$((tick + 1))
+  if [ $((tick % 12)) = 0 ]; then
+    progress=$(grep -v '^\[nerd ' <<< "$logs" | grep -E '^ *[0-9]+ ' | tail -1 || true)
+    if [ -n "$progress" ]; then echo "  | curl: $progress"; fi
+  fi
+  sleep 5
+done
+say "ready"
+connect

@@ -1,0 +1,4 @@
+.git
+agent/node_modules
+*.gguf
+.env

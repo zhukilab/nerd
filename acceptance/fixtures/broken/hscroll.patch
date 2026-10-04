@@ -1,0 +1,11 @@
+diff -ruN a/public/style.css hscroll/public/style.css
+--- a/public/style.css	2026-10-02 20:29:39.155503857 +0200
++++ hscroll/public/style.css	2026-10-02 20:29:50.832008431 +0200
+@@ -1,6 +1,7 @@
+ body { font-family: sans-serif; margin: 0; }
+ main { max-width: 40rem; margin: 0 auto; padding: 1rem; }
+ .row, .board { display: flex; flex-wrap: wrap; gap: 0.5rem; }
++.board { flex-wrap: nowrap; min-width: 36rem; }
+ button { font-size: 1.1rem; padding: 0.6rem 0.9rem; }
+ table { border-collapse: collapse; }
+ td, th { border: 1px solid #999; padding: 0.3rem 0.6rem; }

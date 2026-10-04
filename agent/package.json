@@ -1,0 +1,27 @@
+{
+  "name": "nerd-agent",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Long-running coding agent on a local model: Pi's agent core against llama-server.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.19"
+  },
+  "scripts": {
+    "run": "node src/run.ts",
+    "test": "node --test 'test/**/*.test.ts'",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "1.0.0",
+    "@earendil-works/pi-ai": "1.0.0",
+    "@earendil-works/pi-coding-agent": "1.0.0",
+    "@sting8k/pi-vcc": "0.8.1",
+    "playwright-core": "1.63.0",
+    "undici": "6.28.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "typescript": "^5.9.3"
+  }
+}

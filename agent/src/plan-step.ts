@@ -1,0 +1,230 @@
+// Questions and plan before work (ticket 043). Asked by prompt alone, the
+// model never asked before coding (0 of 4 runs in ticket 038, none in the
+// first acceptance run) and planned once, after the code. So the harness makes
+// the first turn of a new task a separate step: the model may read but not
+// change anything, and replies with its open questions and a plan. Then:
+//
+//   - questions: in the TUI the turn ends and the operator answers; headless,
+//     the answer is NERD_PLAN_ANSWER («на твоё усмотрение» by default). The
+//     model then gives the final plan, still without write tools;
+//   - no questions (or after the answer): the harness writes the plan into
+//     PLAN.md, commits it (git init if needed), gives the tools back and the
+//     run goes on with the work in the same turn.
+//
+// A new task is the first user message of a session, or one sent with
+// `/task <text>` in the TUI. Any other message is a remark within the task.
+// NERD_PLAN_STEP=0 turns the step off.
+
+import { execFileSync } from "node:child_process";
+import { existsSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+/** Tools of the questions-and-plan turn: reading only. */
+export const PLAN_TOOLS = ["read", "ls", "grep", "find"];
+export const DEFAULT_PLAN_ANSWER = "на твоё усмотрение";
+export const PLAN_FILE = "PLAN.md";
+
+export function planStepPrompt(): string {
+	// The first version asked for QUESTIONS straight away, and the model
+	// answered "none" to an open request (run 1 of ticket 043). Listing the
+	// choices it would otherwise guess comes first now; the questions are
+	// picked from that list.
+	return `[harness] A new task. This turn is for questions and a plan only: you can read files, not change them.
+Reply in exactly this form:
+ASSUMPTIONS
+- <each choice the request leaves open that you would otherwise make by guessing>
+QUESTIONS
+- <a short question for each assumption the operator would want to decide>   (or the single word: none)
+PLAN
+1. <step> — check: <how you will check it>
+DONE WHEN
+- <what the operator can do and see when it is finished>`;
+}
+
+export function finalPlanPrompt(answer?: string): string {
+	const a = answer === undefined ? "" : `The operator's answer: ${answer}\n`;
+	return `${a}[harness] Now the final plan in the same form, with PLAN and DONE WHEN and no QUESTIONS. Files still cannot be changed in this turn.`;
+}
+
+export function workPrompt(saved: string): string {
+	return `[harness] ${saved} All tools are available again. Carry out the plan step by step, checking each step as it says.`;
+}
+
+export interface PlanReply {
+	/** The ASSUMPTIONS section as written, without its heading ("" when absent). */
+	assumptions: string;
+	questions: string[];
+	/** The reply from PLAN on (or the whole reply when there is no PLAN heading). */
+	plan: string;
+}
+
+/** A heading line: the word alone, or followed by a colon ("QUESTIONS: none"), in any markdown dress. */
+const heading = (words: string) => new RegExp(`^[ \\t#*_>]*${words}[ \\t*_]*(:[ \\t*_]*|$)`, "im");
+const NONE = /^[-*\d.\s()]*(none|нет|no questions)[.)]?$/i;
+
+/** Splits the model's reply into its assumptions, open questions and plan. */
+export function parsePlanReply(text: string): PlanReply {
+	const a = heading("ASSUMPTIONS").exec(text);
+	const q = heading("QUESTIONS").exec(text);
+	const p = heading("PLAN").exec(text);
+	const plan = p ? text.slice(p.index).trim() : text.trim();
+	const after = (m: RegExpExecArray) => [q, p].filter((h) => h && h.index > m.index).map((h) => h!.index);
+	const assumptions = a ? text.slice(a.index + a[0].length, Math.min(text.length, ...after(a))).trim() : "";
+	// Under a QUESTIONS heading every item is a question; without one, only
+	// lines ending in "?" before the plan are.
+	const qText = q
+		? text.slice(q.index + q[0].length, Math.min(text.length, ...after(q)))
+		: text.slice(a ? Math.min(text.length, ...after(a)) : 0, p ? p.index : undefined);
+	const questions = qText
+		.split("\n")
+		.map((l) => l.trim())
+		.filter((l) => l && !NONE.test(l))
+		.filter((l) => q !== null || l.endsWith("?"))
+		.map((l) => l.replace(/^[-*]\s+|^\d+[.)]\s+/, ""));
+	return { assumptions, questions, plan };
+}
+
+export function planFileText(
+	task: string,
+	reply: Pick<PlanReply, "assumptions" | "plan">,
+	qa?: { questions: string[]; answer: string },
+): string {
+	const quoted = task
+		.trim()
+		.split("\n")
+		.map((l) => `> ${l}`)
+		.join("\n");
+	const assumed = reply.assumptions ? `\n## Assumptions\n\n${reply.assumptions}\n` : "";
+	const asked = qa?.questions.length
+		? `\n## Questions\n\n${qa.questions.map((q) => `- ${q}`).join("\n")}\n\nAnswer: ${qa.answer}\n`
+		: "";
+	const body = reply.plan
+		.replace(heading("PLAN"), "## Steps\n")
+		.replace(heading("DONE WHEN"), "\n## Done when\n");
+	return `# Plan\n\n## Task\n\n${quoted}\n${assumed}${asked}\n${body}\n`;
+}
+
+/** Writes PLAN.md into cwd and commits it; returns what to tell the model. */
+export function savePlan(cwd: string, text: string): string {
+	writeFileSync(join(cwd, PLAN_FILE), text);
+	const git = (...args: string[]) => execFileSync("git", args, { cwd, stdio: "pipe" });
+	try {
+		if (!existsSync(join(cwd, ".git"))) git("init", "-q");
+		git("add", PLAN_FILE);
+		git("commit", "-q", "-m", "Plan", "--", PLAN_FILE);
+		return `Your plan is saved in ${PLAN_FILE} and committed.`;
+	} catch (e) {
+		const why = e instanceof Error ? (e as { stderr?: Buffer }).stderr?.toString().trim() || e.message : String(e);
+		return `Your plan is saved in ${PLAN_FILE} (not committed: ${why.split("\n")[0]}).`;
+	}
+}
+
+type Msg = { role?: string; content?: unknown };
+
+function lastAssistantText(messages: Msg[]): string {
+	const m = [...messages].reverse().find((x) => x.role === "assistant");
+	if (!m) return "";
+	if (typeof m.content === "string") return m.content;
+	return Array.isArray(m.content)
+		? m.content
+				.filter((c: { type?: string }) => c.type === "text")
+				.map((c: { text?: string }) => c.text ?? "")
+				.join("\n")
+		: "";
+}
+
+export interface PlanStepOptions {
+	/** A person answers questions (TUI); otherwise `answer` is given for them. */
+	operator: boolean;
+	answer?: string;
+	/** The tools of the work, given back after the plan. */
+	workTools: string[];
+}
+
+export function planStepOptions(operator: boolean, workTools: string[], env = process.env): PlanStepOptions | undefined {
+	if (env.NERD_PLAN_STEP === "0") return undefined;
+	return { operator, workTools, answer: env.NERD_PLAN_ANSWER || DEFAULT_PLAN_ANSWER };
+}
+
+/**
+ * The step as a Pi extension. Phases: "work" (normal), "plan" (the first
+ * turn of a task), "answered" (questions asked, the final plan is next).
+ */
+export function planStep(pi: ExtensionAPI, opts: PlanStepOptions) {
+	let phase: "work" | "plan" | "answered" = "work";
+	let task = "";
+	let questions: string[] = [];
+	let assumptions = "";
+	let answer = "";
+	let explicitTask = false;
+
+	const toWork = () => {
+		phase = "work";
+		pi.setActiveTools(opts.workTools);
+	};
+
+	pi.on("session_start", () => {
+		phase = "work";
+	});
+
+	pi.registerCommand("task", {
+		description: "Start a new task: questions and a plan first, then the work (ticket 043)",
+		handler: async (args, ctx) => {
+			const text = args.trim();
+			if (!text) {
+				ctx.ui.notify("task: give the task text", "error");
+				return;
+			}
+			explicitTask = true;
+			pi.sendUserMessage(text, ctx.isIdle() ? undefined : { deliverAs: "followUp" });
+		},
+	});
+
+	pi.on("before_agent_start", (event, ctx) => {
+		const earlier = ctx.sessionManager
+			.getBranch()
+			.some((e: { type?: string; message?: Msg }) => e.type === "message" && e.message?.role === "user");
+		if (explicitTask || !earlier) {
+			explicitTask = false;
+			phase = "plan";
+			task = event.prompt;
+			questions = [];
+			assumptions = "";
+			answer = "";
+			pi.setActiveTools(PLAN_TOOLS);
+			return { message: { customType: "nerd-plan", content: planStepPrompt(), display: true } };
+		}
+		if (phase === "plan") {
+			// The operator's answer to the questions (or any reply to them).
+			phase = "answered";
+			answer = event.prompt;
+			return { message: { customType: "nerd-plan", content: finalPlanPrompt(), display: true } };
+		}
+		return;
+	});
+
+	pi.on("agent_before_settle", (event, ctx) => {
+		if (phase === "work" || event.outcome !== "completed") return;
+		const reply = parsePlanReply(lastAssistantText(event.context.contextMessages as Msg[]));
+		if (phase === "plan" && reply.questions.length) {
+			questions = reply.questions;
+			assumptions = reply.assumptions;
+			if (opts.operator) return; // the turn ends; the operator answers
+			phase = "answered";
+			answer = opts.answer ?? DEFAULT_PLAN_ANSWER;
+			return {
+				entries: [{ type: "custom_message" as const, customType: "nerd-plan", content: finalPlanPrompt(answer), display: true }],
+				continue: true,
+			};
+		}
+		// The final plan may leave out the assumptions it was asked about.
+		const kept = { assumptions: reply.assumptions || assumptions, plan: reply.plan };
+		const saved = savePlan(ctx.cwd, planFileText(task, kept, questions.length ? { questions, answer } : undefined));
+		toWork();
+		return {
+			entries: [{ type: "custom_message" as const, customType: "nerd-plan", content: workPrompt(saved), display: true }],
+			continue: true,
+		};
+	});
+}

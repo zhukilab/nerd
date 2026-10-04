@@ -1,0 +1,11 @@
+diff -ruN a/server.js no-server/server.js
+--- a/server.js	2026-10-02 20:29:39.155503857 +0200
++++ no-server/server.js	2026-10-02 20:29:47.255391415 +0200
+@@ -4,6 +4,7 @@
+ import { readFile } from "node:fs/promises";
+ import { randomBytes } from "node:crypto";
+ import { extname, join } from "node:path";
++import { mime } from "./static.js";
+ import { ELEMENTS, NAMES, GLYPHS, GENERATES, OVERCOMES, WINS_NEEDED, newMatch, playRound } from "./core.js";
+ 
+ const port = Number(process.env.PORT ?? 8000);

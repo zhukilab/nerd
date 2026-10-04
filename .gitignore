@@ -1,0 +1,5 @@
+# Model weights are fetched by source and hash, never committed.
+*.gguf
+node_modules/
+# Local settings of ./UP (template: env.example).
+.env

@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>У-син</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<main>
+<h1>У-син: пять стихий</h1>
+<p><a href="/rules">Правила</a></p>
+<section id="menu">
+  <h2>С ботом</h2>
+  <div class="row" id="bots"></div>
+  <h2>С человеком</h2>
+  <div class="row"><button id="online">Игра по сети</button></div>
+</section>
+<section id="game" hidden>
+  <p id="info"></p>
+  <p id="score"></p>
+  <div class="board" id="board"></div>
+  <p id="status"></p>
+  <button id="again" hidden>Новая игра</button>
+</section>
+</main>
+<script type="module" src="/app.js"></script>
+</body>
+</html>

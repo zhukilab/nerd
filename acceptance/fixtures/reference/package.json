@@ -1,0 +1,12 @@
+{
+  "name": "wuxing-reference",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Reference mini-game for the acceptance checker's self-test",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test",
+    "rank": "node rank.js 200"
+  }
+}

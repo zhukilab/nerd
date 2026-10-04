@@ -1,0 +1,12 @@
+diff -ruN a/bots.js equal-bots/bots.js
+--- a/bots.js	2026-10-02 20:29:39.155503857 +0200
++++ equal-bots/bots.js	2026-10-02 20:29:49.032033418 +0200
+@@ -23,7 +23,7 @@
+ 			const myLast = mine.at(-1);
+ 			const oppLast = theirs.at(-1);
+ 			if (!myLast) return pick();
+-			if (level === 1) return rng() < 0.6 ? myLast : pick();
++			if (level >= 1) return rng() < 0.6 ? myLast : pick();
+ 			if (rng() < 0.1) return pick();
+ 			if (level === 2) return counter(oppLast);
+ 			const predicted = hits.counter > hits.repeat ? counter(myLast) : oppLast;

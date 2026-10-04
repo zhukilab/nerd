@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Is nerd up? Container state, llama-server's /health, sshd and the app port.
+# Exit 0 when the container runs, the model is served and ssh answers.
+set -uo pipefail
+# shellcheck source=tools/lib.sh
+. "$(dirname "$0")/tools/lib.sh"
+nerd_load_env
+nerd_settings
+
+bad=0
+row() { printf '%-8s %-14s %s\n' "$1" "$2" "$3"; [ "$1" = OK ] || [ "$1" = INFO ] || bad=1; }
+
+state=$(docker inspect -f '{{.State.Status}} since {{.State.StartedAt}}, restarts {{.RestartCount}}, image {{.Config.Image}}' "$NERD_NAME" 2>/dev/null)
+if [ -z "$state" ]; then
+  row DOWN container "no container $NERD_NAME (./UP starts it)"
+  exit 1
+fi
+case "$state" in
+  running*) row OK container "$NERD_NAME $state" ;;
+  *) row DOWN container "$NERD_NAME $state"; exit 1 ;;
+esac
+
+# Inside the container: works the same with published ports and with --network container:.
+inside() { docker exec "$NERD_NAME" "$@" 2>/dev/null; }
+if inside curl -sf -m 3 "http://127.0.0.1:$NERD_LLAMA_PORT/health" >/dev/null; then
+  model=$(inside curl -sf -m 3 "http://127.0.0.1:$NERD_LLAMA_PORT/v1/models" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+  row OK llama "/health ok on :$NERD_LLAMA_PORT, model ${model:-?}"
+elif docker logs "$NERD_NAME" 2>&1 | tr '\r' '\n' | grep -q 'downloading'; then
+  row WAIT llama "not serving yet; the model is downloading or loading (docker logs -f $NERD_NAME)"
+else
+  row WAIT llama "not serving yet (docker logs --tail 30 $NERD_NAME)"
+fi
+
+if inside timeout 3 bash -c "exec 3<>/dev/tcp/127.0.0.1/$NERD_SSH_PORT; head -c 7 <&3" | grep -q '^SSH-2'; then
+  row OK ssh "sshd answers on :$NERD_SSH_PORT"
+else
+  row DOWN ssh "sshd does not answer on :$NERD_SSH_PORT"
+fi
+if inside tmux has-session -t nerd; then
+  row OK agent "Pi runs in tmux session 'nerd'"
+else
+  row WAIT agent "no tmux session yet (starts once the model is served)"
+fi
+
+if inside timeout 3 bash -c "exec 3<>/dev/tcp/127.0.0.1/$NERD_APP_PORT"; then
+  row INFO app "something listens on :$NERD_APP_PORT (what the agent built)"
+else
+  row INFO app "nothing on :$NERD_APP_PORT yet (the agent serves there when it builds a web app)"
+fi
+
+pub=$(docker port "$NERD_NAME" 2>/dev/null | tr '\n' ' ')
+row INFO published "${pub:-none (network ${NERD_NETWORK:-?})}"
+exit "$bad"
