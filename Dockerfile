@@ -1,7 +1,14 @@
-# nerd in one container: the agent, llama-server from PrismML's llama.cpp fork,
-# and Bonsai 2 (downloaded into the models volume on first start).
+# nerd in two containers from one Dockerfile, two targets:
+#   server  llama-server from PrismML's llama.cpp fork with CUDA, and Bonsai 2
+#           (downloaded into the models volume on first start). The GPU is here.
+#   agent   the agent (Pi), sshd and tmux for the conversation, a headless
+#           browser, the tools for small projects. No CUDA, no GPU: it talks to
+#           the server over HTTP (NERD_BASE_URL). The default target.
+# ./UP builds both and runs them side by side (docs/ARCHITECTURE.md, "Why two
+# containers"); on macOS the server runs on the Mac instead (docs/MACOS.md) and
+# only the agent image is built.
 #
-# One Dockerfile for every machine. Build args pick the GPU, not the model:
+# Build args pick the GPU, not the model (server only):
 #   CUDA_ARCH     compute capability without the dot: 86 (RTX 30xx), 89 (RTX
 #                 40xx), 121 (GB10, DGX Spark), or several separated by ';'.
 #                 The fork's CMake turns 12X into 12Xa (Blackwell-specific code)
@@ -12,13 +19,11 @@
 # The model variant (q1 | q2) is chosen at run time: NERD_MODEL_VARIANT.
 # Tested: x86_64 + sm_86 + CUDA 12.4.1, and aarch64 + sm_121 + CUDA 13.0.1.
 #
-#   docker build -t nerd .                                         # sm_86
-#   docker build -t nerd --build-arg CUDA_ARCH=89 .                # sm_89
-#   docker build -t nerd --build-arg CUDA_ARCH=121 --build-arg CUDA_VERSION=13.0.1 .
-#                                                                  # GB10, aarch64
-#   docker build -t nerd:host --build-arg LLAMA=none --build-arg RUNTIME_BASE=ubuntu:22.04 .
-#                  # no llama-server and no CUDA: the server runs outside the
-#                  # container (macOS: on the host with Metal, docs/MACOS.md)
+#   docker build -t nerd:agent .
+#   docker build -t nerd:server-sm86 --target server .                    # RTX 30xx
+#   docker build -t nerd:server-sm89 --target server --build-arg CUDA_ARCH=89 .
+#   docker build -t nerd:server-sm121 --target server --build-arg CUDA_ARCH=121 \
+#       --build-arg CUDA_VERSION=13.0.1 .                                 # GB10, aarch64
 #
 # Stock llama.cpp must not be substituted: it rejects Bonsai 2's PTQ1_0/PQ2_0,
 # or loads them silently and produces garbage. The fork's tag is pinned
@@ -26,12 +31,8 @@
 
 ARG CUDA_VERSION=12.4.1
 ARG UBUNTU_VERSION=22.04
-# cuda: llama-server built here, in the image. none: a stub that says the
-# server is elsewhere; BuildKit then skips the CUDA build stage altogether.
-ARG LLAMA=cuda
-ARG RUNTIME_BASE=nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION}
 
-FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS llama-cuda
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS llama
 ARG CUDA_ARCH=86
 ARG LLAMA_REPO=https://github.com/PrismML-Eng/llama.cpp
 ARG LLAMA_REF=prism-b10743-adfffbe
@@ -50,16 +51,32 @@ RUN cmake -S /src -B /src/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
  && install -D /src/build/bin/llama-server /out/llama-server \
  && git -C /src rev-parse HEAD > /out/llama-ref
 
-FROM ubuntu:${UBUNTU_VERSION} AS llama-none
-RUN mkdir /out \
- && printf '%s\n' '#!/bin/sh' \
-        'echo "llama-server: not in this image (built with LLAMA=none); it runs outside, see NERD_BASE_URL" >&2' \
-        'exit 1' > /out/llama-server \
- && chmod 755 /out/llama-server \
- && echo none > /out/llama-ref
+# --- server ------------------------------------------------------------------
+FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION} AS server
+# curl for the model download and /health, tini as PID 1.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        tini libgomp1 curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=llama /out/llama-server /opt/llama/llama-server
+COPY --from=llama /out/llama-ref /opt/llama/REF
+COPY container/entrypoint.sh container/model.sh /opt/nerd/
+# Every library llama-server needs must be in the image, except the driver's
+# libcuda, which the NVIDIA container runtime mounts at run time.
+RUN ! ldd /opt/llama/llama-server | grep 'not found' | grep -v 'libcuda\.so'
+# uid 1000 as in the agent image: the models volume of earlier versions is
+# owned by it.
+RUN useradd -m -u 1000 -s /bin/bash nerd \
+ && mkdir -p /models /logs && chown nerd:nerd /models /logs
+# 0.0.0.0: the agent is another container. ./UP publishes no port for it; with
+# a shared network namespace (NERD_NETWORK=container:...) it passes 127.0.0.1.
+ENV PATH=/opt/llama:$PATH NERD_MODEL_VARIANT=q1 NERD_HOST=0.0.0.0 LANG=C.UTF-8
+USER nerd
+VOLUME ["/models"]
+EXPOSE 8080
+ENTRYPOINT ["tini", "-g", "--", "/opt/nerd/entrypoint.sh"]
+CMD ["serve"]
 
-FROM llama-${LLAMA} AS llama
-
+# --- agent -------------------------------------------------------------------
 FROM ubuntu:${UBUNTU_VERSION} AS node
 ARG NODE_VERSION=24.21.0
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates xz-utils \
@@ -73,20 +90,20 @@ RUN set -eu; \
     curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" | grep " $f\$" | sha256sum -c -; \
     mkdir -p /opt/node; tar -xJf "$f" -C /opt/node --strip-components=1; rm "$f"
 
-FROM node AS agent
+FROM node AS agent-build
 ENV PATH=/opt/node/bin:$PATH
 WORKDIR /opt/nerd/agent
 COPY agent/package.json agent/package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund
 COPY agent/src ./src
 
-FROM ${RUNTIME_BASE}
+FROM ubuntu:${UBUNTU_VERSION} AS agent
 # What the agent's bash tool is likely to need for small projects, and what
-# the entrypoint uses (curl for the download and /health, tini as PID 1), and
-# for the tui mode sshd and tmux (ncurses-term has tmux-256color); Pi's TUI
-# looks for fd and rg for file completion and would warn without them.
+# the entrypoint uses (curl for /health, tini as PID 1), and for the tui mode
+# sshd and tmux (ncurses-term has tmux-256color); Pi's TUI looks for fd and rg
+# for file completion and would warn without them.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        tini libgomp1 curl ca-certificates git python3 procps less xz-utils \
+        tini curl ca-certificates git python3 procps less xz-utils \
         openssh-server tmux ncurses-term ripgrep fd-find \
         iproute2 tcpdump netcat-openbsd socat \
  && rm -rf /var/lib/apt/lists/* \
@@ -96,7 +113,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # PAM and sets the same in its own config, but a stock login gets it too.
 # Without a UTF-8 LANG tmux draws borders as "qqqq" in PuTTY.
 RUN printf '%s\n' 'LANG=C.UTF-8' 'LC_ALL=C.UTF-8' \
-        'PATH="/opt/node/bin:/opt/llama:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' \
+        'PATH="/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' \
         > /etc/environment \
  && mkdir -p /run/sshd
 ENV LANG=C.UTF-8
@@ -109,12 +126,10 @@ COPY --from=node /opt/node /opt/node
 # Adds about 0.55 GB: the shell 266 MB, libraries and fonts 282 MB (CJK and
 # Cyrillic included). A hand-picked library list would save ~150 MB (mesa,
 # llvm, xvfb) but could break silently on the next Playwright version.
-RUN --mount=type=bind,from=agent,source=/opt/nerd/agent/node_modules/playwright-core,target=/tmp/pw \
+RUN --mount=type=bind,from=agent-build,source=/opt/nerd/agent/node_modules/playwright-core,target=/tmp/pw \
     PLAYWRIGHT_BROWSERS_PATH=/opt/nerd/browsers /opt/node/bin/node /tmp/pw/cli.js install --with-deps --only-shell chromium \
  && rm -rf /var/lib/apt/lists/*
-COPY --from=llama /out/llama-server /opt/llama/llama-server
-COPY --from=llama /out/llama-ref /opt/llama/REF
-COPY --from=agent /opt/nerd/agent /opt/nerd/agent
+COPY --from=agent-build /opt/nerd/agent /opt/nerd/agent
 COPY container/entrypoint.sh container/model.sh container/ssh-login.sh container/sshd_config /opt/nerd/
 COPY container/tmux.conf /etc/tmux.conf
 # pkill/pgrep that refuse -f/--full: a full-command-line pattern also matches
@@ -125,17 +140,14 @@ COPY --chmod=755 container/pkill-guard.sh /usr/local/bin/pgrep
 COPY --chmod=755 container/test-pkill-guard.sh /opt/nerd/
 COPY --chmod=755 container/browse.sh /usr/local/bin/browse
 COPY --chmod=755 container/test-browse.sh /opt/nerd/
-# Every library llama-server needs must be in the image, except the driver's
-# libcuda, which the NVIDIA container runtime mounts at run time.
-RUN ! ldd /opt/llama/llama-server | grep 'not found' | grep -v 'libcuda\.so'
 # The agent runs whatever the model asks for, so not as root. The mount points
 # exist in the image, owned by nerd, so fresh named volumes inherit that owner.
 # Password "*" instead of useradd's "!": no password can match, but the
 # account is not "locked", which sshd without PAM would refuse even for a key.
 RUN useradd -m -u 1000 -s /bin/bash nerd \
  && usermod -p '*' nerd \
- && mkdir -p /models /workspace /logs /ssh \
- && chown nerd:nerd /models /workspace /logs /ssh \
+ && mkdir -p /workspace /logs /ssh \
+ && chown nerd:nerd /workspace /logs /ssh \
  && chmod 700 /ssh \
  && git config --system user.name "nerd agent" \
  && git config --system user.email nerd@localhost \
@@ -143,12 +155,11 @@ RUN useradd -m -u 1000 -s /bin/bash nerd \
 # Above: a git identity for the agent's commits. Without one the first commit
 # fails ("unable to auto-detect email address"), as it did in ticket 038; a
 # repository's own config still overrides it.
-ENV PATH=/opt/node/bin:/opt/llama:$PATH \
-    NERD_MODEL_VARIANT=q1
+ENV PATH=/opt/node/bin:$PATH
 USER nerd
 WORKDIR /workspace
 # tui mode: 2222 ssh, 8000 the app the agent builds (defaults of NERD_SSH_PORT
 # and NERD_APP_PORT).
 EXPOSE 2222 8000
-VOLUME ["/models", "/workspace", "/logs", "/ssh"]
+VOLUME ["/workspace", "/logs", "/ssh"]
 ENTRYPOINT ["tini", "-g", "--", "/opt/nerd/entrypoint.sh"]

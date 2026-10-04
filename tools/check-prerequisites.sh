@@ -125,7 +125,7 @@ else
   if [ -n "$dcuda" ] && ! nerd_ver_ge "$dcuda" "$need"; then
     row MISSING cuda "image needs CUDA $NERD_CUDA_VERSION, the driver supports $dcuda" "update the NVIDIA driver, or set NERD_CUDA_VERSION in .env to one the driver supports (12.4.1 needs driver 550+)"
   else
-    row OK cuda "build: CUDA_ARCH=$NERD_CUDA_ARCH CUDA_VERSION=$NERD_CUDA_VERSION, image $NERD_IMAGE"
+    row OK cuda "build: CUDA_ARCH=$NERD_CUDA_ARCH CUDA_VERSION=$NERD_CUDA_VERSION, server image $NERD_SERVER_IMAGE"
   fi
   # Compute capability 7.5 and up is what the fork's CUDA code targets well;
   # older cards are untested.

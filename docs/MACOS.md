@@ -18,7 +18,7 @@ macOS                                         Docker Desktop (Linux VM)
 ┌───────────────────────────────┐            ┌────────────────────────────────┐
 │ llama-server (Metal, the GPU) │ ◀── HTTP ─ │ nerd: the agent (Pi), sshd,    │
 │ Bonsai 2, 127.0.0.1:8080      │            │ headless browser, /workspace   │
-│ tools/llama-host.sh           │            │ ./UP  (image nerd:host)        │
+│ tools/llama-host.sh           │            │ ./UP  (image nerd:agent)       │
 └───────────────────────────────┘            └────────────────────────────────┘
                                                   ▲ ssh -p 2222 nerd@localhost
 ```
@@ -64,7 +64,7 @@ cp env.example .env                     # optional; NERD_CTX=32768 here if memor
 tools/llama-host.sh start               # first time: clones and builds llama-server with
                                         # Metal (~5 min), downloads the model (6 GB),
                                         # checks its sha256, starts it, waits until it answers
-./UP                                    # first time: builds the image nerd:host (~5-10 min),
+./UP                                    # first time: builds the image nerd:agent (~5-10 min),
                                         # starts the agent's container, prints how to connect
 ssh -p 2222 nerd@localhost
 ```
@@ -87,7 +87,7 @@ llama.cpp source and build, `models/`, `llama-server.log`.
 | start again (after a reboot too) | `tools/llama-host.sh start`, then `./UP` |
 | the server's log | `tools/llama-host.sh logs` (Ctrl-C ends the view, not the server) |
 | update | `git pull`, `tools/llama-host.sh stop && tools/llama-host.sh start` (rebuilds only if the pinned tag changed), `./UP --build` |
-| remove | `./DOWN --purge`, `tools/llama-host.sh stop`, `rm -rf ~/.nerd`, `docker image rm nerd:host` |
+| remove | `./DOWN --purge`, `tools/llama-host.sh stop`, `rm -rf ~/.nerd`, `docker image rm nerd:agent` |
 
 The container has a restart policy; started before the server, it waits for it up
 to 15 minutes and then stops with "no llama-server at …" (Docker restarts it).

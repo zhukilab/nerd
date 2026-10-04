@@ -3,23 +3,29 @@
 ## Start, stop, status
 
 ```sh
-./UP                  # build the image if missing, (re)create the container, wait for the model, print how to connect
+./UP                  # build the images if missing, start the server and the agent, wait, print how to connect
 ./UP --build          # rebuild first (after git pull)
 ./UP --no-wait        # return at once; ./STATUS says when it is ready
 ./UP --dry-run        # print the docker commands only
-./STATUS              # container, llama-server /health, sshd, the agent's tmux session, the app port
-./DOWN                # stop and remove the container; volumes stay
+./STATUS              # both containers, llama-server as the agent reaches it, sshd, the agent's tmux session, the app port
+./DOWN                # stop and remove both containers; volumes stay
+./DOWN --agent        # only the agent; the model stays loaded
 ./DOWN --purge        # ... and delete the workspace, logs/conversations, ssh host keys
 ./DOWN --purge-models # ... and the model volume too
 ```
 
-The container runs with `--restart unless-stopped`: it comes back after a
-reboot or a docker restart, and stays down after `./DOWN` or `docker stop`.
-`./UP` on a running instance replaces the container and keeps the volumes:
-the conversation continues, processes the agent started (a web server) do not.
+Two containers: the server `<name>-llm` (llama-server with the model, the GPU)
+and the agent `<name>` (Pi, sshd, the workspace), on the network `<name>-net`
+(docs/ARCHITECTURE.md). Both run with `--restart unless-stopped`: they come
+back after a reboot or a docker restart, and stay down after `./DOWN` or
+`docker stop`. `./UP` on a running instance replaces the agent's container and
+keeps the volumes: the conversation continues, processes the agent started (a
+web server) do not. The server's container is kept if it runs with the same
+image and settings, so the model is not reloaded; a change of variant,
+context or image replaces it.
 
 The first start downloads the model (6-7 GB, resumable, checked against a
-pinned sha256); later starts take seconds. `./UP` shows the progress.
+pinned sha256); later starts take seconds. `./UP` shows the progress of both.
 
 ## Settings: `.env`
 
@@ -29,22 +35,25 @@ environment wins over the file (`NERD_NAME=test ./UP`).
 
 | setting | default | |
 |---|---|---|
-| `NERD_NAME` | `nerd` | container name; volumes are `<name>-ws`, `<name>-ssh`, `<name>-logs` |
-| `NERD_IMAGE` | `nerd:sm<arch>` | image tag |
-| `NERD_CUDA_ARCH`, `NERD_CUDA_VERSION` | detected | build arguments (see INSTALL.md) |
+| `NERD_NAME` | `nerd` | the agent's container; the server's is `<name>-llm`, the network `<name>-net`, volumes `<name>-ws`, `<name>-ssh`, `<name>-logs` |
+| `NERD_IMAGE` | `nerd:agent` | the agent's image tag |
+| `NERD_SERVER_IMAGE` | `nerd:server-sm<arch>` | the server's image tag |
+| `NERD_CUDA_ARCH`, `NERD_CUDA_VERSION` | detected | the server's build arguments (see INSTALL.md) |
 | `NERD_GPU` | `auto` | `cdi`, `gpus` or `auto` |
+| `NERD_LLAMA` | `auto` | `container` (Linux) or `host` (macOS: the server on the machine, MACOS.md) |
 | `NERD_MODEL_VARIANT` | `q1` | `q1` or `q2` |
 | `NERD_CTX` | `65536` | context in tokens |
 | `NERD_SSH_PORT` | `2222` | ssh into the agent's terminal |
 | `NERD_APP_PORT` | `8000` | where the agent serves what it builds |
-| `NERD_LLAMA_PORT` | `8080` | llama-server, inside the container only |
+| `NERD_LLAMA_PORT` | `8080` | llama-server's port on `<name>-net` (not published), or on the Mac |
 | `NERD_BIND` | `0.0.0.0` | host address the ports are published on; `127.0.0.1` keeps them local |
 | `NERD_AUTHORIZED_KEYS_FILE` | `~/.ssh/id_ed25519.pub` (or ecdsa, rsa) | who may log in |
 | `NERD_OPERATOR_URL` | none | the address you open the app at, told to the agent |
 | `NERD_WORKSPACE` | volume `<name>-ws` | a host directory instead (writable by uid 1000) |
 | `NERD_MODELS_VOLUME` | `nerd-models` | shared by all instances on the machine |
-| `NERD_NETWORK` | none | `container:<name>`: join another container's network, publish nothing |
-| `NERD_DOCKER_ARGS` | none | more `docker run` arguments, e.g. `-e NERD_VERIFY_N=2` |
+| `NERD_NETWORK` | none | `container:<name>`: both join another container's network, publish nothing |
+| `NERD_DOCKER_ARGS` | none | more `docker run` arguments for the agent, e.g. `-e NERD_VERIFY_N=2` |
+| `NERD_SERVER_DOCKER_ARGS` | none | the same for the server, e.g. `-e HTTPS_PROXY=...` or `-e NERD_LLAMA_ARGS=...` |
 | `HF_TOKEN` | none | sent to Hugging Face if set |
 
 The agent's own variables (`NERD_THINKING`, `NERD_VERIFY_N`,
@@ -54,8 +63,11 @@ The agent's own variables (`NERD_THINKING`, `NERD_VERIFY_N`,
 
 **Several instances on one machine:** give each its own `NERD_NAME` and
 ports (a separate checkout, or `NERD_NAME=b NERD_SSH_PORT=2223
-NERD_APP_PORT=8001 ./UP`). They share the model volume. Each loads its own
-copy of the model into GPU memory, so two need twice the VRAM.
+NERD_APP_PORT=8001 ./UP`). They share the model volume. Each has its own
+server and loads its own copy of the model into GPU memory, so two need twice
+the VRAM. (Several agents on one server — llama-server with more slots — is
+possible by hand: `NERD_SLOTS` and `NERD_CTX` for the server, `NERD_BASE_URL`
+for each agent; `./UP` does not do it.)
 
 ## Connecting
 
@@ -65,7 +77,7 @@ ssh -p 2222 nerd@<host>        # attaches to the agent's terminal (Pi in tmux)
 
 - **Login** is by public key only, as user `nerd`: no password, no root. The
   keys are the lines of `NERD_AUTHORIZED_KEYS_FILE`, read when the container
-  is created (`./UP` again after changing them). The host key is generated on
+  is created (`./UP` again after changing them; the server is not touched). The host key is generated on
   the first start and kept in the `<name>-ssh` volume, so its fingerprint
   survives `./UP`; `docker logs <name> | head` prints it.
 - **Detach** with `Ctrl-b d`; the agent keeps working. Log in again to come
@@ -95,7 +107,7 @@ does a new container on the same volumes. `./DOWN --purge` starts from scratch.
 The agent is told to serve anything meant for a browser on `0.0.0.0` at
 `NERD_APP_PORT`; `./UP` publishes that port, so `http://<host>:8000` opens it.
 
-From inside the container the agent cannot know the name under which you
+From inside its container the agent cannot know the name under which you
 reach the machine (a DNS name, a VPN name, a forwarded port). Set
 `NERD_OPERATOR_URL` (e.g. `http://gpu-box.example:8000`) and the agent is told
 as a fact that this is where you open the app, and names it when it reports;
@@ -105,11 +117,12 @@ Without publishing the app port, an ssh tunnel reaches it too:
 `ssh -L 8000:127.0.0.1:8000 -p 2222 nerd@<host>`, then `http://localhost:8000`.
 
 To put the ports on a VPN without publishing them on the host, run the
-container in the network namespace of a VPN client container:
+containers in the network namespace of a VPN client container:
 `NERD_NETWORK=container:<vpn container>`. Nothing is published then; the ports
 are reached at the VPN address, and containers sharing one namespace need
-different `NERD_SSH_PORT`, `NERD_APP_PORT` and `NERD_LLAMA_PORT`. The nerd
-container has to be recreated (`./UP`) whenever the VPN container is.
+different `NERD_SSH_PORT`, `NERD_APP_PORT` and `NERD_LLAMA_PORT`. The server
+listens on loopback there, not on the VPN. Both have to be recreated
+(`./DOWN && ./UP`) whenever the VPN container is.
 
 ## `browse`: how the agent checks a page
 
@@ -121,11 +134,16 @@ Options: README, "`browse`".
 
 ## Headless: one task, no conversation
 
-The image also runs one task to the end and exits, for scripts and CI:
+The agent's image also runs one task to the end and exits, for scripts and CI,
+against a running server (the one `./UP` started, on `<name>-net`):
 
 ```sh
-docker run --rm --gpus all -v nerd-models:/models -v "$PWD/work":/workspace nerd:sm86 "<task>"
+docker run --rm --network nerd-net -e NERD_BASE_URL=http://nerd-llm:8080/v1 \
+    -v "$PWD/work":/workspace nerd:agent "<task>"
 ```
+
+Without `./UP`, start the server first: README, "Running the containers by
+hand".
 
 The exit code is 0 when the agent finished with a final answer. Questions in
 the plan step are answered with `NERD_PLAN_ANSWER` (default «на твоё
@@ -138,8 +156,8 @@ acceptance criteria of the reference task; see the README.
 
 | where | what |
 |---|---|
-| `docker logs <name>` | the entrypoint: model download, host key fingerprint, server start |
-| `/logs/server-*.log` | llama-server |
+| `docker logs <name>-llm` | the server: model download, llama-server |
+| `docker logs <name>` | the agent's entrypoint: host key fingerprint, waiting for the server |
 | `/logs/sessions/` | conversations (Pi's session files) |
 | `/logs/sshd.log` | logins |
 | `/logs/verifier-*.jsonl` | the verifier's decisions, when `NERD_VERIFY_N` > 1 |

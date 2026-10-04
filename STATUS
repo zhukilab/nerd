@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
-# Is nerd up? Container state, llama-server's /health, sshd and the app port.
-# Exit 0 when the container runs, the model is served and ssh answers.
+# Is nerd up? The server (container <name>-llm, or on the host with
+# NERD_LLAMA=host), the agent's container, llama-server as the agent reaches
+# it, sshd and the app port. Exit 0 when both run, the model is served and ssh
+# answers.
 set -uo pipefail
 # shellcheck source=tools/lib.sh
 . "$(dirname "$0")/tools/lib.sh"
@@ -9,8 +11,23 @@ nerd_settings
 
 bad=0
 row() { printf '%-8s %-14s %s\n' "$1" "$2" "$3"; [ "$1" = OK ] || [ "$1" = INFO ] || bad=1; }
+cstate() { docker inspect -f '{{.State.Status}} since {{.State.StartedAt}}, restarts {{.RestartCount}}, image {{.Config.Image}}' "$1" 2>/dev/null; }
 
-state=$(docker inspect -f '{{.State.Status}} since {{.State.StartedAt}}, restarts {{.RestartCount}}, image {{.Config.Image}}' "$NERD_NAME" 2>/dev/null)
+# --- the server ---------------------------------------------------------------------
+if [ "$NERD_LLAMA" = host ]; then
+  if nerd_host_llama_up; then row OK server "llama-server on this machine, 127.0.0.1:$NERD_LLAMA_PORT (tools/llama-host.sh)"
+  else row DOWN server "no llama-server on this machine: tools/llama-host.sh start"; fi
+else
+  s=$(cstate "$NERD_LLM_NAME")
+  case "$s" in
+    running*) row OK server "$NERD_LLM_NAME $s" ;;
+    "") row DOWN server "no container $NERD_LLM_NAME (./UP starts it)" ;;
+    *) row DOWN server "$NERD_LLM_NAME $s (docker logs --tail 30 $NERD_LLM_NAME)" ;;
+  esac
+fi
+
+# --- the agent ----------------------------------------------------------------------
+state=$(cstate "$NERD_NAME")
 if [ -z "$state" ]; then
   row DOWN container "no container $NERD_NAME (./UP starts it)"
   exit 1
@@ -20,27 +37,22 @@ case "$state" in
   *) row DOWN container "$NERD_NAME $state"; exit 1 ;;
 esac
 
-# Inside the container: works the same with published ports and with --network container:.
+# From inside the agent's container: the server as the agent reaches it, and
+# sshd/app the same with published ports and with --network container:.
 inside() { docker exec "$NERD_NAME" "$@" 2>/dev/null; }
-if [ "$NERD_LLAMA" = host ]; then
-  # The server on the host, seen from the container as the agent sees it.
-  base=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$NERD_NAME" 2>/dev/null | sed -n 's/^NERD_BASE_URL=//p')
-  base=${base:-$NERD_LLAMA_URL}
-  if inside curl -sf -m 3 "${base%/v1}/health" >/dev/null; then
-    model=$(inside curl -sf -m 3 "$base/models" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
-    row OK llama "on the host, $base reached from the container, model ${model:-?}"
-  elif nerd_host_llama_up; then
-    row DOWN llama "answers on the host's 127.0.0.1:$NERD_LLAMA_PORT, but not from the container at $base (docs/MACOS.md, troubleshooting)"
-  else
-    row DOWN llama "no llama-server on the host: tools/llama-host.sh start"
-  fi
-elif inside curl -sf -m 3 "http://127.0.0.1:$NERD_LLAMA_PORT/health" >/dev/null; then
-  model=$(inside curl -sf -m 3 "http://127.0.0.1:$NERD_LLAMA_PORT/v1/models" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
-  row OK llama "/health ok on :$NERD_LLAMA_PORT, model ${model:-?}"
-elif docker logs "$NERD_NAME" 2>&1 | tr '\r' '\n' | grep -q 'downloading'; then
-  row WAIT llama "not serving yet; the model is downloading or loading (docker logs -f $NERD_NAME)"
+base=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$NERD_NAME" 2>/dev/null | sed -n 's/^NERD_BASE_URL=//p')
+base=${base:-$NERD_LLAMA_URL}
+if inside curl -sf -m 3 "${base%/v1}/health" >/dev/null; then
+  model=$(inside curl -sf -m 3 "$base/models" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+  row OK llama "$base answers the agent, model ${model:-?}"
+elif [ "$NERD_LLAMA" = host ] && nerd_host_llama_up; then
+  row DOWN llama "answers on the host's 127.0.0.1:$NERD_LLAMA_PORT, but not from the container at $base (docs/MACOS.md, troubleshooting)"
+elif [ "$NERD_LLAMA" = container ] && docker logs "$NERD_LLM_NAME" 2>&1 | tr '\r' '\n' | grep -q 'downloading'; then
+  row WAIT llama "not serving yet; the model is downloading or loading (docker logs -f $NERD_LLM_NAME)"
+elif [ "$NERD_LLAMA" = host ]; then
+  row WAIT llama "$base does not answer yet (tools/llama-host.sh logs)"
 else
-  row WAIT llama "not serving yet (docker logs --tail 30 $NERD_NAME)"
+  row WAIT llama "$base does not answer yet (docker logs --tail 30 $NERD_LLM_NAME)"
 fi
 
 if inside timeout 3 bash -c "exec 3<>/dev/tcp/127.0.0.1/$NERD_SSH_PORT; head -c 7 <&3" | grep -q '^SSH-2'; then

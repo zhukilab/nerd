@@ -11,8 +11,10 @@ no cloud, no API key, nothing leaves the machine except the model download.
   with a harness of its own in [`agent/`](agent/): a questions-and-plan step
   before code, a loop guard, a bash timeout, a headless browser to check web
   pages, an optional verifier that picks the best of several candidate steps.
-- **One container:** model server, agent and an ssh server in one image. The
-  agent runs every command inside it; the container is its sandbox.
+- **Two containers:** the model server (with the GPU) and the agent (with an
+  ssh server), from one Dockerfile. The agent runs every command inside its
+  own container, which is its sandbox; it reaches the server only over HTTP.
+  `./UP` starts both.
 
 ## Quick start
 
@@ -22,7 +24,7 @@ Apple silicon: [docs/MACOS.md](docs/MACOS.md)):
 ```sh
 git clone --depth=1 https://github.com/zhukilab/nerd && cd nerd
 tools/check-prerequisites.sh      # one table: what is OK, what is MISSING and how to fix it
-./UP                              # build the image for your GPU, fetch the model, start
+./UP                              # build the images for your GPU, fetch the model, start
 ```
 
 If the check reports anything MISSING, `tools/install-prerequisites.sh` prints
@@ -51,56 +53,68 @@ the address you open the app at) go in `.env`: `cp env.example .env`.
 | [AGENTS.md](AGENTS.md) | for an agent (or a person) maintaining this repository |
 
 The rest of this file describes how the agent behaves and how to run the
-image by hand.
+containers by hand.
 
-## Running the image by hand
+## Running the containers by hand
 
-`./UP` does this for you; this is what it does. Build once per GPU
-architecture (`CUDA_ARCH` is the compute capability without the dot):
+`./UP` does this for you; this is what it does. Two images from one
+Dockerfile: the server (built once per GPU architecture; `CUDA_ARCH` is the
+compute capability without the dot) and the agent (no CUDA, the same
+everywhere):
 
 ```sh
-docker build -t nerd .                                                             # sm_86, RTX 30xx
-docker build -t nerd --build-arg CUDA_ARCH=89 .                                    # RTX 40xx
-docker build -t nerd --build-arg CUDA_ARCH=121 --build-arg CUDA_VERSION=13.0.1 .   # GB10 (DGX Spark), aarch64
+docker build -t nerd:agent .
+docker build -t nerd:server --target server .                                       # sm_86, RTX 30xx
+docker build -t nerd:server --target server --build-arg CUDA_ARCH=89 .              # RTX 40xx
+docker build -t nerd:server --target server --build-arg CUDA_ARCH=121 \
+    --build-arg CUDA_VERSION=13.0.1 .                                               # GB10 (DGX Spark), aarch64
 ```
 
-The model is not in the image: on first start it is downloaded from Hugging
-Face into the models volume (resumable, checked against a pinned size and
-sha256) and reused after that. Run the agent on one task, headless:
+The model is not in the image: on first start the server downloads it from
+Hugging Face into the models volume (resumable, checked against a pinned size
+and sha256) and reuses it after that. The server and the agent share a docker
+network, where the agent finds the server by its container name:
 
 ```sh
-docker run --rm --gpus all -v nerd-models:/models -v "$PWD/work":/workspace nerd "<task>"
+docker network create nerd-net
+docker run -d --name nerd-llm --network nerd-net --gpus all -v nerd-models:/models nerd:server
+docker run --rm --network nerd-net -e NERD_BASE_URL=http://nerd-llm:8080/v1 \
+    -v "$PWD/work":/workspace nerd:agent "<task>"                        # one task, headless
 ```
 
 Where the NVIDIA toolkit provides a CDI spec (`nvidia-ctk cdi list` shows
 `nvidia.com/gpu=all`) and docker has no `nvidia` runtime, pass
-`--device nvidia.com/gpu=all` instead of `--gpus all`.
+`--device nvidia.com/gpu=all` instead of `--gpus all`. `docker logs -f nerd-llm`
+shows the download and the server; the agent waits for it (a headless task up
+to 15 minutes, `NERD_HEALTH_TIMEOUT`).
 
 The agent works in `/workspace` and runs every command the model asks for
-inside the container. It runs as uid 1000, so a bind-mounted workspace (or
+inside its container. It runs as uid 1000, so a bind-mounted workspace (or
 `/logs`) must be writable by that uid, or pass `--user "$(id -u):$(id -g)"`.
-Named volumes need nothing. The server log and the agent's event log go to
-`/logs` (mount it to keep them). The exit code is the agent's: 0 when it
-finished with a final answer, 1 otherwise.
+Named volumes need nothing. The agent's event log goes to `/logs` (mount it to
+keep it). The exit code is the agent's: 0 when it finished with a final
+answer, 1 otherwise.
 
-Other modes: `nerd fetch` only downloads and checks the model; `nerd serve`
-runs only llama-server, in the foreground (add `-e NERD_HOST=0.0.0.0 -p
-8080:8080` to reach it from outside); `nerd tui` is the conversation, below.
-Build times, image sizes and measured speeds are in
+Server modes: `serve` (the default) downloads the model if needed and runs
+llama-server in the foreground, on `0.0.0.0:8080` of its network (publish
+`-p 127.0.0.1:8080:8080` to reach it from the host); `fetch` only downloads and
+checks the model. Agent modes: `"<task>"` headless, `tui` the conversation,
+below. Build times, image sizes and measured speeds are in
 [docs/INSTALL.md](docs/INSTALL.md).
 
 ### Talking to the agent: `tui`
 
-`nerd tui` runs Pi's own interactive terminal UI in a tmux session inside the
-container and an ssh server to reach it. You give the task, answer the
+`tui` runs Pi's own interactive terminal UI in a tmux session inside the
+agent's container and an ssh server to reach it. You give the task, answer the
 agent's questions, and drop remarks while it works; Enter during a run queues
 the text as a steering message, delivered after the current step.
 
 ```sh
-docker run -d --name nerd --gpus all -p 2222:2222 -p 8000:8000 \
+docker run -d --name nerd --network nerd-net -p 2222:2222 -p 8000:8000 \
+  -e NERD_BASE_URL=http://nerd-llm:8080/v1 \
   -e NERD_AUTHORIZED_KEYS="$(cat ~/.ssh/id_ed25519.pub)" \
-  -v nerd-models:/models -v nerd-ws:/workspace -v nerd-ssh:/ssh -v nerd-logs:/logs \
-  nerd tui
+  -v nerd-ws:/workspace -v nerd-ssh:/ssh -v nerd-logs:/logs \
+  nerd:agent tui
 ssh -p 2222 nerd@localhost          # attaches to Pi; detach with Ctrl-b d
 ```
 
@@ -108,11 +122,12 @@ ssh -p 2222 nerd@localhost          # attaches to Pi; detach with Ctrl-b d
   builds: it is told to serve anything meant for a browser on
   `0.0.0.0:8000`, so `http://localhost:8000` opens it. Instead of `-p 8000:8000`,
   `ssh -L 8000:127.0.0.1:8000 -p 2222 nerd@host` reaches it too. Inside the
-  container the ports come from the environment: `NERD_SSH_PORT` (2222),
-  `NERD_LLAMA_PORT` (8080, llama-server, the agent follows it) and
-  `NERD_APP_PORT` (8000); containers that share one network namespace
-  (`--network container:…`, `--network host`) need different values.
-- **The address the operator opens.** From inside the container the agent
+  containers the ports come from the environment: `NERD_SSH_PORT` (2222),
+  `NERD_LLAMA_PORT` (8080, llama-server's; the agent follows `NERD_BASE_URL`)
+  and `NERD_APP_PORT` (8000); containers that share one network namespace
+  (`--network container:…`, `--network host`) need different values, and
+  there the server should listen on loopback only (`-e NERD_HOST=127.0.0.1`).
+- **The address the operator opens.** From inside its container the agent
   cannot learn the name under which you reach the machine (a tailnet name, a
   forwarded port). Set `NERD_OPERATOR_URL`, e.g.
   `-e NERD_OPERATOR_URL=http://myhost:8000`, and the agent is told as a fact
@@ -192,7 +207,7 @@ goes into one call.
 git has a system-wide identity in the image (`nerd agent <nerd@localhost>`,
 default branch `main`), so the agent's first commit does not fail for want of
 one; a repository's own config overrides it. [`container/test-browse.sh`](container/test-browse.sh)
-checks it in the image (`docker run --rm --entrypoint /opt/nerd/test-browse.sh nerd`).
+checks it in the image (`docker run --rm --entrypoint /opt/nerd/test-browse.sh nerd:agent`).
 
 ### Variants
 
@@ -203,8 +218,11 @@ checks it in the image (`docker run --rm --entrypoint /opt/nerd/test-browse.sh n
 | VRAM, KV `q4_0` | 64K (default): 7.2 GiB at server start on the RTX 3080 Laptop; a long agent run on 8 GB not yet measured. 32K: 6.5 GiB (6605 MiB peak during an agent run) | weights alone 6.7 GiB: not with context on 8 GB; meant for 12 GB and up, untested |
 | tested | yes: RTX 3080 Laptop 8 GB, x86_64 (13 t/s, power-saving mode); DGX Spark GB10, aarch64 (31 t/s generation, 830 t/s prompt) | no |
 
+The variant is the server's: `NERD_MODEL_VARIANT=q2` in `.env` and `./UP`
+(it replaces the server's container), or by hand:
+
 ```sh
-docker run --rm --gpus all -e NERD_MODEL_VARIANT=q2 -v nerd-models:/models -v "$PWD/work":/workspace nerd "<task>"
+docker run -d --name nerd-llm --network nerd-net --gpus all -e NERD_MODEL_VARIANT=q2 -v nerd-models:/models nerd:server
 ```
 
 Both variants need the fork; stock llama.cpp rejects these quantizations or
@@ -212,7 +230,9 @@ loads them and produces garbage.
 
 ### Settings
 
-Server defaults, each overridable with `-e`: context `NERD_CTX=65536`, KV cache
+Server defaults, each overridable with `-e` on the server's container (through
+`./UP`: `NERD_CTX`, `NERD_MODEL_VARIANT` in `.env`, the rest in
+`NERD_SERVER_DOCKER_ARGS`): context `NERD_CTX=65536`, KV cache
 `NERD_KV=q4_0`, `NERD_NGL=99` (all layers on the GPU), flash attention on,
 `NERD_SLOTS=1`, prompt cache off (`--cache-ram 0`: its KV snapshots overflow an
 8 GB card), extra flags in `NERD_LLAMA_ARGS`. The agent's own variables

@@ -89,29 +89,25 @@ nerd_settings() {
     # Blackwell (10.0 and up) needs CUDA 12.8+; 13.0.1 is the tested one (GB10).
     if [ "${NERD_CUDA_ARCH:0:3}" -ge 100 ] 2>/dev/null; then NERD_CUDA_VERSION=13.0.1; else NERD_CUDA_VERSION=12.4.1; fi
   fi
-  # Where llama-server runs: container (this image, with CUDA) or host (on the
-  # machine itself, tools/llama-host.sh; the image is built without CUDA).
-  # auto: host on macOS, where docker cannot reach the GPU, container elsewhere.
+  # Where llama-server runs: container (its own container <name>-llm, from
+  # the server image, with the GPU) or host (on the machine itself,
+  # tools/llama-host.sh). auto: host on macOS, where docker cannot reach the
+  # GPU, container elsewhere. The agent is always its own container <name>.
   NERD_LLAMA=${NERD_LLAMA:-auto}
   if [ "$NERD_LLAMA" = auto ]; then
     if [ "$(uname -s)" = Darwin ]; then NERD_LLAMA=host; else NERD_LLAMA=container; fi
   fi
-  if [ "$NERD_LLAMA" = host ]; then
-    NERD_IMAGE=${NERD_IMAGE:-nerd:host}
-  else
-    NERD_IMAGE=${NERD_IMAGE:-nerd:sm${NERD_CUDA_ARCH//;/-}}
-  fi
-  # The host's llama-server as the container reaches it (Docker Desktop names
-  # the host host.docker.internal; on Linux ./UP maps it to the host gateway).
-  NERD_LLAMA_URL=${NERD_LLAMA_URL:-http://host.docker.internal:$NERD_LLAMA_PORT/v1}
-}
-
-# docker build arguments for the image of this NERD_LLAMA.
-nerd_build_args() {
-  if [ "$NERD_LLAMA" = host ]; then
-    echo "--build-arg LLAMA=none --build-arg RUNTIME_BASE=ubuntu:22.04"
-  else
-    echo "--build-arg CUDA_ARCH=$NERD_CUDA_ARCH --build-arg CUDA_VERSION=$NERD_CUDA_VERSION"
+  NERD_IMAGE=${NERD_IMAGE:-nerd:agent}
+  NERD_SERVER_IMAGE=${NERD_SERVER_IMAGE:-nerd:server-sm${NERD_CUDA_ARCH//;/-}}
+  NERD_LLM_NAME=$NERD_NAME-llm
+  # The server as the agent's container reaches it: the host (Docker Desktop
+  # names it host.docker.internal; on Linux ./UP maps the name to the host
+  # gateway), the server container by name on <name>-net, or loopback when
+  # both share NERD_NETWORK's network namespace.
+  if [ -z "${NERD_LLAMA_URL:-}" ]; then
+    if [ "$NERD_LLAMA" = host ]; then NERD_LLAMA_URL=http://host.docker.internal:$NERD_LLAMA_PORT/v1
+    elif [ -n "${NERD_NETWORK:-}" ]; then NERD_LLAMA_URL=http://127.0.0.1:$NERD_LLAMA_PORT/v1
+    else NERD_LLAMA_URL=http://$NERD_LLM_NAME:$NERD_LLAMA_PORT/v1; fi
   fi
 }
 

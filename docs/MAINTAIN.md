@@ -20,12 +20,14 @@ then a rebuild and the checks below. Nothing updates itself.
 
 ```sh
 git pull
-./UP --build          # rebuild the image, recreate the container; volumes stay
+./UP --build          # rebuild both images, recreate what changed; volumes stay
 ```
 
-or by hand: `docker build -t nerd:sm86 --build-arg CUDA_ARCH=86 .`. Docker's
-layer cache makes a rebuild after an agent-only change take a minute; a new
-`LLAMA_REF` or `CUDA_VERSION` recompiles llama-server (4-8 minutes).
+or by hand: `docker build -t nerd:agent .` and `docker build -t nerd:server-sm86
+--target server --build-arg CUDA_ARCH=86 .`. Docker's layer cache makes a
+rebuild after an agent-only change take a minute, and `./UP` then keeps the
+server running (the model stays loaded); a new `LLAMA_REF` or `CUDA_VERSION`
+recompiles llama-server (4-8 minutes) and replaces the server's container.
 `docker builder prune` reclaims the cache, `docker image prune` old images.
 
 ## Checks
@@ -35,8 +37,8 @@ layer cache makes a rebuild after an agent-only change take a minute; a new
 | agent unit tests | `cd agent && npm ci && npm test` | Node ≥ 22.19 |
 | agent types | `cd agent && npm run typecheck` | |
 | acceptance checker | `node --test acceptance/test/*.test.mjs`; `acceptance/selftest.sh <out>` | docker for the self-test |
-| pkill/pgrep guard | `docker run --rm --entrypoint /opt/nerd/test-pkill-guard.sh <image>` | the image |
-| `browse` in the image | `docker run --rm --entrypoint /opt/nerd/test-browse.sh <image>` | the image |
+| pkill/pgrep guard | `docker run --rm --entrypoint /opt/nerd/test-pkill-guard.sh nerd:agent` | the agent image |
+| `browse` in the image | `docker run --rm --entrypoint /opt/nerd/test-browse.sh nerd:agent` | the agent image |
 | shell scripts | `shellcheck -x UP DOWN STATUS tools/*.sh` (clean); `container/*.sh acceptance/*.sh` | shellcheck |
 | the whole thing | `./UP`, `./STATUS` green, log in, give it a small task ("create hello.html with the text hi and serve it on the app port"), open the page | a GPU |
 
@@ -115,7 +117,7 @@ Set `LLAMA_REF` in the Dockerfile to the new tag, rebuild, and check:
 - answers are sane: a broken quantization kernel does not fail, it produces
   garbage. Ask something with a checkable answer (17·23 = 391; a short
   function) through the TUI or `curl http://127.0.0.1:8080/v1/chat/completions`
-  inside the container;
+  inside the server's container (`docker exec <name>-llm curl ...`);
 - speed and GPU memory against the numbers in INSTALL.md / README.
 
 The fork's CMake turns `CUDA_ARCH=12X` into `12Xa`; `GGML_NATIVE=OFF` keeps the
@@ -131,23 +133,26 @@ GPUs need 12.8 or later.
 
 ## Troubleshooting
 
-`./STATUS` first, then `docker logs <name>`, then `/logs/server-*.log`.
+`./STATUS` first, then `docker logs <name>-llm` (the server) and
+`docker logs <name>` (the agent).
 
 | symptom | cause | fix |
 |---|---|---|
 | `./UP`: "docker is not usable" | not in group docker, or the daemon is down | `tools/check-prerequisites.sh` says which |
+| `./STATUS`: llama WAIT for long, agent log "still waiting for …/health" | the server is downloading or loading the model, or fails to start | `docker logs <name>-llm` |
+| the agent's container stops: "NERD_BASE_URL is not set" | the agent image run without a server | `./UP` sets it; by hand: README, "Running the containers by hand" |
 | `could not select device driver "nvidia"` / `unresolvable CDI devices` | toolkit or CDI not set up for this docker | `tools/install-prerequisites.sh`; `NERD_GPU=gpus` or `cdi` in `.env` forces one |
 | container restarts, log: `tui: no public key` | no key reached the container | `NERD_AUTHORIZED_KEYS_FILE`, then `./UP` |
 | `Permission denied (publickey)` | the private key does not match, or the user is not `nerd` | `ssh -i <key> -p <port> nerd@<host>`; in PuTTY the user is set in the session |
 | `REMOTE HOST IDENTIFICATION HAS CHANGED` | `./DOWN --purge` deleted the host keys | `ssh-keygen -R "[<host>]:<port>"` |
-| download stops or repeats | network; the download resumes on restart | `docker logs`; behind a proxy pass `-e HTTPS_PROXY=...` in `NERD_DOCKER_ARGS` |
+| download stops or repeats | network; the download resumes on restart | `docker logs <name>-llm`; behind a proxy: `NERD_SERVER_DOCKER_ARGS="-e HTTPS_PROXY=..."` in `.env` |
 | `sha256 mismatch` | corrupted download or the file changed upstream | the partial file is removed; restart. If it repeats, the upstream file changed: update the pin (above) |
 | `llama-server exited during startup`, `cudaMalloc failed: out of memory` | not enough GPU memory | smaller `NERD_CTX`, `q1`, close other GPU users |
 | `CUDA driver version is insufficient` / `no kernel image is available` | the image's CUDA is newer than the driver, or built for another GPU | update the driver, or set `NERD_CUDA_VERSION`/`NERD_CUDA_ARCH` and `./UP --build` |
 | everything works but 3-8× slower than expected | **silent GPU memory overflow** (below), or a quiet laptop power mode | below |
 | the model answers nonsense | stock llama.cpp, or a fork version with a broken kernel | rebuild from the pinned `LLAMA_REF` |
 | tmux borders drawn as `qqqq` | the terminal is not UTF-8 | PuTTY: Translation → UTF-8; the session already sets `LANG=C.UTF-8` |
-| the agent's web server is gone | a new container (restart, `./UP`) does not restart processes the agent started | ask the agent to start it again |
+| the agent's web server is gone | a new agent container (restart, `./UP`) does not restart processes the agent started | ask the agent to start it again |
 | the agent stops with "Context overflow recovery failed" | the conversation outgrew the context | a larger `NERD_CTX` if memory allows; `/task` starts a fresh task |
 | the agent repeats the same command | the model looped; the loop guard tells it after `NERD_LOOP_GUARD_N` repeats | interrupt with a remark (type and Enter) |
 

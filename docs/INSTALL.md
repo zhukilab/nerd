@@ -3,9 +3,9 @@
 nerd needs a Linux machine with an NVIDIA GPU, Docker, and the NVIDIA
 Container Toolkit. **macOS on Apple silicon** runs the model on the Mac itself
 and the agent in its container: [MACOS.md](MACOS.md) (new, untested on a real
-Mac). Everything else (CUDA runtime, llama-server, Node.js, the
-agent, a headless browser) is inside the image, and the model is downloaded on
-first start.
+Mac). Everything else is in two images built from this repository — the
+server's (CUDA runtime, llama-server) and the agent's (Node.js, the agent, a
+headless browser) — and the model is downloaded on first start.
 
 ```sh
 git clone --depth=1 https://github.com/zhukilab/nerd && cd nerd
@@ -46,10 +46,11 @@ reports a mismatch.
   On an 8 GB card Q1 at 64K leaves about 0.7 GiB; a desktop session on the same
   card takes 200-500 MiB of that. If 64K does not fit, set `NERD_CTX=32768`.
   On GB10 the GPU uses the system's unified memory; there is no separate total.
-- **Disk:** the image is 4-6 GB (x86_64 about 5.8 GB, aarch64 about 4.0 GB);
-  the build pulls the CUDA devel base image (about 2.7 GB compressed) and keeps
-  a build cache; plus the model. Plan for about 22 GB free under docker's data
-  directory for the first build; `docker builder prune` frees the cache after.
+- **Disk:** the two images together are 4-6 GB (aarch64: the server 2.6 GB,
+  the agent 1.45 GB; x86_64 somewhat more); the build pulls the CUDA devel
+  base image (about 2.7 GB compressed) and keeps a build cache; plus the model.
+  Plan for about 22 GB free under docker's data directory for the first build;
+  `docker builder prune` frees the cache after.
 - **RAM:** 16 GB recommended, 8 GB minimum (the build, Node, Chromium).
 - **Network:** the build needs Docker Hub, GitHub (the llama.cpp fork),
   nodejs.org and the npm registry; the first start needs huggingface.co. After

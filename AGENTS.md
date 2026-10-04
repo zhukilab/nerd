@@ -8,14 +8,16 @@ https://github.com/zhukilab/nerd.
 
 ```
 UP DOWN STATUS          deploy: bash, settings from .env (template env.example)
-tools/                  check-prerequisites.sh, install-prerequisites.sh, lib.sh (shared)
-Dockerfile              one image: llama.cpp fork build, Node, agent, Chromium, sshd
-container/              entrypoint.sh (modes), sshd/tmux config, pkill guard, browse wrapper, in-image tests
+tools/                  check-prerequisites.sh, install-prerequisites.sh, lib.sh (shared),
+                        llama-host.sh (the server on a Mac)
+Dockerfile              two targets: server (llama.cpp fork build, CUDA) and agent (Node, Pi, Chromium, sshd)
+container/              entrypoint.sh (both images' modes), model.sh (model pins, server arguments),
+                        sshd/tmux config, pkill guard, browse wrapper, in-image tests
 agent/                  the agent: TypeScript run directly by Node (no build step)
   src/                  see docs/ARCHITECTURE.md for each file
   test/                 node:test unit tests
 acceptance/             checker for the reference task's result, with fixtures and a self-test
-docs/                   INSTALL, OPERATE, MAINTAIN, ARCHITECTURE
+docs/                   INSTALL, MACOS, OPERATE, MAINTAIN, ARCHITECTURE
 ```
 
 ## How to test
@@ -54,8 +56,10 @@ start.
    deliberately and is checked (docs/MAINTAIN.md).
 3. **Stock llama.cpp is never a substitute** for the fork: with this model it
    fails or, worse, silently produces garbage.
-4. **The container is the sandbox.** The agent runs as uid 1000, not root; do
-   not add capabilities, host mounts beyond the volumes, or `--privileged`.
+4. **The agent's container is the sandbox.** The agent runs as uid 1000, not
+   root; do not add capabilities, host mounts beyond the volumes, or
+   `--privileged`. The server stays in its own container (or on the Mac): the
+   agent reaches it only over HTTP; do not move it back in.
 5. **Mechanism over prompt.** When the model keeps failing an instruction, fix
    it in the harness or the image (see the loop guard, bash timeout, pkill
    guard) and say why in a comment with the evidence.
