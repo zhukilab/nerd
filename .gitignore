@@ -3,3 +3,5 @@
 node_modules/
 # Local settings of ./UP (template: env.example).
 .env
+# Logs of ./UP and tools/llama-host.sh (var/log/), sent when something fails.
+var/

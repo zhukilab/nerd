@@ -6,6 +6,7 @@
 # (read from the Dockerfile), same model files and checksums, same server
 # arguments (container/model.sh).
 #
+#   tools/llama-host.sh check     the compiler and SDK can build C++ (seconds, nothing cloned)
 #   tools/llama-host.sh build     clone the fork at the pinned tag, build llama-server
 #   tools/llama-host.sh fetch     download the model (resumes), check its sha256
 #   tools/llama-host.sh start     build and fetch if needed, start the server, wait for it
@@ -51,25 +52,54 @@ bytes() { if [ -f "$1" ]; then wc -c < "$1" | tr -d ' '; else echo 0; fi; }
 up() { curl -sf -m 2 "http://127.0.0.1:$port/health" >/dev/null 2>&1; }
 running_pid() { [ -s "$pidf" ] && kill -0 "$(cat "$pidf")" 2>/dev/null && cat "$pidf"; }
 
+# The compilers to build with. On macOS the Command Line Tools' clang and its
+# SDK, by xcrun: a `c++` first in PATH from Homebrew's llvm, gcc or conda finds
+# no C++ standard headers without the SDK ("fatal error: 'cstddef' file not
+# found", the first report from a Mac, 2026-10-05).
+compilers() {
+  cc=${CC:-cc} cxx=${CXX:-c++} sdk="" cmake_os=()
+  if [ "$(uname -s)" = Darwin ]; then
+    sdk=$(xcrun --show-sdk-path 2>/dev/null) || die "no macOS SDK: xcode-select --install (or, if installed: sudo xcode-select --reset)"
+    cc=$(xcrun -f clang) cxx=$(xcrun -f clang++)
+    cmake_os=(-DCMAKE_OSX_SYSROOT="$sdk")
+  fi
+  command -v "$cxx" >/dev/null 2>&1 || die "no C++ compiler (macOS: xcode-select --install)"
+  # A C++ file with standard headers must compile before a long build is tried.
+  local t sys=()
+  [ -n "$sdk" ] && sys=(-isysroot "$sdk")
+  t=$(mktemp -d "${TMPDIR:-/tmp}/llama-host.XXXXXX")
+  printf '#include <cstddef>\n#include <array>\n#include <mutex>\nint main() { std::array<int, 1> a{}; return (int)a.size() - 1; }\n' > "$t/probe.cpp"
+  if ! "$cxx" -std=c++17 ${sys[@]+"${sys[@]}"} "$t/probe.cpp" -o "$t/probe" 2> "$t/err"; then
+    cat "$t/err"; rm -rf "$t"
+    die "the C++ compiler ($cxx) cannot build a file with standard headers. macOS: \`which -a c++ clang++\` (Homebrew llvm/gcc or conda first in PATH?); if it is Apple's: sudo rm -rf /Library/Developer/CommandLineTools && xcode-select --install"
+  fi
+  rm -rf "$t"
+  say "compilers: $cc, $cxx${sdk:+ (SDK $sdk)}"
+}
+
 build() {
   for t in git cmake curl; do
     command -v "$t" >/dev/null 2>&1 || die "$t not found (macOS: brew install $t; the compiler: xcode-select --install)"
   done
-  command -v c++ >/dev/null 2>&1 || die "no C++ compiler (macOS: xcode-select --install)"
   mkdir -p "$dir"
   if [ -x "$bin" ] && [ "$(cat "$src/REF" 2>/dev/null)" = "$ref" ]; then
     say "llama-server $ref already built: $bin"; return 0
   fi
+  compilers
   rm -rf "$src"
   say "cloning $repo_url at $ref"
-  git clone -q --depth 1 -b "$ref" "$repo_url" "$src"
+  git -c advice.detachedHead=false clone -q --depth 1 -b "$ref" "$repo_url" "$src"
   # Metal is on by default on macOS (the shaders embedded in the binary).
-  # GGML_NATIVE: this machine's CPU, it is built where it runs.
+  # GGML_NATIVE: this machine's CPU, it is built where it runs. The full
+  # output goes to the log (nerd_log), only the last lines to the screen.
   say "building llama-server (a few minutes)"
   cmake -S "$src" -B "$src/build" -DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=OFF \
-    -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DBUILD_SHARED_LIBS=OFF >/dev/null
+    -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DBUILD_SHARED_LIBS=OFF \
+    -DCMAKE_C_COMPILER="$cc" -DCMAKE_CXX_COMPILER="$cxx" ${cmake_os[@]+"${cmake_os[@]}"} \
+    > "$dir/cmake.log" 2>&1 || { tail -30 "$dir/cmake.log"; cat "$dir/cmake.log" >> "${NERD_LOG:-/dev/null}"; die "cmake configure failed (whole output in the log)"; }
   ncpu=$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)
-  cmake --build "$src/build" -j "$ncpu" --target llama-server >/dev/null
+  cmake --build "$src/build" -j "$ncpu" --target llama-server >> "$dir/cmake.log" 2>&1 \
+    || { tail -30 "$dir/cmake.log"; cat "$dir/cmake.log" >> "${NERD_LOG:-/dev/null}"; die "build failed (whole output in the log)"; }
   [ -x "$bin" ] || die "build finished without $bin"
   echo "$ref" > "$src/REF"
   say "built: $bin"
@@ -146,7 +176,9 @@ status() {
   fi
 }
 
+case "${1:-}" in build|fetch|start|check) nerd_log "llama-host-$1"; trap nerd_log_path EXIT ;; esac
 case "${1:-}" in
+  check) compilers; say "ok: llama-server can be built here (tools/llama-host.sh build)" ;;
   build) build ;;
   fetch) fetch ;;
   start) start ;;

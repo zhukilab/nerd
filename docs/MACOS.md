@@ -61,6 +61,7 @@ git checkout m1                         # until the macOS support is merged into
 tools/check-prerequisites.sh            # OK / WARN / MISSING per line, with a hint
 cp env.example .env                     # optional; NERD_CTX=32768 here if memory is tight
 
+tools/llama-host.sh check               # seconds: can this Mac's compiler build C++?
 tools/llama-host.sh start               # first time: clones and builds llama-server with
                                         # Metal (~5 min), downloads the model (6 GB),
                                         # checks its sha256, starts it, waits until it answers
@@ -77,6 +78,11 @@ agent serves on port 8000 opens at `http://localhost:8000` on the Mac.
 
 `tools/llama-host.sh` keeps everything under `~/.nerd` (`NERD_HOST_DIR`): the
 llama.cpp source and build, `models/`, `llama-server.log`.
+
+**Logs.** `./UP` and `tools/llama-host.sh check|build|fetch|start` write
+everything they print to `var/log/<command>-<time>.log` in the repository as
+well, and name the file at the start and at the end. If something fails, send
+that file — no need to copy the terminal.
 
 ## Day to day
 
@@ -107,16 +113,24 @@ to 15 minutes and then stops with "no llama-server at …" (Docker restarts it).
   your network: keep the macOS firewall on.
 - **`syntax error` or `bad substitution` from `./UP`** — it ran under macOS's
   bash 3.2: `brew install bash`, open a new terminal, `which bash`.
-- **The build fails in cmake** — `xcode-select --install`, `brew install cmake`,
-  then `tools/llama-host.sh build` to see the full output: remove `>/dev/null`
-  from the two cmake lines in `tools/llama-host.sh` if needed.
+- **`fatal error: 'cstddef' file not found`** (or `'array'`, `'mutex'`, … — the
+  C++ standard headers; the first report from a Mac) — the compiler finds no
+  macOS SDK. Since 2026-10-05 the script builds with Apple's clang and SDK
+  through `xcrun` and checks that first (`tools/llama-host.sh check`). If the
+  check still fails: `which -a c++ clang++` — a Homebrew llvm/gcc or conda
+  compiler first in `PATH` is the usual cause; if it is Apple's, the Command
+  Line Tools are broken (often after a macOS update):
+  `sudo rm -rf /Library/Developer/CommandLineTools && xcode-select --install`.
+- **The build fails in cmake** otherwise — the last 30 lines are shown, the
+  whole output is in the log (`var/log/llama-host-…log`) and in
+  `~/.nerd/cmake.log`; `xcode-select --install`, `brew install cmake`.
 - **Slow** — not measured on any Mac yet. llama-server's log prints the speed
   of each request (`prompt eval time … tokens per second`, `eval time …`).
 
 ## What to report
 
-If you try it, these help most: Mac model, chip and RAM; macOS version; whether
-`tools/llama-host.sh start` built and started (and the error if not); from
+If you try it, these help most: the files in `var/log/`; Mac model, chip and
+RAM; macOS version; whether `tools/llama-host.sh start` built and started; from
 `~/.nerd/llama-server.log` a few `prompt eval time` / `eval time` lines during a
 task; memory pressure in Activity Monitor while the agent works; whether the
 agent finished a small task (a web page it serves on port 8000, say).

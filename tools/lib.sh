@@ -132,6 +132,19 @@ nerd_host_name() {
   hostname -f 2>/dev/null || hostname 2>/dev/null || echo "<this-host>"
 }
 
+# Everything the calling script prints from here on goes to the terminal and
+# to var/log/<name>-<time>.log as well, so a failure is one file to send
+# rather than a terminal to copy. Prints the path at once; the caller repeats
+# it at the end (nerd_log_path). Works in bash 3.2 (process substitution).
+nerd_log() {
+  local d=$NERD_ROOT/var/log
+  mkdir -p "$d" 2>/dev/null || return 0
+  NERD_LOG=$d/$1-$(date +%Y%m%d-%H%M%S).log
+  exec > >(tee -a "$NERD_LOG") 2>&1
+  echo "[log] $NERD_LOG ($(uname -sm), bash $BASH_VERSION, $(git -C "$NERD_ROOT" log -1 --format='%h %cs' 2>/dev/null))"
+}
+nerd_log_path() { [ -n "${NERD_LOG:-}" ] && echo "[log] $NERD_LOG — send this file if something went wrong"; return 0; }
+
 # The host's llama-server answers /health (NERD_LLAMA=host).
 nerd_host_llama_up() {
   curl -sf -m 3 "http://127.0.0.1:$NERD_LLAMA_PORT/health" >/dev/null 2>&1

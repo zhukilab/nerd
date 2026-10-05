@@ -29,6 +29,7 @@ done
 
 nerd_load_env
 nerd_settings
+[ "$dry" = 1 ] || { nerd_log up; trap nerd_log_path EXIT; }
 say() { echo "[UP] $*"; }
 die() { echo "[UP] ERROR: $*" >&2; exit 1; }
 run() { if [ "$dry" = 1 ]; then { printf '+'; printf ' %q' "$@"; echo; } >&2; else "$@"; fi; }
