@@ -44,9 +44,13 @@ grep -q '^\(ssh-\|ecdsa-\|sk-\)' "$keys" || die "'$keys' does not look like a pu
 case "$NERD_MODEL_VARIANT" in q1|q2) ;; *) die "NERD_MODEL_VARIANT must be q1 or q2" ;; esac
 case "$NERD_LLAMA" in container|host) ;; *) die "NERD_LLAMA must be auto, container or host" ;; esac
 
-# llama-server on the host (macOS): it must be up before the agent starts.
-if [ "$NERD_LLAMA" = host ] && [ "$dry" = 0 ] && ! nerd_host_llama_up; then
-  die "NERD_LLAMA=host, but no llama-server answers on 127.0.0.1:$NERD_LLAMA_PORT: tools/llama-host.sh start (docs/MACOS.md)"
+# llama-server on the host (macOS): ./UP starts it, as it starts the server
+# container elsewhere, and ./DOWN stops it. One running with the settings of
+# .env is kept, one with other settings restarted (tools/llama-host.sh start).
+# It must answer before the agent starts.
+if [ "$NERD_LLAMA" = host ]; then
+  run "$NERD_ROOT/tools/llama-host.sh" start \
+    || die "the llama-server on this machine did not start (above; docs/MACOS.md, troubleshooting)"
 fi
 
 # --- images ----------------------------------------------------------------------
@@ -159,7 +163,7 @@ connect() {
   fi
   if [ "$NERD_LLAMA" = host ]; then
     echo "  status: ./STATUS    stop: ./DOWN    logs: docker logs -f $NERD_NAME"
-    echo "  the model: tools/llama-host.sh status | stop | logs (not stopped by ./DOWN)"
+    echo "  the model: tools/llama-host.sh status | logs (./DOWN stops it too, ./DOWN --agent keeps it)"
   else
     echo "  status: ./STATUS    stop: ./DOWN    logs: docker logs -f $NERD_NAME (agent), $NERD_LLM_NAME (server)"
   fi

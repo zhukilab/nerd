@@ -16,7 +16,7 @@ cstate() { docker inspect -f '{{.State.Status}} since {{.State.StartedAt}}, rest
 # --- the server ---------------------------------------------------------------------
 if [ "$NERD_LLAMA" = host ]; then
   if nerd_host_llama_up; then row OK server "llama-server on this machine, 127.0.0.1:$NERD_LLAMA_PORT (tools/llama-host.sh)"
-  else row DOWN server "no llama-server on this machine: tools/llama-host.sh start"; fi
+  else row DOWN server "no llama-server on this machine: ./UP starts it"; fi
 else
   s=$(cstate "$NERD_LLM_NAME")
   case "$s" in

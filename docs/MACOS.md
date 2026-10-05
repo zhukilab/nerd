@@ -62,11 +62,11 @@ tools/check-prerequisites.sh            # OK / WARN / MISSING per line, with a h
 cp env.example .env                     # optional; NERD_CTX=32768 here if memory is tight
 
 tools/llama-host.sh check               # seconds: can this Mac's compiler build C++?
-tools/llama-host.sh start               # first time: clones and builds llama-server with
-                                        # Metal (~5 min), downloads the model (6 GB),
-                                        # checks its sha256, starts it, waits until it answers
-./UP                                    # first time: builds the image nerd:agent (~5-10 min),
-                                        # starts the agent's container, prints how to connect
+./UP                                    # starts llama-server (tools/llama-host.sh start; first
+                                        # time: clones and builds it with Metal, ~5 min, downloads
+                                        # the model, 6 GB, checks its sha256), waits until it
+                                        # answers; builds the image nerd:agent (first time
+                                        # ~5-10 min), starts the agent's container, prints how to connect
 ssh -p 2222 nerd@localhost
 ```
 
@@ -89,27 +89,26 @@ that file — no need to copy the terminal.
 | | |
 |---|---|
 | state of both | `tools/llama-host.sh status` and `./STATUS` |
-| stop | `./DOWN`, then `tools/llama-host.sh stop` (`./DOWN` does not stop the server) |
-| start again (after a reboot too) | `tools/llama-host.sh start`, then `./UP` |
+| stop | `./DOWN`: the agent's container and the server, the GPU and memory are free (`./DOWN --agent`: only the agent, the model stays loaded) |
+| start again (after a reboot too) | `./UP` |
+| another variant or context | edit `.env`, `./UP`: it restarts a server running with other settings |
 | the server's log | `tools/llama-host.sh logs` (Ctrl-C ends the view, not the server) |
-| update | `git pull`, `tools/llama-host.sh stop && tools/llama-host.sh start` (rebuilds only if the pinned tag changed), `./UP --build` |
-| remove | `./DOWN --purge`, `tools/llama-host.sh stop`, `rm -rf ~/.nerd`, `docker image rm nerd:agent` |
+| update | `git pull`, `./DOWN`, `./UP --build` (llama-server is rebuilt only if the pinned tag changed) |
+| remove | `./DOWN --purge`, `rm -rf ~/.nerd`, `docker image rm nerd:agent` |
 
 The container has a restart policy; started before the server, it waits for it up
 to 15 minutes and then stops with "no llama-server at …" (Docker restarts it).
 
 ## Troubleshooting
 
-- **`./UP`: "no llama-server answers on 127.0.0.1:8080"** — start it first:
-  `tools/llama-host.sh start`.
-- **`tools/llama-host.sh start`: "llama-server exited during startup"** — the last
+- **`./UP`: "llama-server exited during startup"** — the last
   lines of its log are printed. Out of memory (`failed to allocate`, `Metal`
   buffer errors): `NERD_CTX=32768` in `.env`, close other apps, give Docker less.
 - **`./STATUS`: llama DOWN "answers on the host … but not from the container"** —
   the container cannot reach the server on the Mac's loopback. Docker Desktop
   normally forwards `host.docker.internal` to it. If yours does not, let the server
-  listen on all interfaces: `NERD_LLAMA_HOST=0.0.0.0` in `.env`, then
-  `tools/llama-host.sh stop && tools/llama-host.sh start`. That also exposes it to
+  listen on all interfaces: `NERD_LLAMA_HOST=0.0.0.0` in `.env`, then `./UP`
+  (it restarts the server with the new address). That also exposes it to
   your network: keep the macOS firewall on.
 - **`syntax error` or `bad substitution` from `./UP`** — it ran under macOS's
   bash 3.2: `brew install bash`, open a new terminal, `which bash`.
@@ -130,7 +129,7 @@ to 15 minutes and then stops with "no llama-server at …" (Docker restarts it).
 ## What to report
 
 If you try it, these help most: the files in `var/log/`; Mac model, chip and
-RAM; macOS version; whether `tools/llama-host.sh start` built and started; from
+RAM; macOS version; whether `./UP` built and started llama-server; from
 `~/.nerd/llama-server.log` a few `prompt eval time` / `eval time` lines during a
 task; memory pressure in Activity Monitor while the agent works; whether the
 agent finished a small task (a web page it serves on port 8000, say).

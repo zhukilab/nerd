@@ -9,8 +9,9 @@
 #   tools/llama-host.sh check     the compiler and SDK can build C++ (seconds, nothing cloned)
 #   tools/llama-host.sh build     clone the fork at the pinned tag, build llama-server
 #   tools/llama-host.sh fetch     download the model (resumes), check its sha256
-#   tools/llama-host.sh start     build and fetch if needed, start the server, wait for it
-#   tools/llama-host.sh stop | status | logs
+#   tools/llama-host.sh start     build and fetch if needed, start the server, wait for it;
+#                                 one running with other settings is restarted
+#   tools/llama-host.sh stop | status | logs      (./DOWN runs stop too)
 #
 # Settings from .env (env.example): NERD_MODEL_VARIANT, NERD_CTX,
 # NERD_LLAMA_PORT, and here only:
@@ -36,6 +37,7 @@ bin=$src/build/bin/llama-server
 models=$dir/models
 log=$dir/llama-server.log
 pidf=$dir/llama-server.pid
+argsf=$dir/llama-server.args
 bind=${NERD_LLAMA_HOST:-127.0.0.1}
 port=$NERD_LLAMA_PORT
 nerd_model "$NERD_MODEL_VARIANT" || die "NERD_MODEL_VARIANT must be q1 or q2, not '$NERD_MODEL_VARIANT'"
@@ -136,18 +138,25 @@ fetch() {
 }
 
 start() {
-  if pid=$(running_pid); then say "already running (pid $pid); tools/llama-host.sh stop first to restart"; return 0; fi
+  # shellcheck disable=SC2046,SC2086
+  set -- "$bin" -m "$model" $(nerd_server_args) --host "$bind" --port "$port" ${NERD_LLAMA_ARGS:-}
+  # A server started with other settings (a variant or context changed in
+  # .env) is restarted, as ./UP replaces a server container whose settings changed.
+  if pid=$(running_pid); then
+    if [ "$(cat "$argsf" 2>/dev/null)" = "$*" ]; then say "already running with these settings (pid $pid)"; return 0; fi
+    say "running with other settings (pid $pid), restarting; was: $(cat "$argsf" 2>/dev/null || echo unknown)"
+    stop
+  fi
   up && die "something else answers on 127.0.0.1:$port; choose another NERD_LLAMA_PORT in .env"
   build
   fetch
-  # shellcheck disable=SC2046,SC2086
-  set -- "$bin" -m "$model" $(nerd_server_args) --host "$bind" --port "$port" ${NERD_LLAMA_ARGS:-}
   say "starting: $* (log $log)"
   nohup "$@" > "$log" 2>&1 &
   echo $! > "$pidf"
+  echo "$*" > "$argsf"
   for _ in $(seq 600); do
     kill -0 "$(cat "$pidf")" 2>/dev/null || { tail -30 "$log" >&2; die "llama-server exited during startup (log above; out of memory? NERD_CTX=32768 in .env)"; }
-    up && { say "serving on $bind:$port, pid $(cat "$pidf"); next: ./UP"; return 0; }
+    up && { say "serving on $bind:$port, pid $(cat "$pidf")"; return 0; }
     sleep 1
   done
   tail -30 "$log" >&2; die "llama-server not healthy after 600 s"
@@ -162,7 +171,7 @@ stop() {
   else
     say "not running"
   fi
-  rm -f "$pidf"
+  rm -f "$pidf" "$argsf"
 }
 
 status() {
@@ -185,5 +194,5 @@ case "${1:-}" in
   stop) stop ;;
   status) status ;;
   logs) tail -n 50 -f "$log" ;;
-  *) sed -n '2,19p' "$0"; exit 2 ;;
+  *) sed -n '2,20p' "$0"; exit 2 ;;
 esac

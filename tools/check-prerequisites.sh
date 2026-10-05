@@ -93,8 +93,8 @@ if [ "$NERD_LLAMA" = host ]; then
   done
   hd=${NERD_HOST_DIR:-$HOME/.nerd}
   if nerd_host_llama_up; then row OK llama-host "a llama-server answers on 127.0.0.1:$NERD_LLAMA_PORT"
-  elif [ -x "$hd/llama.cpp/build/bin/llama-server" ]; then row WARN llama-host "built, not running" "tools/llama-host.sh start, before ./UP"
-  else row WARN llama-host "not built yet" "tools/llama-host.sh start (builds, downloads the model, starts), before ./UP"; fi
+  elif [ -x "$hd/llama.cpp/build/bin/llama-server" ]; then row WARN llama-host "built, not running" "./UP starts it"
+  else row WARN llama-host "not built yet" "./UP builds it, downloads the model and starts it"; fi
   # Unified memory: the model and its KV cache come out of RAM, and macOS lets
   # the GPU have about two thirds of it.
   case "$NERD_MODEL_VARIANT" in q2) base=7200 ;; *) base=5900 ;; esac
