@@ -314,6 +314,28 @@ test("headless: web_search's provider argument is dropped — SearXNG is used, n
 	}
 });
 
+// Pi's find runs fd with --no-require-git (fd 8.6+); on the old Ubuntu 22.04
+// image fd 8.3.1 refused it and every find failed (054). Only where fd is on
+// PATH: without it Pi would try to download one.
+const hasFd = (() => {
+	try {
+		execFileSync("fd", ["--version"], { stdio: "pipe" });
+		return true;
+	} catch {
+		return false;
+	}
+})();
+test("headless: Pi's find works with this machine's fd (054)", { skip: !hasFd && "no fd on PATH" }, async () => {
+	const srv = await scriptedServer((n) => (n === 1 ? { call: { name: "find", args: { pattern: "*.txt" } } } : { text: "found" }));
+	try {
+		await runHeadless(srv.url, "Find", { NERD_PLAN_STEP: "0" }, false, [], async () => {}).then((cwd) => cwd);
+		assert.equal(srv.seen.length, 2);
+		assert.doesNotMatch(srv.seen[1].lastTool, /error|wasn't expected|not found/i, `find failed: ${srv.seen[1].lastTool}`);
+	} finally {
+		srv.close();
+	}
+});
+
 test("headless: NERD_PLAN_STEP=0 goes straight to work; the loop guard notes the third same call", async () => {
 	const srv = await scriptedServer((n) => (n <= 4 ? { call: { name: "bash", args: { command: "echo 0" } } } : { text: "stopped" }));
 	try {
