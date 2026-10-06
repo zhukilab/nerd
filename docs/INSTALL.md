@@ -96,11 +96,15 @@ on the Linux side except the container toolkit.
    driver supports WSL2). Do not install a Linux driver inside WSL.
 2. `wsl --install -d Ubuntu-24.04` (or a separate distribution just for nerd),
    then inside it enable systemd in `/etc/wsl.conf` (`[boot]` `systemd=true`)
-   and `wsl --shutdown` once from Windows.
+   and restart that distribution from Windows: `wsl --terminate <distribution>`
+   (`wsl.conf` is read when the distribution starts; other distributions keep
+   running). If `systemctl is-system-running` inside then says neither
+   `running` nor `degraded`, `wsl --shutdown` (it stops every distribution).
 3. Inside the distribution: clone, `tools/install-prerequisites.sh --yes`,
    `./UP`. `nvidia-smi` inside WSL should list the GPU.
 4. WSL2 gets half of the Windows RAM by default; `.wslconfig` (`memory=`)
-   changes it.
+   changes it. `.wslconfig` is WSL's VM as a whole: it takes effect only after
+   `wsl --shutdown`.
 
 Things that behave differently on WSL2:
 
