@@ -171,7 +171,11 @@ COPY --chmod=755 container/test-browse.sh /opt/nerd/
 # exist in the image, owned by nerd, so fresh named volumes inherit that owner.
 # Password "*" instead of useradd's "!": no password can match, but the
 # account is not "locked", which sshd without PAM would refuse even for a key.
-RUN useradd -m -u 1000 -s /bin/bash nerd \
+# Ubuntu images since 24.04 ship a user "ubuntu" with uid 1000: it becomes nerd.
+RUN if id -u ubuntu >/dev/null 2>&1; then \
+        usermod -l nerd -d /home/nerd -m -s /bin/bash ubuntu && groupmod -n nerd ubuntu; \
+    else useradd -m -u 1000 -s /bin/bash nerd; fi \
+ && [ "$(id -u nerd)" = 1000 ] \
  && usermod -p '*' nerd \
  && mkdir -p /workspace /logs /ssh \
  && chown nerd:nerd /workspace /logs /ssh \
