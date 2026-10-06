@@ -10,12 +10,12 @@ then a rebuild and the checks below. Nothing updates itself.
 |---|---|---|
 | llama.cpp fork | `Dockerfile`: `LLAMA_REPO`, `LLAMA_REF` | PrismML's fork; stock llama.cpp cannot run the model. `tools/llama-host.sh` (macOS) builds the same tag, read from the Dockerfile |
 | CUDA | `Dockerfile`: `CUDA_VERSION` (default), `./UP` picks 13.0.1 for sm_100+ | |
-| Ubuntu base | `Dockerfile`: `UBUNTU_VERSION` | |
+| Ubuntu base | `Dockerfile`: `UBUNTU_VERSION` (agent: 26.04), `CUDA_UBUNTU_VERSION` (server: what NVIDIA's CUDA images exist for) | the agent's fd must know `--no-require-git` (fd 8.6+): Pi's `find` passes it |
 | Node.js | `Dockerfile`: `NODE_VERSION` | official tarball, hash checked |
 | Pi, Pi packages, Playwright, undici | `agent/package.json` (exact) + `agent/package-lock.json` | Pi packages: `@sting8k/pi-vcc`, `@juicesharp/rpiv-web-tools` (`agent/src/packages.ts`) |
 | Chromium for `browse` | follows `playwright-core` | installed by Playwright's own installer |
 | the model | `container/model.sh`: `repo`, file, `size`, `sha` per variant; llama-server's arguments | used by the image and by `tools/llama-host.sh` |
-| SearXNG (web search) | `Dockerfile`: `SEARXNG_REPO`, `SEARXNG_REF` (a commit); its Python requirements are pinned by SearXNG itself | settings: `container/searxng.yml`; runs on python3.11 |
+| SearXNG (web search) | `Dockerfile`: `SEARXNG_REPO`, `SEARXNG_REF` (a commit); its Python requirements are pinned by SearXNG itself | settings: `container/searxng.yml`; runs on the agent image's python3 |
 
 ## Rebuild
 

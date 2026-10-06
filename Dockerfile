@@ -30,9 +30,14 @@
 # (tools/llama-host.sh builds the same tag on a Mac, reading it from here).
 
 ARG CUDA_VERSION=12.4.1
-ARG UBUNTU_VERSION=22.04
+# The server's Ubuntu is the one NVIDIA publishes CUDA images for; the agent's
+# side (node, searxng, agent) is the current Ubuntu: on 22.04 its fd 8.3.1 did
+# not know the --no-require-git that Pi's find passes, and every find failed
+# (ticket 054).
+ARG CUDA_UBUNTU_VERSION=22.04
+ARG UBUNTU_VERSION=26.04
 
-FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} AS llama
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${CUDA_UBUNTU_VERSION} AS llama
 ARG CUDA_ARCH=86
 ARG LLAMA_REPO=https://github.com/PrismML-Eng/llama.cpp
 ARG LLAMA_REF=prism-b10743-adfffbe
@@ -52,7 +57,7 @@ RUN cmake -S /src -B /src/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
  && git -C /src rev-parse HEAD > /out/llama-ref
 
 # --- server ------------------------------------------------------------------
-FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION} AS server
+FROM nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${CUDA_UBUNTU_VERSION} AS server
 # curl for the model download and /health, tini as PID 1.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         tini libgomp1 curl ca-certificates \
@@ -94,20 +99,19 @@ RUN set -eu; \
 # install it, 2026-10-04): a metasearch engine that runs in the agent's
 # container on loopback and needs no cloud account or key. Source at a pinned
 # commit, its Python requirements (pinned by SearXNG) in a venv; the agent
-# image runs it with python3.11 from Ubuntu 22.04's universe (SearXNG imports
-# tomllib, 3.11+, although its setup.py says 3.10) and its built-in server:
-# one user, so no uWSGI/granian.
+# image runs it with the same Ubuntu's python3 (SearXNG imports tomllib, 3.11+)
+# and its built-in server: one user, so no uWSGI/granian.
 FROM ubuntu:${UBUNTU_VERSION} AS searxng
 ARG SEARXNG_REPO=https://github.com/searxng/searxng
 ARG SEARXNG_REF=44b98e61024e27f625c69dfa27d47a79a4acfd50
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git ca-certificates python3.11 python3.11-venv \
+        git ca-certificates python3 python3-venv \
  && rm -rf /var/lib/apt/lists/*
 RUN set -eu; \
     git init -q /opt/searxng/src; cd /opt/searxng/src; \
     git fetch -q --depth 1 "${SEARXNG_REPO}" "${SEARXNG_REF}"; git checkout -q FETCH_HEAD; \
     git rev-parse HEAD > /opt/searxng/REF; rm -rf .git docs tests client; \
-    python3.11 -m venv /opt/searxng/venv; \
+    python3 -m venv /opt/searxng/venv; \
     /opt/searxng/venv/bin/pip install -q --no-cache-dir -U pip; \
     /opt/searxng/venv/bin/pip install -q --no-cache-dir -r requirements.txt
 
@@ -124,7 +128,7 @@ FROM ubuntu:${UBUNTU_VERSION} AS agent
 # sshd and tmux (ncurses-term has tmux-256color); Pi's TUI looks for fd and rg
 # for file completion and would warn without them.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        tini curl ca-certificates git python3 python3.11 procps less xz-utils \
+        tini curl ca-certificates git python3 procps less xz-utils \
         openssh-server tmux ncurses-term ripgrep fd-find \
         iproute2 tcpdump netcat-openbsd socat \
  && rm -rf /var/lib/apt/lists/* \
@@ -174,10 +178,14 @@ RUN useradd -m -u 1000 -s /bin/bash nerd \
  && chmod 700 /ssh \
  && git config --system user.name "nerd agent" \
  && git config --system user.email nerd@localhost \
- && git config --system init.defaultBranch main
+ && git config --system init.defaultBranch main \
+ && git config --system --add safe.directory /workspace
 # Above: a git identity for the agent's commits. Without one the first commit
 # fails ("unable to auto-detect email address"), as it did in ticket 038; a
-# repository's own config still overrides it.
+# repository's own config still overrides it. safe.directory: a /workspace
+# bind-mounted from the host belongs to another uid there, and git refused it
+# ("detected dubious ownership"), so the plan step could not commit PLAN.md
+# (A/B of ticket 048, ticket 054).
 ENV PATH=/opt/node/bin:$PATH
 USER nerd
 WORKDIR /workspace

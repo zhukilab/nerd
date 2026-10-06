@@ -14,6 +14,14 @@
 // A new task is the first user message of a session, or one sent with
 // `/task <text>` in the TUI. Any other message is a remark within the task.
 // NERD_PLAN_STEP=0 turns the step off.
+//
+// The step has a budget of tool calls (ticket 054). Unbounded, the model kept
+// reading and searching the web in it for hours and never replied: 26 of 60
+// runs of the A/B in ticket 048 timed out there after 460-3672 calls, while
+// 31 of the 34 runs that replied did so within 30 (median 8). At the
+// NERD_PLAN_MAX_CALLS-th call (default 40; 0 = no budget) a note asks for the
+// plan now and the tools are taken away, so the next reply is text and the
+// step ends with whatever plan it holds.
 
 import { execFileSync } from "node:child_process";
 import { existsSync, writeFileSync } from "node:fs";
@@ -24,6 +32,22 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 export const PLAN_TOOLS = ["read", "ls", "grep", "find"];
 export const DEFAULT_PLAN_ANSWER = "на твоё усмотрение";
 export const PLAN_FILE = "PLAN.md";
+export const DEFAULT_PLAN_MAX_CALLS = 40;
+
+export function planMaxCalls(env = process.env): number {
+	const raw = env.NERD_PLAN_MAX_CALLS;
+	if (raw === undefined || raw.trim() === "") return DEFAULT_PLAN_MAX_CALLS;
+	const v = Number(raw);
+	return Number.isInteger(v) && v >= 0 ? v : DEFAULT_PLAN_MAX_CALLS;
+}
+
+export function planBudgetNote(calls: number): string {
+	return (
+		`[harness] That was call ${calls} of this questions-and-plan turn: its budget is spent and the tools are put away. ` +
+		"Reply now, without tools, with the plan in the form asked for, from what you already know; " +
+		"what you could not find out goes under ASSUMPTIONS. The work, with all tools, starts after the plan."
+	);
+}
 
 export function planStepPrompt(): string {
 	// The first version asked for QUESTIONS straight away, and the model
@@ -142,6 +166,8 @@ export interface PlanStepOptions {
 	workTools: string[];
 	/** The tools of the plan turn: PLAN_TOOLS and the packages' read-only ones. */
 	planTools: string[];
+	/** Tool calls allowed in the plan turn before the tools are taken away (0: no budget). */
+	maxCalls: number;
 }
 
 export function planStepOptions(
@@ -151,7 +177,7 @@ export function planStepOptions(
 	planTools: string[] = PLAN_TOOLS,
 ): PlanStepOptions | undefined {
 	if (env.NERD_PLAN_STEP === "0") return undefined;
-	return { operator, workTools, planTools, answer: env.NERD_PLAN_ANSWER || DEFAULT_PLAN_ANSWER };
+	return { operator, workTools, planTools, maxCalls: planMaxCalls(env), answer: env.NERD_PLAN_ANSWER || DEFAULT_PLAN_ANSWER };
 }
 
 /**
@@ -165,6 +191,7 @@ export function planStep(pi: ExtensionAPI, opts: PlanStepOptions) {
 	let assumptions = "";
 	let answer = "";
 	let explicitTask = false;
+	let calls = 0;
 
 	const toWork = () => {
 		phase = "work";
@@ -199,6 +226,7 @@ export function planStep(pi: ExtensionAPI, opts: PlanStepOptions) {
 			questions = [];
 			assumptions = "";
 			answer = "";
+			calls = 0;
 			pi.setActiveTools(opts.planTools);
 			return { message: { customType: "nerd-plan", content: planStepPrompt(), display: true } };
 		}
@@ -209,6 +237,18 @@ export function planStep(pi: ExtensionAPI, opts: PlanStepOptions) {
 			return { message: { customType: "nerd-plan", content: finalPlanPrompt(), display: true } };
 		}
 		return;
+	});
+
+	// The budget: counted over the whole step (both plan turns), not per turn.
+	pi.on("tool_result", (event) => {
+		if (phase === "work" || opts.maxCalls <= 0) return;
+		calls += 1;
+		if (calls !== opts.maxCalls) return;
+		pi.setActiveTools([]);
+		return {
+			content: [...event.content, { type: "text" as const, text: `\n\n${planBudgetNote(calls)}` }],
+			structuredContent: event.structuredContent,
+		};
 	});
 
 	pi.on("agent_before_settle", (event, ctx) => {

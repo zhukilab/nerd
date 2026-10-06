@@ -16,7 +16,7 @@ import { harness } from "../src/harness.ts";
 import { headlessSession } from "../src/headless.ts";
 import { modelDefinition, settingsFor } from "../src/local.ts";
 import { LoopGuard, loopGuardN } from "../src/loop-guard.ts";
-import { parsePlanReply, planFileText } from "../src/plan-step.ts";
+import { DEFAULT_PLAN_MAX_CALLS, parsePlanReply, planFileText, planMaxCalls } from "../src/plan-step.ts";
 
 for (const [k, v] of Object.entries({
 	GIT_AUTHOR_NAME: "t",
@@ -100,6 +100,13 @@ test("loop guard: N from the environment, 0 turns it off", () => {
 	assert.equal(loopGuardN({ NERD_LOOP_GUARD_N: "x" }), 3);
 	const off = new LoopGuard(loopGuardN({ NERD_LOOP_GUARD_N: "0" }));
 	for (let i = 0; i < 5; i++) assert.equal(off.record("bash", { command: "ls" }, "a"), undefined);
+});
+
+test("plan step budget: NERD_PLAN_MAX_CALLS from the environment, 0 = no budget, junk = default", () => {
+	assert.equal(planMaxCalls({}), DEFAULT_PLAN_MAX_CALLS);
+	assert.equal(planMaxCalls({ NERD_PLAN_MAX_CALLS: "5" }), 5);
+	assert.equal(planMaxCalls({ NERD_PLAN_MAX_CALLS: "0" }), 0);
+	assert.equal(planMaxCalls({ NERD_PLAN_MAX_CALLS: "-1" }), DEFAULT_PLAN_MAX_CALLS);
 });
 
 // --- in a headless session against a scripted server ------------------------
@@ -268,6 +275,42 @@ test("headless: no questions — the plan is saved and the work starts in the sa
 		assert.ok(!readFileSync(join(cwd, "PLAN.md"), "utf8").includes("## Questions"));
 	} finally {
 		srv.close();
+	}
+});
+
+test("headless: a plan step that only reads is cut at NERD_PLAN_MAX_CALLS — no tools, a plan, then work (054)", async () => {
+	// The model of the A/B in 048: reads (searches) on and on, never replies.
+	const srv = await scriptedServer((n, s) =>
+		s.tools.length ? (s.tools.includes("write") ? { text: "done" } : { call: { name: "ls", args: { path: `.${"/".repeat(n)}` } } }) : { text: "PLAN\n1. write it — check: cat\nDONE WHEN\n- it is there" },
+	);
+	try {
+		const cwd = await runHeadless(srv.url, "Make a page", { NERD_PLAN_MAX_CALLS: "3" });
+		assert.deepEqual(srv.seen.slice(0, 3).map((s) => s.tools), [READ_ONLY, READ_ONLY, READ_ONLY], "three calls in the plan step");
+		assert.deepEqual(srv.seen[3].tools, [], "after the 3rd call: no tools");
+		assert.match(srv.seen[3].lastTool, /budget is spent and the tools are put away/);
+		assert.deepEqual(srv.seen[4].tools, WORK, "the plan is taken, the work has its tools");
+		assert.equal(srv.seen.length, 5);
+		assert.ok(readFileSync(join(cwd, "PLAN.md"), "utf8").includes("1. write it"));
+	} finally {
+		srv.close();
+	}
+});
+
+test("headless: web_search's provider argument is dropped — SearXNG is used, not a provider without a key (054)", async () => {
+	process.env.WEB_SEARCH_PROVIDER = "searxng";
+	process.env.SEARXNG_URL = "http://127.0.0.1:9"; // nothing listens: SearXNG's own error is expected
+	const srv = await scriptedServer((n) =>
+		n === 1 ? { call: { name: "web_search", args: { query: "roman numerals", provider: "brave" } } } : { text: "stopped" },
+	);
+	try {
+		await runHeadless(srv.url, "Search", { NERD_PLAN_STEP: "0" });
+		assert.equal(srv.seen.length, 2);
+		assert.doesNotMatch(srv.seen[1].lastTool, /BRAVE|API_KEY/i, "no keyed provider was tried");
+		assert.match(srv.seen[1].lastTool, /searxng|127\.0\.0\.1:9|ECONNREFUSED|fetch failed/i, "it went to SearXNG");
+	} finally {
+		srv.close();
+		delete process.env.WEB_SEARCH_PROVIDER;
+		delete process.env.SEARXNG_URL;
 	}
 });
 

@@ -6,7 +6,7 @@
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { TOOLS } from "./local.ts";
 import { loopGuard } from "./loop-guard.ts";
-import { packageReadOnlyTools, packageTools } from "./packages.ts";
+import { packageReadOnlyTools, packageTools, pinWebSearchProvider } from "./packages.ts";
 import { PLAN_TOOLS, planStep, planStepOptions } from "./plan-step.ts";
 
 /** The work's tools: ours plus those of the enabled Pi packages (packages.ts). */
@@ -32,6 +32,7 @@ export function harness(operator: boolean, env = process.env): ExtensionFactory 
 		const work = workTools(env);
 		pi.on("session_start", () => pi.setActiveTools(work));
 		loopGuard(pi);
+		if (work.includes("web_search")) pinWebSearchProvider(pi);
 		const opts = planStepOptions(operator, work, env, planTools(env));
 		if (opts) planStep(pi, opts);
 	};

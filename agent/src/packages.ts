@@ -31,6 +31,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 interface PiPackage {
 	flag: string;
@@ -98,6 +99,21 @@ export function webToolsConfig() {
 			},
 		},
 	};
+}
+
+/**
+ * web_search takes an optional `provider` argument, and the model fills it in:
+ * in the A/B of ticket 048, after a SearXNG error it tried brave, tavily,
+ * perplexity — all without keys, so they failed too (ticket 054). Only
+ * SearXNG is configured here: the argument is dropped before the call and
+ * WEB_SEARCH_PROVIDER decides.
+ */
+export function pinWebSearchProvider(pi: Pick<ExtensionAPI, "on">) {
+	pi.on("tool_call", (event) => {
+		if (event.toolName === "web_search" && event.input && "provider" in event.input) {
+			delete (event.input as Record<string, unknown>).provider;
+		}
+	});
 }
 
 /** Where rpiv-web-tools reads its file: $XDG_CONFIG_HOME if absolute, else ~/.config. */
