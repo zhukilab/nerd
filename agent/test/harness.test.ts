@@ -326,10 +326,13 @@ const hasFd = (() => {
 	}
 })();
 test("headless: Pi's find works with this machine's fd (054)", { skip: !hasFd && "no fd on PATH" }, async () => {
-	const srv = await scriptedServer((n) => (n === 1 ? { call: { name: "find", args: { pattern: "*.txt" } } } : { text: "found" }));
+	// find is a tool of the plan step (PLAN_TOOLS), where it failed in the A/B.
+	const srv = await scriptedServer((n) =>
+		n === 1 ? { call: { name: "find", args: { pattern: "*.txt" } } } : n === 2 ? { text: "PLAN\n1. x\nDONE WHEN\n- y" } : { text: "done" },
+	);
 	try {
-		await runHeadless(srv.url, "Find", { NERD_PLAN_STEP: "0" }, false, [], async () => {}).then((cwd) => cwd);
-		assert.equal(srv.seen.length, 2);
+		await runHeadless(srv.url, "Find", {});
+		assert.ok(srv.seen.length >= 2);
 		assert.doesNotMatch(srv.seen[1].lastTool, /error|wasn't expected|not found/i, `find failed: ${srv.seen[1].lastTool}`);
 	} finally {
 		srv.close();
