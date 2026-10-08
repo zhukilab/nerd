@@ -56,7 +56,9 @@ pinned sha256); later starts take seconds. `./UP` shows the progress of both.
 
 `cp env.example .env` and edit; every line is optional, `env.example` explains
 each. `.env` is read, not executed, and is git-ignored. A variable set in the
-environment wins over the file (`NERD_NAME=test ./UP`).
+environment wins over the file (`NERD_NAME=test ./UP`). Within the file the
+first line for a name wins: edit the line that is there, do not append a
+second one.
 
 | setting | default | |
 |---|---|---|
@@ -69,6 +71,7 @@ environment wins over the file (`NERD_NAME=test ./UP`).
 | `NERD_MODEL_VARIANT` | `q1` | `q1` or `q2` |
 | `NERD_MODEL_GGUF` | none | another GGUF: `hf:<owner>/<repo>/<file>.gguf[@rev]` (downloaded, sha256 checked; `NERD_MODEL_SHA256` pins it) or a file already in the models volume; named `NERD_MODEL_ALIAS` |
 | `NERD_MLX_MODEL` | Bonsai 2, MLX 2-bit, pinned | `NERD_LLAMA=mlx`: `<owner>/<repo>[@rev]` or a directory |
+| `NERD_LLAMA_HOST`, `NERD_HOST_DIR`, `NERD_MLX_PYTHON` | `127.0.0.1`, `~/.nerd`, found | macOS only: the server's address, its directory, the Python for MLX (MACOS.md) |
 | `NERD_SAMPLING` | none (mlx: the model card's) | sampling fields added to every request, e.g. `temperature=0.7,top_p=0.8,top_k=20` |
 | `NERD_CTX` | `65536` | context in tokens |
 | `NERD_SSH_PORT` | `2222` | ssh into the agent's terminal |
@@ -204,7 +207,8 @@ acceptance criteria of the reference task; see the README.
 
 | where | what |
 |---|---|
-| `docker logs <name>-llm` | the server: model download, llama-server |
+| `var/log/up-<time>.log` (in the repository) | everything `./UP` printed; `tools/llama-host.sh` and `tools/mlx-host.sh` write theirs there too |
+| `docker logs <name>-llm` | the server: model download, llama-server (macOS: `~/.nerd/llama-server.log` or `mlx-server.log`) |
 | `docker logs <name>` | the agent's entrypoint: host key fingerprint, waiting for the server |
 | `/logs/sessions/` | conversations (Pi's session files) |
 | `/logs/sshd.log` | logins |

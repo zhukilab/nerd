@@ -18,8 +18,10 @@ no cloud, no API key, nothing leaves the machine except the model download.
 
 ## Quick start
 
-On a Linux machine (or WSL2) with an NVIDIA GPU of 8 GB or more (a Mac with
-Apple silicon: [docs/MACOS.md](docs/MACOS.md)):
+On a Linux machine (or Windows with WSL2: [docs/INSTALL.md](docs/INSTALL.md#windows-wsl2))
+with an NVIDIA GPU of 8 GB or more. A Mac with Apple silicon and 16 GB or
+more has its own short path, never run on a real Mac yet:
+[docs/MACOS.md](docs/MACOS.md). Without a GPU nerd does not run.
 
 ```sh
 git clone --depth=1 https://github.com/zhukilab/nerd && cd nerd
@@ -29,8 +31,9 @@ tools/check-prerequisites.sh      # one table: what is OK, what is MISSING and h
 
 If the check reports anything MISSING, `tools/install-prerequisites.sh` prints
 what it would install on Ubuntu or Debian (Docker Engine, NVIDIA Container
-Toolkit) and `--yes` does it; the NVIDIA driver you install yourself. `./UP`
-ends by printing how to connect:
+Toolkit) and `--yes` does it; the NVIDIA driver you install yourself. The
+first `./UP` builds two images (5-15 minutes) and downloads the model (6 GB).
+It ends by printing how to connect:
 
 ```sh
 ssh -p 2222 nerd@<this machine>   # the agent's terminal (Pi); detach with Ctrl-b d
@@ -39,14 +42,16 @@ ssh -p 2222 nerd@<this machine>   # the agent's terminal (Pi); detach with Ctrl-
 Type the task. What the agent builds for a browser is served on port 8000.
 `./STATUS` says whether everything is up, `./DOWN` stops it (keeping the
 workspace and the conversation). Settings (ports, key, model variant, context,
-the address you open the app at) go in `.env`: `cp env.example .env`.
+the address you open the app at) go in `.env`: `cp env.example .env`. How to
+check it works and what to look at when it does not:
+[docs/INSTALL.md](docs/INSTALL.md#check-that-it-works).
 
 ## Documentation
 
 | | |
 |---|---|
 | [docs/INSTALL.md](docs/INSTALL.md) | platforms (x86_64 + NVIDIA, WSL2, aarch64 GB10), VRAM/disk/RAM per model variant, prerequisites |
-| [docs/MACOS.md](docs/MACOS.md) | macOS on Apple silicon: the model on the Mac (Metal), the agent in its container — new, untested on a real Mac |
+| [docs/MACOS.md](docs/MACOS.md) | macOS on Apple silicon: the model on the Mac (llama-server with Metal, or MLX), the agent in its container — never run on a real Mac yet; what to send back |
 | [docs/OPERATE.md](docs/OPERATE.md) | `./UP` `./DOWN` `./STATUS`, `.env`, connecting, keys, ports, the operator address, PuTTY, headless runs |
 | [docs/MAINTAIN.md](docs/MAINTAIN.md) | updating the model, Pi, the llama.cpp fork, Node; rebuilding; troubleshooting |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | what runs where and why |

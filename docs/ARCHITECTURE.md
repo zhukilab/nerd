@@ -23,7 +23,8 @@
 ```
 
 On macOS the lower box is llama-server on the Mac itself (Metal,
-`tools/llama-host.sh`), reached as `http://host.docker.internal:8080/v1`
+`tools/llama-host.sh`) or mlx-vlm's server (`NERD_LLAMA=mlx`,
+`tools/mlx-host.sh`), reached as `http://host.docker.internal:8080/v1`
 ([MACOS.md](MACOS.md)).
 
 ## Why two containers

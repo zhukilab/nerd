@@ -9,7 +9,7 @@ https://github.com/zhukilab/nerd.
 ```
 UP DOWN STATUS          deploy: bash, settings from .env (template env.example)
 tools/                  check-prerequisites.sh, install-prerequisites.sh, lib.sh (shared),
-                        llama-host.sh (the server on a Mac)
+                        llama-host.sh, mlx-host.sh (the server on a Mac)
 Dockerfile              two targets: server (llama.cpp fork build, CUDA) and agent (Node, Pi, Chromium, sshd)
 container/              entrypoint.sh (both images' modes), model.sh (model pins, server arguments),
                         sshd/tmux config, pkill guard, browse wrapper, in-image tests

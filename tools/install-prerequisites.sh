@@ -38,6 +38,8 @@ if [ "$(uname -s)" != Linux ]; then
 This is not Linux. nerd runs on Linux with an NVIDIA GPU, or on Windows through
 WSL2: install the NVIDIA driver on Windows, create a WSL2 Ubuntu distribution,
 clone nerd inside it and run this script there. See docs/INSTALL.md.
+On a Mac with Apple silicon this script has nothing to do: Docker Desktop,
+xcode-select --install and brew install bash cmake, then docs/MACOS.md.
 EOF
   exit 1
 fi

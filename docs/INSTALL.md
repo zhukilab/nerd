@@ -1,9 +1,9 @@
 # Installing nerd
 
-nerd needs a Linux machine with an NVIDIA GPU, Docker, and the NVIDIA
-Container Toolkit. **macOS on Apple silicon** runs the model on the Mac itself
-and the agent in its container: [MACOS.md](MACOS.md) (new, untested on a real
-Mac). Everything else is in two images built from this repository — the
+nerd needs a Linux machine (or Windows with WSL2) with an NVIDIA GPU of 8 GB
+or more, Docker, and the NVIDIA Container Toolkit. **macOS on Apple silicon**
+runs the model on the Mac itself and the agent in its container:
+[MACOS.md](MACOS.md) (never run on a real Mac yet). Everything else is in two images built from this repository — the
 server's (CUDA runtime, llama-server) and the agent's (Node.js, the agent, a
 headless browser) — and the model is downloaded on first start.
 
@@ -24,9 +24,12 @@ cp env.example .env                     # optional: ports, key, variant, context
 | Windows 11 + WSL2 + NVIDIA | tested (the same laptop) | Docker Engine inside a WSL2 Ubuntu distribution; see below |
 | Linux aarch64, NVIDIA GB10 (DGX Spark and similar) | tested | `CUDA_ARCH=121`, CUDA 13.0.1; GPU through CDI; detected automatically |
 | RTX 40xx (sm_89), RTX 50xx (sm_120) | should work, untested | `./UP` detects the compute capability; sm_100+ builds with CUDA 13.0.1, which needs driver 580+ |
-| macOS, AMD, Intel GPUs | no | the model needs PrismML's CUDA kernels |
+| macOS on Apple silicon | never run on a Mac | llama-server with Metal or MLX on the Mac, the agent in Docker Desktop: [MACOS.md](MACOS.md) |
+| AMD or Intel GPUs | no | the container build has only PrismML's CUDA kernels |
+| no GPU (CPU only) | no, not tried | `./UP` has no CPU mode; a 27B model on a CPU would be far too slow for an agent anyway |
 
-`./UP` reads the compute capability from `nvidia-smi` and passes it to the
+The NVIDIA driver must be 550 or newer (CUDA 12.4.1), 580 or newer for
+sm_100+. `./UP` reads the compute capability from `nvidia-smi` and passes it to the
 build as `CUDA_ARCH` (e.g. `8.6` → `86`); `NERD_CUDA_ARCH` and
 `NERD_CUDA_VERSION` in `.env` override it. The image's CUDA version must not be
 newer than the driver supports (`nvidia-smi` prints "CUDA Version"); the check
@@ -100,8 +103,15 @@ on the Linux side except the container toolkit.
    (`wsl.conf` is read when the distribution starts; other distributions keep
    running). If `systemctl is-system-running` inside then says neither
    `running` nor `degraded`, `wsl --shutdown` (it stops every distribution).
-3. Inside the distribution: clone, `tools/install-prerequisites.sh --yes`,
-   `./UP`. `nvidia-smi` inside WSL should list the GPU.
+3. Inside the distribution: clone, `tools/install-prerequisites.sh --yes`;
+   it adds you to group `docker`, which takes effect in a new login (close the
+   terminal, or `wsl --terminate <distribution>`); then
+   `tools/check-prerequisites.sh` and `./UP`. `nvidia-smi` inside WSL should
+   list the GPU.
+   The ssh key: `./UP` takes the public key from `~/.ssh` inside WSL. To log
+   in from Windows (PowerShell's `ssh`, PuTTY), point it at the Windows one:
+   `NERD_AUTHORIZED_KEYS_FILE` in `.env` set to the Windows `.pub` file as WSL
+   sees it (`/mnt/<drive letter>/Users/<you>/.ssh/id_ed25519.pub`) (`ssh-keygen -t ed25519` in PowerShell makes one).
 4. WSL2 gets half of the Windows RAM by default; `.wslconfig` (`memory=`)
    changes it. `.wslconfig` is WSL's VM as a whole: it takes effect only after
    `wsl --shutdown`.
@@ -124,6 +134,25 @@ Things that behave differently on WSL2:
   kernel; if services inside fail to start afterwards, `wsl --shutdown`.
 - Laptops: the vendor's power mode matters. On the tested laptop a quiet
   power mode halved generation speed (13 against about 24 tokens/s).
+- Docker Desktop for Windows (its WSL integration) instead of Docker Engine
+  inside the distribution: untested. `tools/install-prerequisites.sh` leaves
+  an existing docker alone.
+
+## Check that it works
+
+1. `./UP` ends with "ready" and how to connect; `./STATUS` shows every line
+   `OK` or `INFO` and exits 0.
+2. `ssh -p 2222 nerd@localhost` (or `nerd@<host>`) shows Pi's screen.
+3. A first task: *create hello.html with the text hi and serve it on port
+   8000*. The agent answers first with its questions or "none" and a numbered
+   plan; answer "your call". When it is done, `http://<host>:8000/hello.html`
+   opens.
+
+If something fails, these say what happened: `var/log/up-<time>.log` (all
+that `./UP` printed; it names the file at the start and the end), the output
+of `tools/check-prerequisites.sh` and `./STATUS`, `docker logs nerd-llm` (the
+server) and `docker logs nerd` (the agent);
+[MAINTAIN.md](MAINTAIN.md#troubleshooting) lists the usual causes.
 
 ## Next
 
