@@ -210,6 +210,14 @@ node/npm command in a README "Run" section) that serves `/` on `$PORT`; no
 linter errors in the files changed. What fails goes back to the model as one
 message, at most twice per operator message (`NERD_DONE_GATE_ROUNDS`); a
 passing check adds nothing (`NERD_DONE_GATE=0` = off).
+With `NERD_RALPH=1` (off by default until measured) the plan's DONE WHEN items
+each carry a command, and the harness runs them in a clean clone after the
+work ([`agent/src/ralph.ts`](agent/src/ralph.ts), decision 0014 in nerd-doc):
+if any fails, the conversation is compacted and a new round starts from the
+files with the failures, until all pass, the same failures come back twice, or
+`NERD_RALPH_ROUNDS` (3) / `NERD_RALPH_MINUTES` are used. The checks are the
+plan as committed; an edit of them, or a check that passes after its own files
+changed, is reported, not hidden.
 A `bash` output longer than `NERD_BASH_MAX_CHARS` (8000 characters; 0 = off)
 reaches the model as its first and last lines, with the place of the whole
 output in between ([`agent/src/output-cap.ts`](agent/src/output-cap.ts)); runs
@@ -290,7 +298,7 @@ Server defaults, each overridable in the server's environment (through
 `NERD_SLOTS=1`, prompt cache off (`--cache-ram 0`: its KV snapshots overflow an
 8 GB card), extra flags in `NERD_LLAMA_ARGS`. The agent's own variables
 (`NERD_THINKING`, `NERD_VERIFY_N`, `NERD_SPEC_CHECK`, `NERD_BASH_TIMEOUT`,
-`NERD_PLAN_STEP`, `NERD_PLAN_ANSWER`, `NERD_LOOP_GUARD_N`, `NERD_FETCH_GUARD`, `NERD_LINT`, `NERD_DONE_GATE`, `NERD_BASH_MAX_CHARS`, `NERD_QUIET`, `NERD_ANCHORS`, `NERD_RULES_FILE`, `NERD_SUMMARY_GOAL`, `NERD_VCC_RECALL`, `NERD_WEB_NOTES`, `NERD_PI_VCC`, `NERD_WEB`) are described in
+`NERD_PLAN_STEP`, `NERD_PLAN_ANSWER`, `NERD_LOOP_GUARD_N`, `NERD_FETCH_GUARD`, `NERD_LINT`, `NERD_DONE_GATE`, `NERD_RALPH`, `NERD_BASH_MAX_CHARS`, `NERD_QUIET`, `NERD_ANCHORS`, `NERD_RULES_FILE`, `NERD_SUMMARY_GOAL`, `NERD_VCC_RECALL`, `NERD_WEB_NOTES`, `NERD_PI_VCC`, `NERD_WEB`) are described in
 [`agent/src/run.ts`](agent/src/run.ts). `HF_TOKEN` is sent to Hugging Face if
 set. Header comments of [`Dockerfile`](Dockerfile) and
 [`container/entrypoint.sh`](container/entrypoint.sh) list the rest.

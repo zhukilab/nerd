@@ -28,6 +28,10 @@
 //   NERD_DONE_GATE=0  no check of the committed project when a turn of work
 //                  ends (src/done-gate.ts); NERD_DONE_GATE_ROUNDS bounds the
 //                  messages it sends back per operator message (default 2)
+//   NERD_RALPH=1   the Ralph loop (src/ralph.ts, decision 0014): the plan's DONE
+//                  WHEN items carry check commands; after the work they run in a
+//                  clean clone, and failures start a new round from the files
+//                  (NERD_RALPH_ROUNDS, default 3; NERD_RALPH_MINUTES, default none)
 //   NERD_BASH_MAX_CHARS  a longer bash output reaches the model as head and tail,
 //                  the whole of it in a file (default 8000, 0 = off; src/output-cap.ts)
 //   NERD_QUIET=0   no quiet defaults (NO_COLOR, npm fund/audit, ...) for the
@@ -57,6 +61,7 @@ import { harness } from "./harness.ts";
 import { headlessSession } from "./headless.ts";
 import { localModel, modelDefinition, settingsFor, stayOffline, withVerifier } from "./local.ts";
 import { enabledPackages } from "./packages.ts";
+import { ralphOn, ralphOptions, runRalphHeadless } from "./ralph.ts";
 import { runSpecCheck } from "./spec-check.ts";
 
 stayOffline();
@@ -142,6 +147,16 @@ async function main() {
 
 	try {
 		await session.prompt(task);
+		// The Ralph loop (decision 0014): rounds from the files until the DONE
+		// WHEN checks pass, no progress, or the budget.
+		if (ralphOn()) {
+			const opts = ralphOptions();
+			const d = await runRalphHeadless(session, cwd, task, opts, (r) => {
+				if (logPath) appendFileSync(logPath, `${JSON.stringify({ t: Date.now() - t0, type: "ralph_round", ...r })}\n`);
+				process.stdout.write(`\n[ralph round ${r.round}/${opts.maxRounds}: ${r.kind}, ${r.failures.length} failing]\n`);
+			});
+			process.stdout.write(`\n${d.kind === "next" ? "" : d.report}\n`);
+		}
 		// Spec check before done (ticket 030): off unless NERD_SPEC_CHECK=1, and
 		// only after a first reply that ended by itself.
 		const first = session.messages.at(-1) as { role?: string; stopReason?: string };

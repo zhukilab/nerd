@@ -48,13 +48,13 @@ export function doneGateRounds(env = process.env): number {
 	return Number.isFinite(n) && n >= 0 ? n : 2;
 }
 
-const INSTALL_MS = 300_000;
-const TEST_MS = 300_000;
+export const INSTALL_MS = 300_000;
+export const TEST_MS = 300_000;
 const SERVE_MS = 20_000;
 const TAIL_LINES = 15;
 const NPM_INIT_STUB = /no test specified/;
 
-type Run = { code: number | null; out: string };
+export type Run = { code: number | null; out: string };
 
 // The project's own environment, without what would change how its tests run:
 // under a node:test parent, NODE_TEST_CONTEXT makes a child `node --test`
@@ -88,7 +88,7 @@ const GUARD = join(dirname(fileURLToPath(import.meta.url)), "gate-guard.cjs");
 // The project's test and start command see the machine as the operator's clean
 // container would: loopback ports that were already listening (the agent's own
 // server, say) refuse connections (gate-guard.cjs).
-function isolatedEnv(blocked: number[], extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+export function isolatedEnv(blocked: number[], extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
 	const opts = [process.env.NODE_OPTIONS, `--require ${GUARD}`].filter(Boolean).join(" ");
 	return projectEnv({ ...extra, NODE_OPTIONS: opts, NERD_GATE_BLOCKED_PORTS: blocked.join(",") });
 }
@@ -96,7 +96,7 @@ function isolatedEnv(blocked: number[], extra: NodeJS.ProcessEnv = {}): NodeJS.P
 const PORT_HOW =
 	"Make the server read its port from the environment, e.g. `const port = process.env.PORT || 8000;`, and listen on that. Do not stop other servers to free a port: the operator's checker and the gate start yours with their own PORT.";
 
-function sh(cmd: string, args: string[], cwd: string, timeout: number, env: NodeJS.ProcessEnv = projectEnv()): Promise<Run> {
+export function sh(cmd: string, args: string[], cwd: string, timeout: number, env: NodeJS.ProcessEnv = projectEnv()): Promise<Run> {
 	return new Promise((res) => {
 		execFile(cmd, args, { cwd, timeout, env, maxBuffer: 16 * 1024 * 1024, killSignal: "SIGKILL" }, (err, stdout, stderr) => {
 			const code = err ? (typeof (err as { code?: unknown }).code === "number" ? (err as { code: number }).code : null) : 0;
@@ -115,7 +115,7 @@ function tail(text: string, n = TAIL_LINES): string {
 const FAIL_LINE = /^\s*(not ok\b|✖|×)|Error\b|ECONNREFUSED|EADDRINUSE|\bexpected\b|\bactual\b/i;
 
 /** What failed first (the runner's failure lines), then the end of the output. */
-function testExcerpt(out: string): string {
+export function testExcerpt(out: string): string {
 	const clean = out.replace(/\x1b\[[0-9;]*m/g, "");
 	const hits = [...new Set(clean.split("\n").filter((l) => FAIL_LINE.test(l)).map((l) => l.trim()))].slice(0, 10);
 	const refused = /ECONNREFUSED (127\.\d+\.\d+\.\d+|localhost|::1)/.test(clean)
@@ -315,14 +315,14 @@ Fix each, commit, and then finish your reply again.`;
 }
 
 /** What changed in the repository: HEAD and the working tree's status. */
-async function fingerprint(cwd: string): Promise<string> {
+export async function fingerprint(cwd: string): Promise<string> {
 	const h = await git(cwd, "rev-parse", "-q", "HEAD");
 	const s = await git(cwd, "status", "--porcelain");
 	return `${h.out.trim()}\n${s.out}`;
 }
 
 /** Files changed since `base` (a commit, or none: everything tracked), plus the working tree's. */
-async function changedSince(cwd: string, base: string | undefined): Promise<string[]> {
+export async function changedSince(cwd: string, base: string | undefined): Promise<string[]> {
 	const committed = base
 		? await git(cwd, "diff", "--name-only", "--relative", base, "HEAD")
 		: await git(cwd, "ls-files");

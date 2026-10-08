@@ -7,7 +7,8 @@
 // (done-gate.ts), the sampling settings of every request (sampling.ts,
 // NERD_SAMPLING), the operator's rules for every project (rules.ts) and the
 // compaction summary's goal set to the task (summary-goal.ts; process ticket
-// 061). The TUI loads it from
+// 061), and with NERD_RALPH=1 the Ralph loop (ralph.ts, decision 0014). The
+// TUI loads it from
 // extension.ts, the headless run through headless.ts.
 
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
@@ -20,6 +21,7 @@ import { loopGuard } from "./loop-guard.ts";
 import { outputCap } from "./output-cap.ts";
 import { packageReadOnlyTools, packageTools, pinWebSearchProvider } from "./packages.ts";
 import { PLAN_TOOLS, planStep, planStepOptions } from "./plan-step.ts";
+import { ralph, ralphOn, ralphOptions } from "./ralph.ts";
 import { rules } from "./rules.ts";
 import { parseSampling, sampling } from "./sampling.ts";
 import { summaryGoal, summaryGoalOn } from "./summary-goal.ts";
@@ -58,6 +60,8 @@ export function harness(operator: boolean, env = process.env): ExtensionFactory 
 		if (anchorsOn(env)) anchors(pi, env);
 		if (summaryGoalOn(env)) summaryGoal(pi, work.includes("vcc_recall"));
 		rules(pi, env);
+		// The Ralph loop: by events in the TUI; the headless run drives it itself (run.ts).
+		if (operator && ralphOn(env)) ralph(pi, ralphOptions(env));
 		const opts = planStepOptions(operator, work, env, planTools(env));
 		if (opts) planStep(pi, opts);
 	};

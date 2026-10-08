@@ -49,11 +49,16 @@ export function planBudgetNote(calls: number): string {
 	);
 }
 
-export function planStepPrompt(): string {
+export function planStepPrompt(checks = process.env.NERD_RALPH === "1"): string {
 	// The first version asked for QUESTIONS straight away, and the model
 	// answered "none" to an open request (run 1 of ticket 043). Listing the
 	// choices it would otherwise guess comes first now; the questions are
-	// picked from that list.
+	// picked from that list. With the Ralph loop (ralph.ts) every DONE WHEN item
+	// carries the command the harness runs to check it (done-when.ts).
+	const done = checks
+		? `- <what the operator can do and see when it is finished> — check: \`<a shell command, run from the project root in a clean clone, that exits 0 only if this is true>\`
+(one item per requirement of the request; a claim of quality — harder, faster, correct rules, fits a phone — gets a command that measures it, e.g. plays many games between neighbouring levels, or opens the page with \`browse\` and finds the text; a fact from the web goes into the README as \`> "<the page's exact words>" — notes/web/<file>.md\`, and the harness checks the words against that saved page)`
+		: "- <what the operator can do and see when it is finished>";
 	return `[harness] A new task. This turn is for questions and a plan only: you can read files, not change them.
 Reply in exactly this form:
 ASSUMPTIONS
@@ -63,7 +68,7 @@ QUESTIONS
 PLAN
 1. <step> — check: <how you will check it>
 DONE WHEN
-- <what the operator can do and see when it is finished>`;
+${done}`;
 }
 
 export function finalPlanPrompt(answer?: string): string {
