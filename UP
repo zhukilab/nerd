@@ -7,7 +7,11 @@
 # Settings: .env (see env.example). Docs: docs/OPERATE.md.
 #
 #   ./UP              build if needed, start, wait for the model
-#   ./UP --build      rebuild the images first (after git pull)
+#   ./UP --build      rebuild the images first (after git pull); docker's cache keeps
+#                     what did not change, and a server built on this machine stays
+#   ./UP --rebuild    rebuild everything from nothing, when something is off: the
+#                     images without the cache and with fresh base images; on a Mac
+#                     the llama-server built here (or the MLX venv) as well
 #   ./UP --no-wait    start and return; ./STATUS tells when it is ready
 #   ./UP --dry-run    print the compose command and its resolved configuration, run nothing
 #
@@ -27,10 +31,11 @@ build=0 wait=1 dry=0
 for a in "$@"; do
   case "$a" in
     --build) build=1 ;;
+    --rebuild) build=2 ;;
     --no-wait) wait=0 ;;
     --dry-run) dry=1 ;;
-    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
-    *) echo "UP: unknown argument '$a' (--build, --no-wait, --dry-run)" >&2; exit 2 ;;
+    -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
+    *) echo "UP: unknown argument '$a' (--build, --rebuild, --no-wait, --dry-run)" >&2; exit 2 ;;
   esac
 done
 
@@ -77,6 +82,8 @@ nerd_compose_env
 # kept, one with other settings restarted (tools/llama-host.sh start,
 # tools/mlx-host.sh start). It must answer before the agent starts.
 if nerd_on_host; then
+  # --rebuild: the host script builds llama-server (or makes the venv) again.
+  [ "$build" = 2 ] && export NERD_REBUILD=1
   run "$(nerd_host_tool)" start \
     || die "the model server on this machine did not start (above; docs/MACOS.md, troubleshooting)"
 fi
@@ -93,7 +100,10 @@ services=(agent); [ "$NERD_LLAMA" = container ] && services+=(llm)
 for s in "${services[@]}"; do
   if [ "$s" = agent ]; then img=$NERD_IMAGE; what="the agent image $NERD_IMAGE ($(uname -m)); first build: 5-10 min"
   else img=$NERD_SERVER_IMAGE; what="the server image $NERD_SERVER_IMAGE (CUDA_ARCH=$NERD_CUDA_ARCH, CUDA_VERSION=$NERD_CUDA_VERSION); first build: 5-15 min plus the CUDA base image download"; fi
-  if [ "$build" = 1 ] || ! docker image inspect "$img" >/dev/null 2>&1; then
+  if [ "$build" = 2 ]; then
+    say "rebuilding from nothing $what"
+    nerd_compose build --no-cache --pull "$s"
+  elif [ "$build" = 1 ] || ! docker image inspect "$img" >/dev/null 2>&1; then
     say "building $what"
     nerd_compose build "$s"
   fi

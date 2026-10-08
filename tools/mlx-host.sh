@@ -21,6 +21,8 @@
 #                     pinned revision); e.g. mlx-community/Qwen3.5-2B-4bit to try quickly
 #   NERD_MLX_PYTHON   the python3.12/3.13 to make the venv with (default: the first found)
 #   NERD_MLX_ARGS     extra mlx_vlm.server arguments, word-split
+#   NERD_REBUILD=1    make the venv again and restart the server even when nothing
+#                     changed (./UP --rebuild sets it)
 # Written for the bash macOS ships (3.2) as well.
 set -euo pipefail
 # shellcheck source=tools/lib.sh
@@ -82,7 +84,7 @@ install() {
   local py stamp
   apple_only
   stamp=$(sha256 "$reqs")
-  if [ -x "$venv/bin/python" ] && [ "$(cat "$venv/REQS" 2>/dev/null)" = "$stamp" ]; then
+  if [ -x "$venv/bin/python" ] && [ "$(cat "$venv/REQS" 2>/dev/null)" = "$stamp" ] && [ "${NERD_REBUILD:-0}" != 1 ]; then
     say "mlx-vlm already installed: $venv"; return 0
   fi
   py=$(python_for_venv) || die "no Python 3.12 or 3.13: brew install python@3.13 (or set NERD_MLX_PYTHON in .env)"
@@ -136,7 +138,7 @@ start() {
   # shellcheck disable=SC2086
   set -- "$venv/bin/python" -m mlx_vlm.server --model "$mdir" --host "$bind" --port "$port" ${NERD_MLX_ARGS:-}
   if pid=$(running_pid); then
-    if [ "$(cat "$argsf" 2>/dev/null)" = "$*" ]; then say "already running with these settings (pid $pid)"; return 0; fi
+    if [ "$(cat "$argsf" 2>/dev/null)" = "$*" ] && [ "${NERD_REBUILD:-0}" != 1 ]; then say "already running with these settings (pid $pid)"; return 0; fi
     say "running with other settings (pid $pid), restarting; was: $(cat "$argsf" 2>/dev/null || echo unknown)"
     stop
   fi

@@ -4,7 +4,9 @@
 
 ```sh
 ./UP                  # build the images if missing, start the server and the agent, wait, print how to connect
-./UP --build          # rebuild first (after git pull)
+./UP --build          # rebuild first (after git pull); docker's cache keeps what did not change
+./UP --rebuild        # rebuild everything from nothing when something is off: no cache, fresh base images, the host server too
+tools/report.sh       # one archive with logs, checks and machine facts to send when something fails
 ./UP --no-wait        # return at once; ./STATUS says when it is ready
 ./UP --dry-run        # print the compose command and the resolved compose configuration only
 ./STATUS              # both containers, llama-server as the agent reaches it, sshd, the agent's tmux session, the app port

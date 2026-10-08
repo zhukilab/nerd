@@ -18,6 +18,8 @@
 #   NERD_HOST_DIR     where the source, build, model and log go (~/.nerd)
 #   NERD_LLAMA_HOST   address the server listens on (127.0.0.1)
 #   NERD_LLAMA_ARGS   extra llama-server arguments, word-split
+#   NERD_REBUILD=1    build again from a fresh clone and restart the server even
+#                     when nothing changed (./UP --rebuild sets it)
 # Written for the bash macOS ships (3.2) as well.
 set -euo pipefail
 # shellcheck source=tools/lib.sh
@@ -85,7 +87,7 @@ build() {
     command -v "$t" >/dev/null 2>&1 || die "$t not found (macOS: brew install $t; the compiler: xcode-select --install)"
   done
   mkdir -p "$dir"
-  if [ -x "$bin" ] && [ "$(cat "$src/REF" 2>/dev/null)" = "$ref" ]; then
+  if [ -x "$bin" ] && [ "$(cat "$src/REF" 2>/dev/null)" = "$ref" ] && [ "${NERD_REBUILD:-0}" != 1 ]; then
     say "llama-server $ref already built: $bin"; return 0
   fi
   compilers
@@ -155,7 +157,7 @@ start() {
   # A server started with other settings (a variant or context changed in
   # .env) is restarted, as ./UP replaces a server container whose settings changed.
   if pid=$(running_pid); then
-    if [ "$(cat "$argsf" 2>/dev/null)" = "$*" ]; then say "already running with these settings (pid $pid)"; return 0; fi
+    if [ "$(cat "$argsf" 2>/dev/null)" = "$*" ] && [ "${NERD_REBUILD:-0}" != 1 ]; then say "already running with these settings (pid $pid)"; return 0; fi
     say "running with other settings (pid $pid), restarting; was: $(cat "$argsf" 2>/dev/null || echo unknown)"
     stop
   fi

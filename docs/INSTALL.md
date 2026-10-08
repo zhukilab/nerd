@@ -151,7 +151,9 @@ Things that behave differently on WSL2:
 If something fails, these say what happened: `var/log/up-<time>.log` (all
 that `./UP` printed; it names the file at the start and the end), the output
 of `tools/check-prerequisites.sh` and `./STATUS`, `docker logs nerd-llm` (the
-server) and `docker logs nerd` (the agent);
+server) and `docker logs nerd` (the agent); `tools/report.sh` packs all of
+them into one archive to send. After an update that went wrong, `./UP --rebuild`
+builds everything again without docker's cache.
 [MAINTAIN.md](MAINTAIN.md#troubleshooting) lists the usual causes.
 
 ## Next

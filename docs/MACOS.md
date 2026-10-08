@@ -118,7 +118,10 @@ it asks its questions and shows a plan first, then works. Detach with
 
 ## What to send back
 
-Whether it worked or not — this is the first run on a Mac, so all of it helps:
+Whether it worked or not — this is the first run on a Mac, so all of it helps.
+**The short way:** `tools/report.sh` packs items 1–5 below into one archive
+(`var/report/nerd-report-<time>.tar.gz`, tokens in `.env` masked, the list of
+files printed); send that file plus items 6 and 7 in words. By hand:
 
 1. the log files: `./UP` and the host scripts write everything they print to
    `var/log/<command>-<time>.log` in the repository (`up-…`, `llama-host-…`,
@@ -144,6 +147,7 @@ Whether it worked or not — this is the first run on a Mac, so all of it helps:
 | another variant or context | edit `.env`, `./UP`: it restarts a server running with other settings |
 | the server's log | `tools/llama-host.sh logs` (Ctrl-C ends the view, not the server) |
 | update | `git pull`, `./UP --build` (llama-server is rebuilt only if the pinned tag changed) |
+| something is off after an update | `./UP --rebuild`: the agent's image without docker's cache, llama-server from a fresh clone (or the MLX venv made again), the server restarted |
 | remove | `./DOWN --purge-models` (containers, volumes), `rm -rf ~/.nerd` (the server, model, venv), `docker image rm nerd:agent`, and the repository |
 
 The agent's container has a restart policy; started before the server, it
