@@ -21,6 +21,11 @@
 #                     pinned revision); e.g. mlx-community/Qwen3.5-2B-4bit to try quickly
 #   NERD_MLX_PYTHON   the python3.12/3.13 to make the venv with (default: the first found)
 #   NERD_MLX_ARGS     extra mlx_vlm.server arguments, word-split
+#   NERD_MLX_APC      1 (default): the server keeps the prompt it has computed
+#                     (mlx-vlm's automatic prefix cache, in memory) so an agent's next
+#                     turn computes only what is new; 0: every request from scratch,
+#                     as mlx-vlm does by default (first Mac report: 52 s for a 2.5K
+#                     prompt, every turn)
 #   NERD_REBUILD=1    make the venv again and restart the server even when nothing
 #                     changed (./UP --rebuild sets it)
 # Written for the bash macOS ships (3.2) as well.
@@ -135,8 +140,23 @@ fetch() {
 start() {
   # The model is named by its directory: that is the id the server reports
   # (/health loaded_model) and the agent sends back.
+  # The prefix cache is switched by the environment only (mlx-vlm 0.7.2 has no
+  # flag); it goes into the command so that the settings check below sees it.
+  # Memory only: a disk copy would grow in the user's cache directory.
+  # Bonsai 2's linear-attention layers keep a state that cannot be cut back to
+  # a shorter prefix, so mlx-vlm snapshots the whole cache: at the end of a
+  # prompt and at the last multiple of APC_CHECKPOINT_INTERVAL_TOKENS below it
+  # (two snapshots). The next turn's prompt differs from the last one just
+  # before its end (the reply's template), so it resumes from that boundary:
+  # 512 instead of the default 2048 leaves at most ~500 tokens to read again.
+  # MLX_VLM_TOKEN_QUEUE_TIMEOUT: the server gives up on a request after 600 s
+  # without a token, and a long prompt read from scratch (30K tokens at the
+  # ~50 tokens/s of an M1 Pro) takes about that long: an hour instead.
+  local apc=0; [ "${NERD_MLX_APC:-1}" = 1 ] && apc=1
   # shellcheck disable=SC2086
-  set -- "$venv/bin/python" -m mlx_vlm.server --model "$mdir" --host "$bind" --port "$port" ${NERD_MLX_ARGS:-}
+  set -- env APC_ENABLED=$apc APC_DISK_ENABLED=0 APC_CHECKPOINT_INTERVAL_TOKENS=512 \
+    MLX_VLM_TOKEN_QUEUE_TIMEOUT=3600 \
+    "$venv/bin/python" -m mlx_vlm.server --model "$mdir" --host "$bind" --port "$port" ${NERD_MLX_ARGS:-}
   if pid=$(running_pid); then
     if [ "$(cat "$argsf" 2>/dev/null)" = "$*" ] && [ "${NERD_REBUILD:-0}" != 1 ]; then say "already running with these settings (pid $pid)"; return 0; fi
     say "running with other settings (pid $pid), restarting; was: $(cat "$argsf" 2>/dev/null || echo unknown)"

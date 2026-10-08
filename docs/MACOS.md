@@ -1,14 +1,13 @@
 # nerd on macOS (Apple silicon)
 
-**Status: never run on a real Mac.** Both Mac paths below were checked only on
-Linux: the agent's image without CUDA, the agent talking to a model server
-outside its container through `host.docker.internal`, `./UP`, `./STATUS`,
-`./DOWN`; the MLX server on Linux's CPU build of mlx (tool calls, streaming).
-Not checked anywhere: the Metal build of llama-server finishing on a Mac, the
-model's speed and memory on a Mac, MLX on Metal. One report from a Mac so far
-(a compiler error, fixed: [troubleshooting](#troubleshooting)). If you try it,
-please send back what [the end of this page](#what-to-send-back) lists, whether
-it worked or not.
+**Status: run on one Mac so far** (2026-10-08: M1 Pro, 16 GB, macOS 14.6).
+Both paths came up there. llama-server built with Metal and served the agent
+(conversations up to 47K tokens). MLX installed once a checksum missing from
+the lock was added (fixed since), loaded the model and served the agent;
+`./STATUS` all OK. The speed row below is that Mac's. Not yet seen: another
+Mac, and a whole task done by the agent on a Mac. If you try it, please send
+back what [the end of this page](#what-to-send-back) lists (`tools/report.sh`
+packs it), whether it worked or not.
 
 ## Which way: llama-server or MLX
 
@@ -21,15 +20,17 @@ says otherwise.
 |---|---|---|
 | what runs | PrismML's llama.cpp fork, built on the Mac (same tag as the Linux image) | mlx-vlm's server in a Python venv, nothing to compile |
 | the model | the same GGUF as on Linux, 5.95 GB | the same weights in MLX 2-bit, 8.6 GB |
-| memory | 16 GB works (tight), 24 GB+ comfortable | 24 GB+ recommended; 16 GB only with `NERD_CTX=32768`, if at all |
-| speed | not measured on a Mac | PrismML's figure: about 47 tokens/s on an M5 Max; not measured here |
+| memory | 16 GB works (tight), 24 GB+ comfortable | 24 GB+ recommended; on 16 GB `tools/check-prerequisites.sh` flags 64K as too much: `NERD_CTX=32768` |
+| speed, M1 Pro 16 GB | writing 4.6 tokens/s; reading the prompt 70–90 tokens/s; each turn reads only what is new (100–200 tokens), the rest is kept | writing about 11 tokens/s; reading the prompt about 50 tokens/s. mlx-vlm keeps nothing by default: every turn read the whole prompt again (52 s for 2.5K tokens, minutes at 30K). nerd now turns on its prefix cache (`NERD_MLX_APC`, on) — checked on Linux's CPU mlx, not yet on a Mac |
 | needs | Command Line Tools, Homebrew `bash` and `cmake` | Homebrew `bash`, Python 3.12 or 3.13, macOS 14+ |
-| what is proven | the same server and model file run every tested Linux setup | the loader and tool calls, on Linux's CPU mlx only |
+| what is proven | the same server and model file run every tested Linux setup; served the agent on the Mac above | served the agent on the Mac above; tool calls; the prefix cache on Linux's CPU mlx only |
 
 **Start with llama-server** (the default): it is the engine every tested
-setup uses, with the same file, checksum and arguments, and it fits a 16 GB
-Mac. Take MLX if your Mac has 24 GB or more and you want to try the faster
-path, or if the llama-server build fails on your Mac.
+setup uses, with the same file, checksum and arguments, it fits a 16 GB Mac,
+and on a long conversation it is the faster of the two because it reads only
+what is new each turn. MLX writes faster (11 against 4.6 tokens/s on an M1
+Pro) and is worth trying on 24 GB or more, now with its prefix cache on; tell
+us how a long task goes.
 
 ```
 macOS                                         Docker Desktop (Linux VM)

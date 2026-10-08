@@ -58,6 +58,10 @@ mlx==0.32.2 \
     --hash=sha256:df8c75e509de868fca148dfeb38d92ce956eed386569c87caeb72bd16d2d6962
 mlx-audio==0.5.8 \
     --hash=sha256:cf2eaef3d5d965d3a0a5c98ab68d4867db51daace190a77b3b9576577a7d2eab
+mlx-metal==0.32.2 \
+    --hash=sha256:3825fff379dbc107dd3413e564a06caeaa24819910ec49c0439e454c06a1b9b8 \
+    --hash=sha256:55a369250d220b2cf10213a87a2ac1b1a420608c5b35b1df4e7147ac8e32f121 \
+    --hash=sha256:e6abeac9ac5265830c9c1541b6f96e9be37a85c2446763a46ad466c63a3837ab
 mlx-vlm==0.7.2 \
     --hash=sha256:136dcd46fd2f5dae9e7de787e8c1b6a6bdf806c76bae3872ceb5ae3d638566dc
 numpy==2.5.3 \
