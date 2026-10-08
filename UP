@@ -64,7 +64,8 @@ if [ "$NERD_LLAMA" = mlx ] && [ "$(uname -s)" != Darwin ] && [ "$dry" = 0 ]; the
   die "NERD_LLAMA=mlx runs on a Mac with Apple silicon only (MLX); elsewhere: container"
 fi
 # The agent refuses a malformed NERD_SAMPLING at its start; say so here first.
-for kv in ${NERD_SAMPLING//,/ }; do
+sampling=${NERD_SAMPLING:-}
+for kv in ${sampling//,/ }; do
   [[ "$kv" =~ ^(temperature|top_p|top_k|min_p|presence_penalty|frequency_penalty|repetition_penalty)=-?[0-9.]+$ ]] \
     || die "NERD_SAMPLING: '$kv' is not <temperature|top_p|top_k|min_p|presence_penalty|frequency_penalty|repetition_penalty>=<number>"
 done
