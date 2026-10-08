@@ -18,9 +18,12 @@ export function stayOffline() {
 // rewritten again and again, checks typed once and lost, a surprising result
 // blamed on the tool (or "solved" by repeating the call), a remark answered
 // with a rewrite, and "verified and working" with nothing behind it. They
-// replace the two lines on small steps and trusting output.
+// replace the two lines on small steps and trusting output. The tools line
+// named four tools, while the plan turn has no bash and the work has the web
+// tools too (prompt audit, ticket 059): the tools come with their own
+// descriptions, so the line only says where the work is.
 export const SYSTEM_PROMPT = `You are a software engineer working alone in a Linux container.
-Tools: read, bash, edit, write. The working directory is the project.
+The working directory is the project.
 A language the image lacks: \`nerd-get go|rust|uv\` installs it in your home, which survives restarts (npm -g and uv tools go there too).
 Method:
 - Small steps: change one thing (edit a working file, do not rewrite it), run it, read the output.
@@ -30,10 +33,25 @@ Method:
 - Report what you ran and what it showed, and what you did not check.
 When the task is done and verified, reply with a short summary and stop.`;
 
+// The web tools' own guidance (their promptSnippet/promptGuidelines) never
+// reaches the model: Pi builds those lines only when no system prompt of our
+// own is set, and both modes set one (prompt audit, ticket 059; the notes/
+// rule was in none of the three acceptance runs' requests). What matters of it
+// is said here, and the harness keeps the fetched pages itself (web-notes.ts).
+export const WEB_PROMPT = `Facts from outside your knowledge (rules of a game, a format, a library's API): web_search, then web_fetch a result and work from what the page says; a long page is cut, the rest is in the file named at its end.
+Rules you took from the web, show to the user (in the README or on the page) as the source states them, with its URL.`;
+
+/** The system prompt: SYSTEM_PROMPT, and WEB_PROMPT when the web tools are on. */
+export function systemPrompt(web: boolean): string {
+	return web ? `${SYSTEM_PROMPT}\n${WEB_PROMPT}` : SYSTEM_PROMPT;
+}
+
 /** Appended in the interactive mode, where a person is on the other end. */
 export function operatorPrompt(appPort = process.env.NERD_APP_PORT, operatorUrl = process.env.NERD_OPERATOR_URL): string {
 	const app = appPort
-		? ` Anything meant to be opened in the operator's browser is served on port ${appPort}.`
+		? // "served on port 8000" alone made the model hard-code 8000, and the done
+			// gate, which starts the app on a free port, failed on it twice in 0006g.
+			` Anything meant to be opened in the operator's browser is served on port ${appPort}: listen on \`process.env.PORT || ${appPort}\`.`
 		: "";
 	// The name under which the operator sees this machine cannot be found from
 	// inside the container (nobody guessed it in the A/B of 2026-10-03), so it

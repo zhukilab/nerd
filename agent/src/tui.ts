@@ -19,7 +19,7 @@ import { join, resolve } from "node:path";
 import { main } from "@earendil-works/pi-coding-agent";
 import nerd from "./extension.ts";
 import { allTools } from "./harness.ts";
-import { localModel, operatorPrompt, SYSTEM_PROMPT, settingsFor, stayOffline } from "./local.ts";
+import { localModel, operatorPrompt, settingsFor, stayOffline, systemPrompt } from "./local.ts";
 import { configurePackages, packagePaths } from "./packages.ts";
 
 stayOffline();
@@ -65,7 +65,7 @@ const args = [
 	// Registered: the work's tools and the plan step's read-only ones; the
 	// harness keeps only the work's tools active outside the plan step.
 	"--tools", allTools().join(","),
-	"--system-prompt", SYSTEM_PROMPT,
+	"--system-prompt", systemPrompt(allTools().includes("web_fetch")),
 	"--append-system-prompt", operatorPrompt(),
 	// As in the headless run: no discovered extensions, skills, templates or
 	// AGENTS.md files, and nothing project-local from the workspace.

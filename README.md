@@ -281,7 +281,7 @@ Server defaults, each overridable in the server's environment (through
 `NERD_SLOTS=1`, prompt cache off (`--cache-ram 0`: its KV snapshots overflow an
 8 GB card), extra flags in `NERD_LLAMA_ARGS`. The agent's own variables
 (`NERD_THINKING`, `NERD_VERIFY_N`, `NERD_SPEC_CHECK`, `NERD_BASH_TIMEOUT`,
-`NERD_PLAN_STEP`, `NERD_PLAN_ANSWER`, `NERD_LOOP_GUARD_N`, `NERD_FETCH_GUARD`, `NERD_LINT`, `NERD_DONE_GATE`, `NERD_BASH_MAX_CHARS`, `NERD_QUIET`, `NERD_ANCHORS`, `NERD_PI_VCC`, `NERD_WEB`) are described in
+`NERD_PLAN_STEP`, `NERD_PLAN_ANSWER`, `NERD_LOOP_GUARD_N`, `NERD_FETCH_GUARD`, `NERD_LINT`, `NERD_DONE_GATE`, `NERD_BASH_MAX_CHARS`, `NERD_QUIET`, `NERD_ANCHORS`, `NERD_WEB_NOTES`, `NERD_PI_VCC`, `NERD_WEB`) are described in
 [`agent/src/run.ts`](agent/src/run.ts). `HF_TOKEN` is sent to Hugging Face if
 set. Header comments of [`Dockerfile`](Dockerfile) and
 [`container/entrypoint.sh`](container/entrypoint.sh) list the rest.

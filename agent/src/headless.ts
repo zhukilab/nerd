@@ -15,7 +15,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { nerdBashTool } from "./bash-tool.ts";
 import { allTools } from "./harness.ts";
-import { type settingsFor, SYSTEM_PROMPT, type Thinking } from "./local.ts";
+import { type settingsFor, systemPrompt, type Thinking } from "./local.ts";
 import { configurePackages, packagePaths } from "./packages.ts";
 
 export interface HeadlessOptions {
@@ -47,7 +47,7 @@ export async function headlessSession(o: HeadlessOptions) {
 		noPromptTemplates: true,
 		noThemes: true,
 		noContextFiles: true,
-		systemPrompt: SYSTEM_PROMPT,
+		systemPrompt: systemPrompt(allTools(env).includes("web_fetch")),
 	});
 	await resourceLoader.reload();
 	const { session } = await createAgentSession({

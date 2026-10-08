@@ -79,3 +79,50 @@ test("anchors: after a compaction one message goes to the model, steered while i
 	assert.equal(sent[0].options.deliverAs, "steer");
 	assert.equal(sent[1].options.deliverAs, "nextTurn");
 });
+
+test("anchors: PLAN.md as the plan step writes it gives questions with answers, steps and done-when; no task quote, no assumptions", () => {
+	const d = repo();
+	writeFileSync(
+		join(d, "PLAN.md"),
+		[
+			"# Plan",
+			"",
+			"## Task",
+			"",
+			"> Хочу web-игру у-син",
+			"",
+			"## Assumptions",
+			"",
+			"- ASSUMED-THING",
+			"",
+			"## Questions",
+			"",
+			"- Сколько рангов ботов?",
+			"- Раунды до N побед?",
+			"",
+			"Answer: 1. Уровней ботов — минимум три. 2. Раунды — до трёх побед.",
+			"",
+			"## Steps",
+			"",
+			"1. elements module — check: unit tests",
+			"2. server — check: curl",
+			"",
+			"## Done when",
+			"",
+			"- the operator plays a bot match",
+			"",
+		].join("\n"),
+	);
+	const answer = "1. Уровней ботов — минимум три. 2. Раунды — до трёх побед.";
+	const t = anchorText({ cwd: d, task: "Хочу web-игру у-син", latest: answer, max: 4000 });
+	assert.ok(t);
+	assert.match(t, /- Сколько рангов ботов\? — Уровней ботов — минимум три\./);
+	assert.match(t, /- Раунды до N побед\? — Раунды — до трёх побед\./);
+	assert.match(t, /Steps:\n1\. elements module — check: unit tests\n2\. server/);
+	assert.match(t, /Done when:\n- the operator plays a bot match/);
+	assert.doesNotMatch(t, /ASSUMED-THING/);
+	assert.doesNotMatch(t, /> Хочу/, "the task quote of PLAN.md is not repeated");
+	assert.doesNotMatch(t, /latest message/, "bare answers are not repeated as the latest message");
+	const r = anchorText({ cwd: d, task: "Хочу web-игру у-син", latest: "Сделай удобно на телефоне", max: 4000 });
+	assert.match(r ?? "", /latest message:\nСделай удобно на телефоне/, "a remark still comes as the latest message");
+});

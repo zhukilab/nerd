@@ -10,6 +10,7 @@
 // in it without setsid/nohup goes too.
 
 import { createBashToolDefinition, defineTool } from "@earendil-works/pi-coding-agent";
+import { outputMax } from "./output-cap.ts";
 
 /**
  * 600 s: long enough for the slow legitimate commands of a small project (a
@@ -29,7 +30,8 @@ export function timeoutMessage(secs: number): string {
 		`The command did not return within ${secs} s and was killed together with everything it started in the foreground. ` +
 		"A long-running process (a web server, a watcher) must not run in the foreground of a bash call: start it detached " +
 		"with its output to a file, e.g. `setsid nohup python3 -m http.server 8000 > server.log 2>&1 < /dev/null &`, " +
-		"then check it in a separate command (curl, tail server.log). If the command is just slow, give it a larger timeout."
+		"then check it in a separate command (curl, tail server.log). A client script (a WebSocket or HTTP test client) " +
+		"must close its connection and exit, with a timeout of its own. If the command is just slow, give it a larger timeout."
 	);
 }
 
@@ -61,6 +63,26 @@ export function quietEnv(base: NodeJS.ProcessEnv, env = process.env): NodeJS.Pro
 	return env.NERD_QUIET === "0" ? base : { ...QUIET_ENV, ...base };
 }
 
+/**
+ * Pi's description with what this tool really does: our default timeout, and
+ * the cut of long output by output-cap.ts (head and tail, not Pi's last 2000
+ * lines or 50KB) when NERD_BASH_MAX_CHARS is on (prompt audit, ticket 059).
+ */
+export function bashDescription(piText: string, defaultSecs: number, env = process.env): string {
+	const max = outputMax(env);
+	let d = piText.replace(
+		"Optionally provide a timeout in seconds.",
+		`Commands time out after ${defaultSecs} s unless you give another timeout in seconds; start servers detached.`,
+	);
+	if (max > 0) {
+		d = d.replace(
+			/Output is truncated to last .*? \(whichever is hit first\)\. If truncated, full output is saved to a temp file\./,
+			`Output over ${max} characters is cut to its first and last lines (errors usually come last); the whole output is saved to a file named in the result.`,
+		);
+	}
+	return d;
+}
+
 /** The built-in bash tool for `cwd` with a default timeout of `defaultSecs`. */
 export function nerdBashTool(cwd: string, defaultSecs = bashTimeout()) {
 	const base = createBashToolDefinition(cwd, { spawnHook: (c) => ({ ...c, env: quietEnv(c.env) }) });
@@ -77,10 +99,7 @@ export function nerdBashTool(cwd: string, defaultSecs = bashTimeout()) {
 	// defineTool: usable both by registerTool and in customTools' array.
 	return defineTool({
 		...base,
-		description: base.description.replace(
-			"Optionally provide a timeout in seconds.",
-			`Commands time out after ${defaultSecs} s unless you give another timeout in seconds; start servers detached.`,
-		),
+		description: bashDescription(base.description, defaultSecs),
 		parameters,
 		async execute(id, params, signal, onUpdate, ctx) {
 			const timeout = params.timeout ?? defaultSecs;

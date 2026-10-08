@@ -32,6 +32,8 @@
 //                  the whole of it in a file (default 8000, 0 = off; src/output-cap.ts)
 //   NERD_QUIET=0   no quiet defaults (NO_COLOR, npm fund/audit, ...) for the
 //                  model's commands (src/bash-tool.ts)
+//   NERD_WEB_NOTES=0  no copy of each fetched web page in notes/web/ of the
+//                  project (src/web-notes.ts)
 //   NERD_ANCHORS=0  no anchors (task, PLAN.md, notes/, changed files) after a
 //                  compaction; NERD_ANCHORS_MAX_CHARS bounds them (4000; src/anchors.ts)
 //   NERD_PI_VCC, NERD_TODO  Pi packages on (1) or off (0): src/packages.ts

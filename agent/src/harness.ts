@@ -2,9 +2,10 @@
 // questions-and-plan step at the start of a task (plan-step.ts), the loop
 // guard (loop-guard.ts), the fetch guard (fetch-guard.ts), the linters
 // after every edit (lint-check.ts), long bash output cut to head and tail
-// (output-cap.ts), the anchors after a compaction (anchors.ts, ticket 057
-// of the process), the done gate (done-gate.ts) and the sampling settings of
-// every request (sampling.ts, NERD_SAMPLING). The TUI loads it from
+// (output-cap.ts), web pages kept in notes/web/ (web-notes.ts), the anchors
+// after a compaction (anchors.ts, ticket 057 of the process), the done gate
+// (done-gate.ts) and the sampling settings of every request (sampling.ts,
+// NERD_SAMPLING). The TUI loads it from
 // extension.ts, the headless run through headless.ts.
 
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
@@ -18,6 +19,7 @@ import { outputCap } from "./output-cap.ts";
 import { packageReadOnlyTools, packageTools, pinWebSearchProvider } from "./packages.ts";
 import { PLAN_TOOLS, planStep, planStepOptions } from "./plan-step.ts";
 import { parseSampling, sampling } from "./sampling.ts";
+import { webNotes, webNotesOn } from "./web-notes.ts";
 
 /** The work's tools: ours plus those of the enabled Pi packages (packages.ts). */
 export function workTools(env = process.env): string[] {
@@ -44,6 +46,7 @@ export function harness(operator: boolean, env = process.env): ExtensionFactory 
 		loopGuard(pi);
 		if (work.includes("web_search")) pinWebSearchProvider(pi);
 		if (work.includes("web_fetch") && fetchGuardOn(env)) fetchGuard(pi);
+		if (work.includes("web_fetch") && webNotesOn(env)) webNotes(pi);
 		if (lintOn(env)) lintCheck(pi);
 		sampling(pi, parseSampling(env.NERD_SAMPLING));
 		if (doneGateOn(env)) doneGate(pi, { maxRounds: doneGateRounds(env) });

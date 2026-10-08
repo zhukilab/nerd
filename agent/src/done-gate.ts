@@ -20,7 +20,9 @@
 //   The test and the start command run with gate-guard.cjs preloaded: loopback
 //   ports that were listening before the check (the agent's own server) refuse
 //   connections, as on the operator's empty machine.
-//   5. no linter errors (lint-check.ts) in the files changed since the
+//   5. the node/npm commands of a README "Check"/"Проверка" section pass in
+//      the clean clone too (readmeChecks; none is not a failure)
+//   6. no linter errors (lint-check.ts) in the files changed since the
 //      operator's message
 // Anything failing goes back to the model as one message listing what to fix,
 // and the turn continues; at most NERD_DONE_GATE_ROUNDS (2) times per operator
@@ -34,7 +36,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { startCommand } from "../../acceptance/lib/parse.mjs";
+import { readmeCommands, startCommand } from "../../acceptance/lib/parse.mjs";
 import { lintFile } from "./lint-check.ts";
 
 export function doneGateOn(env = process.env): boolean {
@@ -191,6 +193,25 @@ async function serves(cmd: string, dir: string, wantHtml: boolean, blocked: numb
 	}
 }
 
+/** README sections that say how to check the work. */
+export const CHECK_HEADING = /\b(check|checking|verify|verification|testing)\b|провер/i;
+export const MAX_README_CHECKS = 5;
+
+/**
+ * The node/npm commands of the README's check sections that the gate runs
+ * (prompt audit, ticket 059): a command the README offers the operator as a
+ * check must pass in a clean clone. `npm test` (run above) and the start
+ * command (a server: it does not exit) are left out; no such section is not a
+ * failure.
+ */
+export function readmeChecks(readme: string, start: string | null): string[] {
+	const seen = new Set<string>();
+	return readmeCommands(readme, CHECK_HEADING)
+		.filter((c) => !/^npm\s+(test|t|run\s+test|start|run\s+start)\s*$/.test(c) && c !== start)
+		.filter((c) => !seen.has(c) && seen.add(c))
+		.slice(0, MAX_README_CHECKS);
+}
+
 export interface GateResult {
 	/** Not a git repository, or nothing to say: the gate stays silent. */
 	failures: string[];
@@ -260,6 +281,12 @@ export async function checkProject(cwd: string, changed: string[] = []): Promise
 				} else if (install.code === 0) {
 					const s = await serves(start.cmd, app, hasHtml(app), blocked);
 					if (s) failures.push(s);
+				}
+				if (readme && install.code === 0) {
+					for (const c of readmeChecks(readme, start.cmd)) {
+						const r = await sh("sh", ["-c", c], app, TEST_MS, isolatedEnv(blocked, { CI: "1" }));
+						if (r.code !== 0) failures.push(`The README's check \`${c}\` in a clean clone exited with ${r.code ?? "a timeout"}:\n${testExcerpt(r.out)}`);
+					}
 				}
 			}
 		}

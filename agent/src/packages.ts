@@ -75,30 +75,41 @@ export function packageReadOnlyTools(env = process.env): string[] {
 
 /**
  * rpiv-web-tools' settings. Provider and URL come from the environment
- * (WEB_SEARCH_PROVIDER, SEARXNG_URL; the entrypoint sets both); the file
- * carries only the guidance the model reads, shorter than the package's own
- * (five lines on Sources sections, API keys and /web-tools that do not apply
- * here).
+ * (WEB_SEARCH_PROVIDER, SEARXNG_URL; the entrypoint sets both). The file used
+ * to carry guidance lines for the model (promptSnippet, promptGuidelines), but
+ * Pi drops tools' guidance whenever a system prompt of our own is set, so none
+ * of it ever reached the model (prompt audit, ticket 059): what matters of it
+ * is now in local.ts (WEB_PROMPT) and web-notes.ts.
  */
 export function webToolsConfig() {
-	return {
-		provider: "searxng",
-		guidance: {
-			web_search: {
-				promptSnippet: "Search the web: titles, URLs and snippets",
-				promptGuidelines: [
-					"For facts outside your knowledge and the workspace (rules of a game, a format, a library's API): web_search, then web_fetch the best result and work from what the page says.",
-					"What you found, write down in notes/<topic>.md in the project with the URL of each fact, before you use it; name the URL in the code or README where the fact is used too.",
-				],
-			},
-			web_fetch: {
-				promptSnippet: "Read a web page as text (not localhost: use browse for your own app)",
-				promptGuidelines: [
-					"A long page is cut; the rest is in the file named at its end, readable with read or grep.",
-				],
-			},
-		},
-	};
+	return { provider: "searxng" };
+}
+
+/** A tool declaration in a provider request: OpenAI's {function: {name, parameters}} or a flat {name, parameters}. */
+type ToolDecl = { name?: string; parameters?: { properties?: Record<string, unknown>; required?: string[] }; function?: ToolDecl };
+
+function withoutProvider(f: ToolDecl): ToolDecl {
+	const { provider: _, ...properties } = f.parameters?.properties ?? {};
+	const required = f.parameters?.required?.filter((r) => r !== "provider");
+	return { ...f, parameters: { ...f.parameters, properties, ...(required ? { required } : {}) } };
+}
+
+/**
+ * A request's payload without web_search's `provider` parameter, or undefined
+ * when there is none to drop. Copies, never edits: the declaration objects may
+ * be the tool's own schema, which Pi also validates calls against.
+ */
+export function stripProviderParam(payload: unknown): unknown {
+	const tools = (payload as { tools?: ToolDecl[] } | null)?.tools;
+	if (!Array.isArray(tools)) return undefined;
+	let dropped = false;
+	const out = tools.map((t) => {
+		const f = t.function ?? t;
+		if (f.name !== "web_search" || !f.parameters?.properties || !("provider" in f.parameters.properties)) return t;
+		dropped = true;
+		return t.function ? { ...t, function: withoutProvider(f) } : withoutProvider(f);
+	});
+	return dropped ? { ...(payload as object), tools: out } : undefined;
 }
 
 /**
@@ -106,7 +117,9 @@ export function webToolsConfig() {
  * in the A/B of ticket 048, after a SearXNG error it tried brave, tavily,
  * perplexity — all without keys, so they failed too (ticket 054). Only
  * SearXNG is configured here: the argument is dropped before the call and
- * WEB_SEARCH_PROVIDER decides.
+ * WEB_SEARCH_PROVIDER decides. Its declaration (~100 tokens listing every
+ * provider and the /web-tools command) is cut from each request too, so the
+ * model is not offered it (ticket 059).
  */
 export function pinWebSearchProvider(pi: Pick<ExtensionAPI, "on">) {
 	pi.on("tool_call", (event) => {
@@ -114,6 +127,7 @@ export function pinWebSearchProvider(pi: Pick<ExtensionAPI, "on">) {
 			delete (event.input as Record<string, unknown>).provider;
 		}
 	});
+	pi.on("before_provider_request", (event) => stripProviderParam(event.payload));
 }
 
 /** Where rpiv-web-tools reads its file: $XDG_CONFIG_HOME if absolute, else ~/.config. */

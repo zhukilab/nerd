@@ -10,7 +10,7 @@ import { test } from "node:test";
 import { once } from "node:events";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { checkProject, doneGateOn, doneGateRounds, gateNote, listeningPorts } from "../src/done-gate.ts";
+import { checkProject, doneGateOn, doneGateRounds, gateNote, listeningPorts, readmeChecks } from "../src/done-gate.ts";
 import { tempDir } from "./tmp.ts";
 
 const on = (cmd: string) => spawnSync("sh", ["-c", `command -v ${cmd}`]).status === 0;
@@ -177,4 +177,16 @@ test("done gate: a server that insists on a taken port is told to read process.e
 	} finally {
 		live.close();
 	}
+});
+
+test("done gate: the README's check commands run in the clean clone; a failing one is reported, none is fine", async () => {
+	const readme = (cmd: string) => `# G\n\n## Запуск\n\n\`\`\`\nnpm start\n\`\`\`\n\n## Проверка\n\n\`\`\`\nnpm install\nnpm test\n${cmd}\n\`\`\`\n`;
+	assert.deepEqual(readmeChecks(readme("node check.js"), "npm start"), ["node check.js"], "npm install/test and the start command are left out");
+	assert.deepEqual(readmeChecks("# G\n\n## Run\n\n```\nnode server.js\n```\n", "node server.js"), [], "no check section: nothing to run");
+	const ok = await checkProject(repo({ ...GOOD, "check.js": "console.log('ranks: 3 > 2 > 1');\n", "README.md": readme("node check.js") }));
+	assert.deepEqual(ok.failures, []);
+	const bad = await checkProject(repo({ ...GOOD, "check.js": "console.error('rank 3 lost to rank 2'); process.exit(1);\n", "README.md": readme("node check.js") }));
+	assert.equal(bad.failures.length, 1, bad.failures.join("\n---\n"));
+	assert.match(bad.failures[0], /README's check `node check\.js` in a clean clone exited with 1/);
+	assert.match(bad.failures[0], /rank 3 lost to rank 2/);
 });

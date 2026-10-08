@@ -77,6 +77,60 @@ export function changedFiles(cwd: string, sinceIso?: string): string[] {
 	return [...files].filter((f) => !f.startsWith("node_modules/")).sort();
 }
 
+/** PLAN.md (as plan-step.ts writes it) split by its "## " headings. */
+export function planSections(text: string): Map<string, string> {
+	const out = new Map<string, string>();
+	for (const p of text.split(/^## +/m).slice(1)) {
+		const nl = p.indexOf("\n");
+		const name = (nl < 0 ? p : p.slice(0, nl)).trim().toLowerCase();
+		out.set(name, nl < 0 ? "" : p.slice(nl + 1).trim());
+	}
+	return out;
+}
+
+/** "1. a 2. b" → ["a", "b"]; anything without that numbering → [] (not paired). */
+export function numberedAnswers(answer: string): string[] {
+	const m = [...answer.matchAll(/(?:^|\s)(\d+)[.)]\s+/g)];
+	if (m.length < 2 || m.some((x, i) => Number(x[1]) !== i + 1)) return [];
+	return m.map((x, i) => answer.slice((x.index ?? 0) + x[0].length, i + 1 < m.length ? m[i + 1].index : undefined).trim());
+}
+
+/**
+ * What of PLAN.md the anchors carry: the questions paired with the operator's
+ * answers, the steps and "Done when". The task quote is left out (the task
+ * itself comes first in the anchors) and so are the assumptions: in the first
+ * acceptance run with anchors the head-of-file slice held the task quote and
+ * the assumptions and never reached the steps (0 of 5). A PLAN.md not in that
+ * form is passed as it is.
+ */
+export function planAnchor(text: string, max: number): { text: string; answer?: string } {
+	const s = planSections(text);
+	const steps = s.get("steps");
+	if (!steps) return { text: cut(text, max) };
+	const parts: string[] = [];
+	let answer: string | undefined;
+	const qs = s.get("questions");
+	if (qs) {
+		const am = /^Answer:\s*([\s\S]*)$/m.exec(qs);
+		answer = am?.[1].trim();
+		const questions = (am ? qs.slice(0, am.index) : qs)
+			.split("\n")
+			.map((l) => l.trim().replace(/^[-*]\s+/, ""))
+			.filter(Boolean);
+		const answers = answer ? numberedAnswers(answer) : [];
+		const qa =
+			answers.length === questions.length
+				? questions.map((q, i) => `- ${q} — ${answers[i]}`).join("\n")
+				: `${questions.map((q) => `- ${q}`).join("\n")}${answer ? `\nAnswer: ${answer}` : ""}`;
+		parts.push(`Your questions and the operator's answers:\n${cut(qa, Math.floor(max * 0.35))}`);
+	}
+	const done = s.get("done when");
+	const doneText = done ? `\nDone when:\n${cut(done, Math.floor(max * 0.25))}` : "";
+	const used = parts.join("\n\n").length + doneText.length + 20;
+	parts.push(`Steps:\n${cut(steps, Math.max(200, max - used))}${doneText}`);
+	return { text: cut(parts.join("\n\n"), max), answer };
+}
+
 export type AnchorInput = { cwd: string; task?: string; latest?: string; sinceIso?: string; max: number };
 
 /** The anchors message, or undefined when there is nothing to say. */
@@ -84,15 +138,20 @@ export function anchorText(a: AnchorInput): string | undefined {
 	const parts: string[] = [];
 	const budget = a.max;
 	if (a.task) parts.push(`The task, in the operator's words:\n${cut(a.task, Math.floor(budget * 0.25))}`);
-	if (a.latest && a.latest !== a.task) parts.push(`The operator's latest message:\n${cut(a.latest, Math.floor(budget * 0.15))}`);
-	const plan = join(a.cwd, "PLAN.md");
-	if (existsSync(plan)) {
+	let plan: { text: string; answer?: string } | undefined;
+	const planPath = join(a.cwd, "PLAN.md");
+	if (existsSync(planPath)) {
 		try {
-			parts.push(`PLAN.md:\n${cut(readFileSync(plan, "utf8"), Math.floor(budget * 0.3))}`);
+			plan = planAnchor(readFileSync(planPath, "utf8"), Math.floor(budget * 0.35));
 		} catch {
 			/* unreadable: left out */
 		}
 	}
+	// The answers to the plan step are already paired with their questions
+	// under PLAN.md: bare "1. … 2. …" on their own say nothing.
+	const latestIsAnswer = a.latest !== undefined && plan?.answer !== undefined && a.latest.trim() === plan.answer.trim();
+	if (a.latest && a.latest !== a.task && !latestIsAnswer) parts.push(`The operator's latest message:\n${cut(a.latest, Math.floor(budget * 0.15))}`);
+	if (plan) parts.push(`PLAN.md:\n${plan.text}`);
 	const notes = notesIndex(a.cwd);
 	if (notes.length) parts.push(`notes/ (what you found and decided earlier; read a file when you need it):\n${cut(notes.join("\n"), Math.floor(budget * 0.1))}`);
 	const changed = changedFiles(a.cwd, a.sinceIso);
