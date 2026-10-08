@@ -16,6 +16,7 @@ import { headlessSession } from "../src/headless.ts";
 import { modelDefinition, settingsFor } from "../src/local.ts";
 import { LoopGuard, loopGuardN } from "../src/loop-guard.ts";
 import { DEFAULT_PLAN_MAX_CALLS, parsePlanReply, planFileText, planMaxCalls } from "../src/plan-step.ts";
+import { remember, writeRules } from "../src/rules.ts";
 import { tempDir } from "./tmp.ts";
 
 for (const [k, v] of Object.entries({
@@ -116,6 +117,9 @@ interface Seen {
 	tools: string[];
 	lastUser: string;
 	lastTool: string;
+	/** The system message(s), and every message's text in order. */
+	system: string;
+	all: string;
 }
 
 /** An OpenAI-compatible streaming server that answers from `script` and records each request. */
@@ -139,6 +143,8 @@ async function scriptedServer(script: (n: number, seen: Seen) => Reply) {
 				tools: (r.tools ?? []).map((t) => t.function.name).sort(),
 				lastUser: text(r.messages.filter((m) => m.role === "user").at(-1)),
 				lastTool: text(r.messages.filter((m) => m.role === "tool").at(-1)),
+				system: r.messages.filter((m) => m.role === "system" || m.role === "developer").map(text).join("\n"),
+				all: r.messages.map(text).join("\n"),
 			};
 			seen.push(s);
 			const reply = script(seen.length, s);
@@ -207,9 +213,10 @@ async function runHeadless(
 }
 
 // web_fetch, web_search: rpiv-web-tools is on by default and reads only, so
-// the plan turn has them too; vcc_recall: pi-vcc is on by default (packages.ts).
+// the plan turn has them too. pi-vcc is on by default, but its vcc_recall is
+// offered only with NERD_VCC_RECALL=1 (packages.ts, process ticket 061).
 const READ_ONLY = ["find", "grep", "ls", "read", "web_fetch", "web_search"];
-const WORK = ["bash", "edit", "read", "vcc_recall", "web_fetch", "web_search", "write"];
+const WORK = ["bash", "edit", "read", "web_fetch", "web_search", "write"];
 
 test("headless: questions get NERD_PLAN_ANSWER, the final plan is committed, then the work has its tools", async () => {
 	const srv = await scriptedServer((n) =>
@@ -356,30 +363,49 @@ test("headless: NERD_PLAN_STEP=0 goes straight to work; the loop guard notes the
 	}
 });
 
-test("pi-vcc (default): loaded from node_modules, vcc_recall searches the session file, compaction asks no model", async () => {
+test("pi-vcc (default): compaction asks no model; the summary's goal is the task; no vcc_recall offered or named", async () => {
+	const task = "Make hello.txt with a greeting, then tell me how many lines it has";
 	const srv = await scriptedServer((n) =>
 		[
 			// Large enough that Pi finds something to compact before its kept tail (a quarter of 32K).
 			{ call: { name: "write", args: { path: "hello.txt", content: "hi there\n".repeat(6000) } } },
-			{ call: { name: "vcc_recall", args: { query: "hello" } } },
 			{ text: "done" },
 			{ text: "second" },
-		][n - 1] ?? { text: "extra" },
+		][n - 1] ?? { text: "after the compaction" },
 	);
 	try {
 		let compactor: unknown;
-		await runHeadless(srv.url, "Make hello.txt", { NERD_PLAN_STEP: "0" }, false, ["and now?"], async (session) => {
+		await runHeadless(srv.url, task, { NERD_PLAN_STEP: "0", NERD_ANCHORS: "0" }, false, ["and now?"], async (session) => {
 			const before = srv.seen.length;
 			const result = await session.compact();
 			assert.equal(srv.seen.length, before, "no request to the model for the summary");
 			compactor = (result.details as { compactor?: string } | undefined)?.compactor;
+			await session.prompt("go on");
 		});
-		assert.deepEqual(srv.seen[0].tools, WORK);
-		assert.match(srv.seen[2].lastTool, /hello/, "vcc_recall found the earlier turn");
-		assert.doesNotMatch(srv.seen[2].lastTool, /No session file/);
+		assert.deepEqual(srv.seen[0].tools, WORK, "vcc_recall is not offered");
 		assert.equal(compactor, "pi-vcc");
+		const after = srv.seen.at(-1)!.all;
+		assert.match(after, /\[Session Goal\]\n- The task, in the operator's words: Make hello\.txt with a greeting/);
+		assert.match(after, /PLAN\.md/);
+		assert.doesNotMatch(after, /vcc_recall/, "the summary no longer points at a tool that is not there");
 	} finally {
 		srv.close();
+	}
+	// NERD_VCC_RECALL=1: the tool is offered again and searches the session file.
+	const recall = await scriptedServer((n) =>
+		[
+			{ call: { name: "write", args: { path: "hello.txt", content: "hi there\n" } } },
+			{ call: { name: "vcc_recall", args: { query: "hello" } } },
+			{ text: "done" },
+		][n - 1] ?? { text: "extra" },
+	);
+	try {
+		await runHeadless(recall.url, "Make hello.txt", { NERD_PLAN_STEP: "0", NERD_VCC_RECALL: "1" });
+		assert.deepEqual(recall.seen[0].tools, [...WORK, "vcc_recall"].sort());
+		assert.match(recall.seen[2].lastTool, /hello/, "vcc_recall found the earlier turn");
+		assert.doesNotMatch(recall.seen[2].lastTool, /No session file/);
+	} finally {
+		recall.close();
 	}
 	const off = await scriptedServer(() => ({ text: "done" }));
 	try {
@@ -391,7 +417,7 @@ test("pi-vcc (default): loaded from node_modules, vcc_recall searches the sessio
 	const noweb = await scriptedServer(() => ({ text: "done" }));
 	try {
 		await runHeadless(noweb.url, "Hi", { NERD_PLAN_STEP: "0", NERD_WEB: "0" });
-		assert.deepEqual(noweb.seen[0].tools, ["bash", "edit", "read", "vcc_recall", "write"], "NERD_WEB=0: no web tools");
+		assert.deepEqual(noweb.seen[0].tools, ["bash", "edit", "read", "write"], "NERD_WEB=0: no web tools");
 	} finally {
 		noweb.close();
 	}
@@ -416,5 +442,30 @@ test("headless: the done gate sends uncommitted work back once, and is silent wh
 		assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd }).toString(), "");
 	} finally {
 		srv.close();
+	}
+});
+
+test("operator's rules: RULES.md reaches the system prompt of each turn; a rule added between messages is there from the next", async () => {
+	const dir = tempDir("nerd-rules-");
+	const file = join(dir, "RULES.md");
+	writeRules(file, ["Commit messages in English, imperative mood"]);
+	const srv = await scriptedServer(() => ({ text: "ok" }));
+	try {
+		await runHeadless(srv.url, "Hi", { NERD_PLAN_STEP: "0", NERD_RULES_FILE: file }, false, [], async (session) => {
+			remember(file, "Serve on port 8123 by default");
+			await session.prompt("and now?");
+		});
+		assert.match(srv.seen[0].system, /## The operator's rules[\s\S]*1\. Commit messages in English, imperative mood/);
+		assert.doesNotMatch(srv.seen[0].system, /8123/);
+		assert.match(srv.seen.at(-1)!.system, /2\. Serve on port 8123 by default/);
+	} finally {
+		srv.close();
+	}
+	const none = await scriptedServer(() => ({ text: "ok" }));
+	try {
+		await runHeadless(none.url, "Hi", { NERD_PLAN_STEP: "0", NERD_RULES_FILE: join(dir, "absent.md") });
+		assert.doesNotMatch(none.seen[0].system, /operator's rules/, "no file, no section");
+	} finally {
+		none.close();
 	}
 });

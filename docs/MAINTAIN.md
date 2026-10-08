@@ -132,7 +132,7 @@ Then rebuild and run the whole-thing check, in the TUI and headless.
 path, never with `pi install`. Their peer range must include the Pi version
 (`npm view <name>@<version> peerDependencies`). After a change:
 `npm install --save-exact <name>@<version>`, `npm test` (it loads pi-vcc, calls
-`vcc_recall` and compacts without a model request), then a long run with
+`vcc_recall` with `NERD_VCC_RECALL=1` and compacts without a model request), then a long run with
 several compactions. pi-vcc writes its config to `PI_VCC_CONFIG_PATH`, which
 nerd points into Pi's agent directory and rewrites on start.
 

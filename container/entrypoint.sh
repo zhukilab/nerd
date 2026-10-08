@@ -41,6 +41,8 @@
 #   NERD_HEALTH_TIMEOUT seconds to wait for the server (task 900; tui 0 = no limit)
 #   NERD_WEB            1 (default): SearXNG on loopback for web_search; 0: off
 #   NERD_SEARXNG_PORT   its port (8888)
+#   NERD_SUDO           1 (default): nerd has sudo without a password (tcpdump,
+#                       apt-get); 0: the sudoers file is dropped at the start
 # plus the agent's own NERD_* variables (agent/src/run.ts). Logs: /logs.
 set -uo pipefail
 
@@ -123,6 +125,11 @@ fi
 
 # --- agent ---------------------------------------------------------------------
 [ -d /opt/nerd/agent ] || die "this is the server image (serve, fetch); the agent is the image built without --target"
+# sudo for the agent (Dockerfile): on by default; NERD_SUDO=0 gives it up for
+# this container's life, before anything the model runs.
+if [ "${NERD_SUDO:-1}" = 0 ] && [ -f /etc/sudoers.d/nerd ]; then
+  sudo -n rm -f /etc/sudoers.d/nerd && say "sudo: off (NERD_SUDO=0)"
+fi
 base=${NERD_BASE_URL:-}
 [ -n "$base" ] || die "NERD_BASE_URL is not set: the agent needs a llama-server, e.g. http://nerd-llm:8080/v1 (./UP sets it; README, \"Running by hand\")"
 

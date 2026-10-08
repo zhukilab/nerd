@@ -3,7 +3,7 @@
 nerd needs a Linux machine (or Windows with WSL2) with an NVIDIA GPU of 8 GB
 or more, Docker, and the NVIDIA Container Toolkit. **macOS on Apple silicon**
 runs the model on the Mac itself and the agent in its container:
-[MACOS.md](MACOS.md) (never run on a real Mac yet). Everything else is in two images built from this repository — the
+[MACOS.md](MACOS.md) (so far run on one Mac). Everything else is in two images built from this repository — the
 server's (CUDA runtime, llama-server) and the agent's (Node.js, the agent, a
 headless browser) — and the model is downloaded on first start.
 

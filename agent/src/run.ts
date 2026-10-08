@@ -36,6 +36,11 @@
 //                  project (src/web-notes.ts)
 //   NERD_ANCHORS=0  no anchors (task, PLAN.md, notes/, changed files) after a
 //                  compaction; NERD_ANCHORS_MAX_CHARS bounds them (4000; src/anchors.ts)
+//   NERD_SUMMARY_GOAL=0  the compaction summary's goal as pi-vcc wrote it, not
+//                  the task (src/summary-goal.ts)
+//   NERD_RULES_FILE  the operator's rules for every project (default RULES.md in
+//                  the agent dir); NERD_RULES_MAX_CHARS bounds them (4000; src/rules.ts)
+//   NERD_VCC_RECALL=1  offer pi-vcc's vcc_recall (off: src/packages.ts)
 //   NERD_PI_VCC, NERD_TODO  Pi packages on (1) or off (0): src/packages.ts
 //   NERD_SESSION_DIR  where the session file goes (default: the run's temp agent dir)
 //

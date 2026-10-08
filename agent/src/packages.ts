@@ -6,13 +6,18 @@
 //   NERD_PI_VCC=1|0  @sting8k/pi-vcc (on by default): compaction without a
 //                    model call. The summary is extracted, not written: goal,
 //                    files, commits, open items, a brief transcript; it is
-//                    bounded and cannot fail on a token cap. Plus the tool
-//                    vcc_recall, which searches the session file for what
-//                    compaction dropped. In the A/B of ticket 040 (four hours,
-//                    64K, the same long task): Pi's own compaction took 46 of
-//                    229 minutes, each one 2 to 12 minutes and growing with
-//                    its summary; pi-vcc's took no measurable time. Cost:
-//                    vcc_recall's schema, ~420 tokens in every request.
+//                    bounded and cannot fail on a token cap. In the A/B of
+//                    ticket 040 (four hours, 64K, the same long task): Pi's
+//                    own compaction took 46 of 229 minutes, each one 2 to 12
+//                    minutes and growing with its summary; pi-vcc's took no
+//                    measurable time. Its tool vcc_recall (search the session
+//                    file for what compaction dropped) is left out of the
+//                    active tools: the model never called it while working —
+//                    0 calls in 60 A/B runs and three 0006 runs, 134
+//                    compactions — and its schema cost ~486 tokens in every
+//                    request (process tickets 049, 061). The anchors after a
+//                    compaction (anchors.ts) bring back what matters instead.
+//                    NERD_VCC_RECALL=1 offers it again.
 //
 //   NERD_WEB=1|0     @juicesharp/rpiv-web-tools (on by default, ticket 041):
 //                    web_search through the SearXNG the entrypoint starts in
@@ -44,7 +49,7 @@ interface PiPackage {
 }
 
 export const PI_PACKAGES: PiPackage[] = [
-	{ flag: "NERD_PI_VCC", name: "@sting8k/pi-vcc", tools: ["vcc_recall"], on: true },
+	{ flag: "NERD_PI_VCC", name: "@sting8k/pi-vcc", tools: [], on: true },
 	{
 		flag: "NERD_WEB",
 		name: "@juicesharp/rpiv-web-tools",
@@ -66,7 +71,10 @@ export function packagePaths(env = process.env): string[] {
 }
 
 export function packageTools(env = process.env): string[] {
-	return enabledPackages(env).flatMap((p) => p.tools);
+	const tools = enabledPackages(env).flatMap((p) => p.tools);
+	// pi-vcc registers vcc_recall either way; it is offered only when asked for.
+	const vcc = enabledPackages(env).some((p) => p.flag === "NERD_PI_VCC");
+	return vcc && env.NERD_VCC_RECALL === "1" ? [...tools, "vcc_recall"] : tools;
 }
 
 export function packageReadOnlyTools(env = process.env): string[] {

@@ -95,7 +95,7 @@ Anything else for a container goes into `compose.override.yaml` next to
 `compose.yaml` (git-ignored); `./UP` adds it when it exists, and compose
 merges it over the rest. The agent's own variables (`NERD_THINKING`,
 `NERD_VERIFY_N`, `NERD_SPEC_CHECK`, `NERD_BASH_TIMEOUT`, `NERD_PLAN_STEP`,
-`NERD_LOOP_GUARD_N`, `NERD_FETCH_GUARD`, `NERD_LINT`, `NERD_DONE_GATE`, `NERD_BASH_MAX_CHARS`, `NERD_ANCHORS`, `NERD_WEB_NOTES`, `NERD_PI_VCC` ...; the README's "Settings" section and
+`NERD_LOOP_GUARD_N`, `NERD_FETCH_GUARD`, `NERD_LINT`, `NERD_DONE_GATE`, `NERD_BASH_MAX_CHARS`, `NERD_ANCHORS`, `NERD_WEB_NOTES`, `NERD_RULES_FILE`, `NERD_SUMMARY_GOAL`, `NERD_VCC_RECALL`, `NERD_PI_VCC` ...; the README's "Settings" section and
 the header of `agent/src/run.ts`), the server's (`NERD_LLAMA_ARGS`,
 `NERD_KV`), a proxy, one GPU of several:
 
@@ -128,7 +128,12 @@ for each agent; `./UP` does not do it.)
 ssh -p 2222 nerd@<host>        # attaches to the agent's terminal (Pi in tmux)
 ```
 
-- **Login** is by public key only, as user `nerd`: no password, no root. The
+- **Login** is by public key only, as user `nerd`: no password, no root login.
+  Inside the container `nerd` (you, and the agent) has `sudo` without a password
+  for what needs root, such as `sudo tcpdump -i any port 8000` or
+  `sudo apt-get install …` (gone on the next `./UP --build`; lasting tools go
+  to the home volume, `nerd-get`). The container is the boundary: it runs without
+  `--privileged`. `NERD_SUDO=0` in `.env` turns sudo off. The
   keys are the lines of `NERD_AUTHORIZED_KEYS_FILE`, read when the container
   is created (`./UP` again after changing them; the server is not touched). The host key is generated on
   the first start and kept in the `<name>-ssh` volume, so its fingerprint
@@ -147,7 +152,16 @@ ssh -p 2222 nerd@<host>        # attaches to the agent's terminal (Pi in tmux)
 Type the task and press Enter. The first message of a conversation is a new
 task: the agent first lists its assumptions and questions and writes a plan;
 answer the questions, or say "your call". Anything typed while it works is
-queued as a remark and delivered after its current step. `/task <text>` starts
+queued as a remark and delivered after its current step.
+
+**Your rules for every project.** `/remember <text>` keeps a rule ("commit
+messages in English, imperative", "serve on port 8123 by default") in
+`~/.pi/nerd/RULES.md` in the agent's home, which survives `./UP --build`; the
+model gets the list in its system prompt from your next message on, in this and
+every later project. `/rules` shows the list, `/forget <number or text>` drops
+one. Only you write the file: the model has no tool for it.
+
+`/task <text>` starts
 a new task in the same conversation; `/spec-check` checks the work against the
 task clause by clause. Details: the README, "Talking to the agent: `tui`".
 

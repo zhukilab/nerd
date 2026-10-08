@@ -155,7 +155,7 @@ FROM ubuntu:${UBUNTU_VERSION} AS agent
 RUN apt-get update && apt-get install -y --no-install-recommends \
         tini curl ca-certificates git python3 procps less xz-utils \
         openssh-server tmux ncurses-term ripgrep fd-find \
-        iproute2 tcpdump netcat-openbsd socat \
+        iproute2 tcpdump netcat-openbsd socat sudo \
         sqlite3 jq unzip zip file build-essential python3-venv python3-pip rsync dnsutils shellcheck \
  && rm -rf /var/lib/apt/lists/* \
  && rm -f /etc/ssh/ssh_host_* \
@@ -205,13 +205,19 @@ COPY --chmod=755 container/nerd-get.sh /usr/local/bin/nerd-get
 # Password "*" instead of useradd's "!": no password can match, but the
 # account is not "locked", which sshd without PAM would refuse even for a key.
 # Ubuntu images since 24.04 ship a user "ubuntu" with uid 1000: it becomes nerd,
-# without ubuntu's groups (sudo, adm and others: not for what the model runs).
+# without ubuntu's groups (adm and others). Root, when it is needed (tcpdump,
+# apt-get install), is `sudo` without a password, from a sudoers file of its own
+# (operator, 2026-10-08): the container is the boundary, not the user, and it
+# runs without --privileged. NERD_SUDO=0 has the entrypoint drop that file.
 RUN if id -u ubuntu >/dev/null 2>&1; then \
         usermod -l nerd -d /home/nerd -m -s /bin/bash ubuntu && groupmod -n nerd ubuntu; \
     else useradd -m -u 1000 -s /bin/bash nerd; fi \
  && usermod -G '' nerd \
  && [ "$(id -u nerd)" = 1000 ] && [ "$(id -G nerd)" = 1000 ] \
  && usermod -p '*' nerd \
+ && printf '%s\n' 'nerd ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/nerd \
+ && chmod 440 /etc/sudoers.d/nerd \
+ && visudo -cqf /etc/sudoers.d/nerd \
  && mkdir -p /workspace /logs /ssh /home/nerd/.cache \
  && chown nerd:nerd /workspace /logs /ssh /home/nerd/.cache \
  && chmod 700 /ssh \

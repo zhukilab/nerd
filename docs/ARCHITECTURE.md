@@ -75,8 +75,10 @@ context compaction and the terminal UI. nerd adds, in `agent/src/`:
 | `extension.ts`, `tui.ts` | the TUI: Pi's own `main()` with nerd's extension inline |
 | `run.ts`, `headless.ts` | one task without a conversation (headless mode, scripts, acceptance) |
 | `harness.ts`, `plan-step.ts` | the first turn of a task is read-only: assumptions, questions, plan; then `PLAN.md` is committed and work tools come on |
-| `packages.ts` | third-party Pi packages, pinned and loaded from `node_modules`: [pi-vcc](https://www.npmjs.com/package/@sting8k/pi-vcc) replaces Pi's model-written compaction summary with an extracted one (no model call) and adds `vcc_recall`, a search of the session file for what compaction dropped (`NERD_PI_VCC`, on); [rpiv-web-tools](https://www.npmjs.com/package/@juicesharp/rpiv-web-tools): `web_search` through SearXNG in the container and `web_fetch` (`NERD_WEB`, on) |
+| `packages.ts` | third-party Pi packages, pinned and loaded from `node_modules`: [pi-vcc](https://www.npmjs.com/package/@sting8k/pi-vcc) replaces Pi's model-written compaction summary with an extracted one (no model call) (`NERD_PI_VCC`, on; its `vcc_recall` is not offered unless `NERD_VCC_RECALL=1`); [rpiv-web-tools](https://www.npmjs.com/package/@juicesharp/rpiv-web-tools): `web_search` through SearXNG in the container and `web_fetch` (`NERD_WEB`, on) |
 | `loop-guard.ts` | tells the model when it repeats the same call with the same result |
+| `rules.ts` | the operator's rules for every project: `RULES.md` in the agent's home, in each turn's system prompt, written only by `/remember` and `/forget` |
+| `summary-goal.ts` | the compaction summary's goal set to the task in the operator's words, before each request |
 | `bash-tool.ts` | Pi's bash with a default timeout, so a foreground server cannot hang the run |
 | `browse.ts` | headless Chromium (Playwright): a page as a user sees it, with console errors and failed requests |
 | `spec-check.ts` | checks the work against the task's text clause by clause |

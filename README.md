@@ -20,7 +20,7 @@ no cloud, no API key, nothing leaves the machine except the model download.
 
 On a Linux machine (or Windows with WSL2: [docs/INSTALL.md](docs/INSTALL.md#windows-wsl2))
 with an NVIDIA GPU of 8 GB or more. A Mac with Apple silicon and 16 GB or
-more has its own short path, never run on a real Mac yet:
+more has its own short path, so far run on one Mac (M1 Pro, 16 GB):
 [docs/MACOS.md](docs/MACOS.md). Without a GPU nerd does not run.
 
 ```sh
@@ -51,7 +51,7 @@ check it works and what to look at when it does not:
 | | |
 |---|---|
 | [docs/INSTALL.md](docs/INSTALL.md) | platforms (x86_64 + NVIDIA, WSL2, aarch64 GB10), VRAM/disk/RAM per model variant, prerequisites |
-| [docs/MACOS.md](docs/MACOS.md) | macOS on Apple silicon: the model on the Mac (llama-server with Metal, or MLX), the agent in its container — never run on a real Mac yet; what to send back |
+| [docs/MACOS.md](docs/MACOS.md) | macOS on Apple silicon: the model on the Mac (llama-server with Metal, or MLX), the agent in its container — so far run on one Mac; what to send back (`tools/report.sh`) |
 | [docs/OPERATE.md](docs/OPERATE.md) | `./UP` `./DOWN` `./STATUS`, `.env`, connecting, keys, ports, the operator address, PuTTY, headless runs |
 | [docs/MAINTAIN.md](docs/MAINTAIN.md) | updating the model, Pi, the llama.cpp fork, Node; rebuilding; troubleshooting |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | what runs where and why |
@@ -223,6 +223,15 @@ the latest remark, `PLAN.md`, the `notes/` index and the files changed since the
 task began, within `NERD_ANCHORS_MAX_CHARS` (4000)
 ([`agent/src/anchors.ts`](agent/src/anchors.ts); `NERD_ANCHORS=0` = off).
 
+**The operator's rules.** What the operator wants in every project goes into
+`RULES.md` in Pi's agent dir (`~/.pi/nerd`, the home volume) through the TUI's
+`/remember <text>`, `/forget <number|text>` and `/rules`; the harness adds the
+list to the system prompt of each turn the operator starts, within
+`NERD_RULES_MAX_CHARS` (4000; what does not fit is named), and the model has no
+tool to write it ([`agent/src/rules.ts`](agent/src/rules.ts); `NERD_RULES_FILE`
+puts the file elsewhere). Memory the model was to keep itself was measured and
+left out: it saved such rules once in four runs.
+
 **`browse`: a page as the user sees it.** `curl` cannot tell a working page
 from one whose script dies on load or that is served as `text/plain`. The
 image has Chromium's headless shell (Playwright, pinned with the agent) and a
@@ -281,7 +290,7 @@ Server defaults, each overridable in the server's environment (through
 `NERD_SLOTS=1`, prompt cache off (`--cache-ram 0`: its KV snapshots overflow an
 8 GB card), extra flags in `NERD_LLAMA_ARGS`. The agent's own variables
 (`NERD_THINKING`, `NERD_VERIFY_N`, `NERD_SPEC_CHECK`, `NERD_BASH_TIMEOUT`,
-`NERD_PLAN_STEP`, `NERD_PLAN_ANSWER`, `NERD_LOOP_GUARD_N`, `NERD_FETCH_GUARD`, `NERD_LINT`, `NERD_DONE_GATE`, `NERD_BASH_MAX_CHARS`, `NERD_QUIET`, `NERD_ANCHORS`, `NERD_WEB_NOTES`, `NERD_PI_VCC`, `NERD_WEB`) are described in
+`NERD_PLAN_STEP`, `NERD_PLAN_ANSWER`, `NERD_LOOP_GUARD_N`, `NERD_FETCH_GUARD`, `NERD_LINT`, `NERD_DONE_GATE`, `NERD_BASH_MAX_CHARS`, `NERD_QUIET`, `NERD_ANCHORS`, `NERD_RULES_FILE`, `NERD_SUMMARY_GOAL`, `NERD_VCC_RECALL`, `NERD_WEB_NOTES`, `NERD_PI_VCC`, `NERD_WEB`) are described in
 [`agent/src/run.ts`](agent/src/run.ts). `HF_TOKEN` is sent to Hugging Face if
 set. Header comments of [`Dockerfile`](Dockerfile) and
 [`container/entrypoint.sh`](container/entrypoint.sh) list the rest.
@@ -297,8 +306,14 @@ fractions apply to any `NERD_CTX`; on a card where 64K does not fit, set
 
 The summary itself is no longer written by the model: the
 [pi-vcc](https://www.npmjs.com/package/@sting8k/pi-vcc) package extracts it
-(goal, files, commits, open items, a short transcript of the turns) and gives
-the agent `vcc_recall` to search the session for what was dropped. In an A/B on
+(goal, files, commits, open items, a short transcript of the turns). Its goal
+is set to the task in the operator's words before each request: pi-vcc took it
+from the plan step's form and the first answers, and an early assumption once
+outlived the code that corrected it ([`agent/src/summary-goal.ts`](agent/src/summary-goal.ts);
+`NERD_SUMMARY_GOAL=0` = as pi-vcc wrote it). Its search tool `vcc_recall` is
+not offered: the model never called it while working (0 calls over 134
+compactions) and its schema cost ~480 tokens in every request; the anchors
+bring back what matters instead (`NERD_VCC_RECALL=1` offers it again). In an A/B on
 one long task (six feature requests in a row, 64K, four hours, four agents
 sharing one GPU) Pi's own compaction ran 7 times and took 46 of 229 minutes,
 from 2 to 12 minutes each and growing with its summary; pi-vcc's 8 took no

@@ -60,6 +60,7 @@ services:
       # Empty unless NERD_LLAMA=mlx: llama-server reports its own context.
       NERD_CTX: ${NERD_AGENT_CTX:-}
       NERD_SAMPLING: ${NERD_SAMPLING:-}
+      NERD_SUDO: ${NERD_SUDO:-1}
     volumes:
       - ws:/workspace
       - logs:/logs
