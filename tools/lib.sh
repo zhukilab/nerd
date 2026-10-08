@@ -8,9 +8,12 @@ NERD_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 # KEY=VALUE lines of .env. Read, not sourced: a value is never executed. A
 # " #" starts a comment unless the value is quoted; one pair of surrounding
 # quotes is removed. Only NERD_* and HF_TOKEN are taken; the environment
-# wins over the file, so `NERD_NAME=x ./UP` works.
+# wins over the file, so `NERD_NAME=x ./UP` works. Within the file the last
+# line of a name wins, as in other .env readers: `echo NERD_LLAMA=mlx >> .env`
+# overrides the NERD_LLAMA=auto copied from env.example. No associative
+# arrays: check-prerequisites.sh sources this under macOS's bash 3.2 too.
 nerd_load_env() {
-  local f=${NERD_ENV_FILE:-$NERD_ROOT/.env} line key val
+  local f=${NERD_ENV_FILE:-$NERD_ROOT/.env} line key val from_file=" "
   [ -f "$f" ] || return 0
   while IFS= read -r line || [ -n "$line" ]; do
     line=${line#"${line%%[![:space:]]*}"}
@@ -25,8 +28,11 @@ nerd_load_env() {
       val=${val%%[[:space:]]#*}
       val=${val%"${val##*[![:space:]]}"}
     fi
-    # The environment wins: only set what is not set already.
-    if [ -z "${!key+x}" ]; then printf -v "$key" '%s' "$val"; export "${key?}"; fi
+    # The environment wins; a name this file set already is set again.
+    if [[ "$from_file" == *" $key "* ]] || [ -z "${!key+x}" ]; then
+      printf -v "$key" '%s' "$val"; export "${key?}"
+      [[ "$from_file" == *" $key "* ]] || from_file+="$key "
+    fi
   done < "$f"
 }
 

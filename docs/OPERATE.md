@@ -57,8 +57,8 @@ pinned sha256); later starts take seconds. `./UP` shows the progress of both.
 `cp env.example .env` and edit; every line is optional, `env.example` explains
 each. `.env` is read, not executed, and is git-ignored. A variable set in the
 environment wins over the file (`NERD_NAME=test ./UP`). Within the file the
-first line for a name wins: edit the line that is there, do not append a
-second one.
+last line for a name wins, so `echo NERD_LLAMA=mlx >> .env` works; editing
+the line that is there keeps the file readable.
 
 | setting | default | |
 |---|---|---|

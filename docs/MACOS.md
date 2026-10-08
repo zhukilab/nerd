@@ -89,7 +89,7 @@ ssh -p 2222 nerd@localhost
 ```
 
 `.env` is optional (`cp env.example .env`, then edit the lines you need;
-**edit** a line rather than add a second one: the first line for a name wins).
+for a name set twice the last line wins).
 With 16 GB, set `NERD_CTX=32768` there if memory gets tight.
 
 What the first `./UP` does, in order: clones the llama.cpp fork into `~/.nerd`
