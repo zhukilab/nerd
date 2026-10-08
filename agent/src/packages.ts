@@ -88,7 +88,7 @@ export function webToolsConfig() {
 				promptSnippet: "Search the web: titles, URLs and snippets",
 				promptGuidelines: [
 					"For facts outside your knowledge and the workspace (rules of a game, a format, a library's API): web_search, then web_fetch the best result and work from what the page says.",
-					"Name the URL a fact came from: in a code comment or the README where the fact is used.",
+					"What you found, write down in notes/<topic>.md in the project with the URL of each fact, before you use it; name the URL in the code or README where the fact is used too.",
 				],
 			},
 			web_fetch: {

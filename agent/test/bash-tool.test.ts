@@ -1,14 +1,12 @@
 // The bash tool's default timeout and its message, and the operator prompt's
 // address, against a real bash (no model, no server).
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 import { test } from "node:test";
 import { bashTimeout, DEFAULT_BASH_TIMEOUT, nerdBashTool } from "../src/bash-tool.ts";
 import { operatorPrompt } from "../src/local.ts";
+import { tempDir } from "./tmp.ts";
 
-const cwd = mkdtempSync(join(tmpdir(), "nerd-bash-"));
+const cwd = tempDir("nerd-bash-");
 // The tool reads only cwd and the session id from the context.
 const ctx = { cwd, sessionManager: { getSessionId: () => "test", getSessionFile: () => undefined } } as never;
 const text = (r: { content: { type: string; text?: string }[] }) => r.content.map((c) => c.text ?? "").join("");

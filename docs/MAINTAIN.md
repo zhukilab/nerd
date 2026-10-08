@@ -43,6 +43,14 @@ recompiles llama-server (4-8 minutes) and replaces the server's container.
 | shell scripts | `shellcheck -x UP DOWN STATUS tools/*.sh` (clean); `container/*.sh acceptance/*.sh` | shellcheck |
 | the whole thing | `./UP`, `./STATUS` green, log in, give it a small task ("create hello.html with the text hi and serve it on the app port"), open the page | a GPU |
 
+Tests and scripts leave nothing in `$TMPDIR`: each makes its own temp dirs and
+removes them (`agent/test/tmp.ts`, `trap` in the shell scripts), and prints one
+it could not remove. `npm test` points Node's compile cache at
+`~/.cache/nerd` and turns jiti's file cache off; what remains after it in
+`$TMPDIR` is npm's own `node-compile-cache` (set `NODE_COMPILE_CACHE` before
+`npm` to move that too). A headless run (`npm run run`) removes its agent dir,
+unless the session is in it (no `NERD_SESSION_DIR`): then it prints the path.
+
 ## Updating the model
 
 The model files and their hashes are in `container/model.sh`. For a new
@@ -64,8 +72,33 @@ recorded at download match; a changed pin downloads the new file next to it.
 Old files can be deleted with `docker run --rm -v nerd-models:/m alpine ls -l /m`
 and `rm`.
 
-To try a GGUF without changing the pins: put it in the models volume and set
-`NERD_DOCKER_ARGS="-e NERD_MODEL_FILE=<file name>"`.
+To try a GGUF without changing the pins: `NERD_MODEL_GGUF=hf:<owner>/<repo>/<file>.gguf`
+in `.env` and `./UP` (downloaded into the models volume once, checked against
+the sha256 Hugging Face publishes for it — its resolve URL's `X-Linked-Etag` —
+and that hash kept next to the file; `NERD_MODEL_SHA256` pins one), or a file
+already in the volume by its name (`NERD_MODEL_FILE`, the older name, still
+works). `container/model.sh`, `nerd_model_select`, is shared by the image and
+`tools/llama-host.sh`.
+
+## The MLX server (macOS, `NERD_LLAMA=mlx`)
+
+`tools/mlx-host.sh` installs `tools/mlx-requirements.txt` with
+`--require-hashes` into a venv. The top-level pins are in
+`tools/mlx-requirements.in` (the set PrismML's Bonsai-demo tests the MLX pack
+with: `scripts/requirements-mlx-vlm.txt` there). After changing them:
+
+```sh
+python3 tools/mlx-lock.py > tools/mlx-requirements.txt   # any OS: pip downloads the Mac's wheels
+```
+
+It refuses an sdist (a package without a macOS arm64 wheel would build on the
+Mac). The default model is pinned by revision in `tools/mlx-host.sh`
+(`DEFAULT_MODEL`), together with the sha256 of the pack's `files.json`, which
+lists every file's size and sha256 (`tools/mlx-verify.py` checks them after the
+download). A new revision: take its commit from
+`https://huggingface.co/api/models/<repo>` (`sha`) and its `files.json`'s sha256.
+Bonsai 2's pack needs mlx-vlm's `prism_hadamard_qwen35` loader; an mlx-vlm
+without it fails `install`.
 
 ## Updating Pi (the agent framework)
 
@@ -146,7 +179,7 @@ GPUs need 12.8 or later.
 | container restarts, log: `tui: no public key` | no key reached the container | `NERD_AUTHORIZED_KEYS_FILE`, then `./UP` |
 | `Permission denied (publickey)` | the private key does not match, or the user is not `nerd` | `ssh -i <key> -p <port> nerd@<host>`; in PuTTY the user is set in the session |
 | `REMOTE HOST IDENTIFICATION HAS CHANGED` | `./DOWN --purge` deleted the host keys | `ssh-keygen -R "[<host>]:<port>"` |
-| download stops or repeats | network; the download resumes on restart | `docker logs <name>-llm`; behind a proxy: `NERD_SERVER_DOCKER_ARGS="-e HTTPS_PROXY=..."` in `.env` |
+| download stops or repeats | network; the download resumes on restart | `docker logs <name>-llm`; behind a proxy: `HTTPS_PROXY` for the `llm` service in `compose.override.yaml` (docs/OPERATE.md) |
 | `sha256 mismatch` | corrupted download or the file changed upstream | the partial file is removed; restart. If it repeats, the upstream file changed: update the pin (above) |
 | `llama-server exited during startup`, `cudaMalloc failed: out of memory` | not enough GPU memory | smaller `NERD_CTX`, `q1`, close other GPU users |
 | `CUDA driver version is insufficient` / `no kernel image is available` | the image's CUDA is newer than the driver, or built for another GPU | update the driver, or set `NERD_CUDA_VERSION`/`NERD_CUDA_ARCH` and `./UP --build` |

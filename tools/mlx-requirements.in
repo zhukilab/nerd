@@ -1,0 +1,9 @@
+# What tools/mlx-host.sh installs, before pinning: the set PrismML's
+# Bonsai-demo tests Bonsai 2's MLX pack with (scripts/requirements-mlx-vlm.txt).
+# mlx-vlm 0.7.2 has the pack's loader (mlx_vlm.models.prism_hadamard_qwen35),
+# a /health that names the loaded model, OpenAI tool calls (the qwen3_coder
+# parser, picked from the chat template) and a top-level enable_thinking.
+# tools/mlx-lock.py turns this into tools/mlx-requirements.txt (docs/MAINTAIN.md).
+mlx==0.32.2
+mlx-vlm==0.7.2
+transformers==5.14.1

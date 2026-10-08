@@ -1,0 +1,8 @@
+# NERD_WORKSPACE: a directory of this machine as the agent's /workspace
+# instead of the volume <name>-ws (compose replaces a mount by its target).
+services:
+  agent:
+    volumes:
+      - type: bind
+        source: ${NERD_WORKSPACE_DIR:?}
+        target: /workspace

@@ -5,3 +5,5 @@ node_modules/
 .env
 # Logs of ./UP and tools/llama-host.sh (var/log/), sent when something fails.
 var/
+# Your own compose additions (docs/OPERATE.md), merged by ./UP.
+compose.override.yaml

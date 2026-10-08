@@ -21,7 +21,11 @@
 # Environment (all optional unless said):
 #   server:
 #   NERD_MODEL_VARIANT  q1 (Bonsai 2 PTQ1_0, 5.95 GB, default) | q2 (PQ2_0, 7.21 GB)
-#   NERD_MODEL_FILE     a GGUF already in /models instead of a variant (no download)
+#   NERD_MODEL_GGUF     another GGUF instead of a variant: hf:<owner>/<repo>/<file>.gguf[@rev]
+#                       (downloaded into /models, sha256 checked) or <file>.gguf
+#                       already in /models (no download; NERD_MODEL_FILE, the older name)
+#   NERD_MODEL_SHA256   pins the hf: file's sha256 (default: what Hugging Face publishes)
+#   NERD_MODEL_ALIAS    the model's name on the server (bonsai2-<variant>, or the file's)
 #   NERD_CTX            context tokens (65536)        NERD_KV     KV cache type (q4_0)
 #   NERD_NGL            layers on the GPU (99)        NERD_SLOTS  parallel slots (1)
 #   NERD_LLAMA_ARGS     extra llama-server arguments, word-split
@@ -44,6 +48,10 @@ say() { echo "[nerd $(date +%H:%M:%S)] $*" >&2; }
 die() { say "ERROR: $*"; exit 1; }
 
 export HOME=${HOME:-/home/nerd}
+# Node's compile cache, which Pi turns on, defaults to $TMPDIR; it is a cache,
+# so it goes where caches go. (jiti's cache for extensions picks its own
+# directory, $TMPDIR here; JITI_FS_CACHE only switches it on or off.)
+export NODE_COMPILE_CACHE=${NODE_COMPILE_CACHE:-$HOME/.cache/node-compile-cache}
 mkdir -p /logs 2>/dev/null
 role=agent
 case "${1:-}" in serve|fetch) role=server ;; esac
@@ -51,25 +59,35 @@ case "${1:-}" in serve|fetch) role=server ;; esac
 # --- server --------------------------------------------------------------------
 if [ "$role" = server ]; then
   [ -x /opt/llama/llama-server ] || die "$1: this is the agent image; the server image is built with --target server"
-  # repo, file, size, sha of the variant; llama-server's arguments (model.sh).
+  # The model (a pinned variant, or NERD_MODEL_GGUF) and llama-server's arguments (model.sh).
   # shellcheck source=container/model.sh
   . "$(dirname "$0")/model.sh"
-  nerd_model "${NERD_MODEL_VARIANT:-q1}" || die "NERD_MODEL_VARIANT must be q1 or q2, not '${NERD_MODEL_VARIANT}'"
+  msg=$(nerd_model_select) || die "$msg"
+  nerd_model_select
 
   fetch_model() {
-    local m=/models/$file part=/models/$file.part ok=/models/$file.sha256-ok
+    local m=/models/$name part=/models/$name.part ok=/models/$name.sha256-ok
     # A file is trusted once its hash was checked; the marker records that, so
     # later starts do not re-hash 6-7 GB. Size is still checked every time.
-    if [ -f "$m" ] && [ "$(stat -c %s "$m")" = "$size" ] && [ "$(cat "$ok" 2>/dev/null)" = "$sha" ]; then
+    # An unpinned hf: file (NERD_MODEL_GGUF) is checked against what Hugging
+    # Face published at its first download, kept in the marker's .meta.
+    if [ -z "$size" ] && [ -s "$ok.meta" ]; then
+      local msize msha; read -r msize msha < "$ok.meta"; size=$msize; sha=${sha:-$msha}
+    fi
+    if [ -n "$size" ] && [ -f "$m" ] && [ "$(stat -c %s "$m")" = "$size" ] && [ "$(cat "$ok" 2>/dev/null)" = "$sha" ]; then
       say "model present: $m"; return 0
     fi
+    if [ -z "$size" ] || [ -z "$sha" ]; then
+      nerd_hf_meta || die "no size and sha256 for $repo/$file@$rev from Hugging Face (a wrong path, a gated repo without HF_TOKEN?)"
+      echo "$size $sha" > "$ok.meta"
+    fi
     if [ -f "$m" ]; then mv "$m" "$part"; fi   # unverified: re-check it as a partial download
-    local url="https://huggingface.co/$repo/resolve/main/$file" t0=$SECONDS have
+    local url="https://huggingface.co/$repo/resolve/$rev/$file" t0=$SECONDS have
     local -a auth=()
     [ -n "${HF_TOKEN:-}" ] && auth=(-H "Authorization: Bearer $HF_TOKEN")
     have=$(stat -c %s "$part" 2>/dev/null || echo 0)
     if [ "$have" -gt "$size" ]; then rm -f "$part"; have=0; fi
-    say "downloading $file ($size bytes; have $have) from $url"
+    say "downloading $name ($size bytes; have $have) from $url"
     for attempt in $(seq 20); do
       [ "$have" = "$size" ] && break
       # -C - resumes from the partial file's size.
@@ -87,13 +105,12 @@ if [ "$role" = server ]; then
     say "model ready: $m ($((SECONDS - t0)) s with the hash check)"
   }
 
-  if [ -n "${NERD_MODEL_FILE:-}" ]; then
-    model=/models/$NERD_MODEL_FILE
-    [ -f "$model" ] || die "NERD_MODEL_FILE: $model not found"
+  model=/models/$name
+  if [ "$as_is" = 1 ]; then
+    [ -f "$model" ] || die "NERD_MODEL_GGUF: $model not found (a file in the models volume; hf:<owner>/<repo>/<file> downloads one)"
   else
     [ -w /models ] || die "/models is not writable by uid $(id -u) (mount a volume there)"
     fetch_model || exit 1
-    model=/models/$file
   fi
   [ "$1" = fetch ] && exit 0
   port=${NERD_LLAMA_PORT:-${NERD_PORT:-8080}}

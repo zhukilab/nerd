@@ -1,0 +1,11 @@
+# The GPU through the NVIDIA container toolkit (docker run --gpus all).
+# ./UP adds this when no CDI spec is usable (NERD_GPU=gpus, or auto).
+services:
+  llm:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

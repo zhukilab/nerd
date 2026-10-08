@@ -1,0 +1,7 @@
+# NERD_LLAMA=host (macOS): llama-server runs on this machine, not in a
+# container; the agent reaches it as host.docker.internal (Docker Desktop
+# names it itself, Linux needs the mapping).
+services:
+  agent:
+    extra_hosts:
+      - host.docker.internal:host-gateway

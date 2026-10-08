@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Is nerd up? The server (container <name>-llm, or on the host with
-# NERD_LLAMA=host), the agent's container, llama-server as the agent reaches
-# it, sshd and the app port. Exit 0 when both run, the model is served and ssh
-# answers.
+# NERD_LLAMA=host or mlx), the agent's container, the server as the agent
+# reaches it, sshd and the app port. Exit 0 when both run, the model is served
+# and ssh answers.
 set -uo pipefail
 # shellcheck source=tools/lib.sh
 . "$(dirname "$0")/tools/lib.sh"
@@ -14,9 +14,10 @@ row() { printf '%-8s %-14s %s\n' "$1" "$2" "$3"; [ "$1" = OK ] || [ "$1" = INFO 
 cstate() { docker inspect -f '{{.State.Status}} since {{.State.StartedAt}}, restarts {{.RestartCount}}, image {{.Config.Image}}' "$1" 2>/dev/null; }
 
 # --- the server ---------------------------------------------------------------------
-if [ "$NERD_LLAMA" = host ]; then
-  if nerd_host_llama_up; then row OK server "llama-server on this machine, 127.0.0.1:$NERD_LLAMA_PORT (tools/llama-host.sh)"
-  else row DOWN server "no llama-server on this machine: ./UP starts it"; fi
+tool=tools/$(basename "$(nerd_host_tool)")
+if nerd_on_host; then
+  if nerd_host_llama_up; then row OK server "the model server on this machine, 127.0.0.1:$NERD_LLAMA_PORT ($tool)"
+  else row DOWN server "no model server on this machine: ./UP starts it ($tool)"; fi
 else
   s=$(cstate "$NERD_LLM_NAME")
   case "$s" in
@@ -42,15 +43,18 @@ esac
 inside() { docker exec "$NERD_NAME" "$@" 2>/dev/null; }
 base=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$NERD_NAME" 2>/dev/null | sed -n 's/^NERD_BASE_URL=//p')
 base=${base:-$NERD_LLAMA_URL}
-if inside curl -sf -m 3 "${base%/v1}/health" >/dev/null; then
-  model=$(inside curl -sf -m 3 "$base/models" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+if health=$(inside curl -sf -m 3 "${base%/v1}/health"); then
+  # mlx-vlm's /health names the model it loaded; its /v1/models lists the
+  # Hugging Face cache too, so the first entry there may be another one.
+  model=$(echo "$health" | grep -o '"loaded_model":"[^"]*"' | cut -d'"' -f4)
+  [ -n "$model" ] || model=$(inside curl -sf -m 3 "$base/models" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
   row OK llama "$base answers the agent, model ${model:-?}"
-elif [ "$NERD_LLAMA" = host ] && nerd_host_llama_up; then
+elif nerd_on_host && nerd_host_llama_up; then
   row DOWN llama "answers on the host's 127.0.0.1:$NERD_LLAMA_PORT, but not from the container at $base (docs/MACOS.md, troubleshooting)"
 elif [ "$NERD_LLAMA" = container ] && docker logs "$NERD_LLM_NAME" 2>&1 | tr '\r' '\n' | grep -q 'downloading'; then
   row WAIT llama "not serving yet; the model is downloading or loading (docker logs -f $NERD_LLM_NAME)"
-elif [ "$NERD_LLAMA" = host ]; then
-  row WAIT llama "$base does not answer yet (tools/llama-host.sh logs)"
+elif nerd_on_host; then
+  row WAIT llama "$base does not answer yet ($tool logs)"
 else
   row WAIT llama "$base does not answer yet (docker logs --tail 30 $NERD_LLM_NAME)"
 fi

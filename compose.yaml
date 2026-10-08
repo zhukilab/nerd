@@ -1,0 +1,101 @@
+# nerd's two containers: the model server (llm) and the agent (decision 0012).
+# Run it through ./UP, not by hand: ./UP works out this machine (GPU and how
+# docker reaches it, CUDA architecture, macOS with the server on the host, the
+# ssh key), exports the variables used below, adds the overlays that fit
+# (compose.gpus.yaml or compose.cdi.yaml, compose.netns.yaml,
+# compose.workspace-dir.yaml, compose.host-llama.yaml, your own
+# compose.override.yaml) and runs `docker compose up -d`. `./UP --dry-run`
+# prints the command and the resolved configuration.
+#
+# State lives outside the containers, in volumes ./UP creates (external here,
+# so their names stay what they were before compose and ./DOWN never deletes
+# them unless asked): the model, the workspace, logs and conversations, the
+# ssh host keys, the agent's home (languages and their packages, memory) and
+# its caches. /tmp is a tmpfs in both containers.
+name: ${NERD_NAME:?run ./UP}
+
+services:
+  llm:
+    profiles: [llm]
+    image: ${NERD_SERVER_IMAGE:?}
+    build:
+      context: .
+      target: server
+      args:
+        CUDA_ARCH: ${NERD_CUDA_ARCH:?}
+        CUDA_VERSION: ${NERD_CUDA_VERSION:?}
+    container_name: ${NERD_NAME}-llm
+    command: [serve]
+    restart: unless-stopped
+    environment:
+      NERD_MODEL_VARIANT: ${NERD_MODEL_VARIANT:?}
+      NERD_MODEL_GGUF: ${NERD_MODEL_GGUF:-}
+      NERD_MODEL_SHA256: ${NERD_MODEL_SHA256:-}
+      NERD_MODEL_ALIAS: ${NERD_MODEL_ALIAS:-}
+      NERD_CTX: ${NERD_CTX:?}
+      NERD_LLAMA_PORT: ${NERD_LLAMA_PORT:?}
+      NERD_HOST: ${NERD_SERVER_HOST:?}
+      HF_TOKEN: ${HF_TOKEN:-}
+    volumes:
+      - models:/models
+    tmpfs:
+      # exec: build tools run what they put in /tmp (docker's --tmpfs default is noexec)
+      - /tmp:rw,exec,nosuid,size=${NERD_TMP_SIZE:?}
+    networks: [net]
+
+  agent:
+    image: ${NERD_IMAGE:?}
+    build:
+      context: .
+      target: agent
+    container_name: ${NERD_NAME}
+    command: [tui]
+    restart: unless-stopped
+    environment:
+      NERD_BASE_URL: ${NERD_LLAMA_URL:?}
+      NERD_SSH_PORT: ${NERD_SSH_PORT:?}
+      NERD_APP_PORT: ${NERD_APP_PORT:?}
+      NERD_AUTHORIZED_KEYS: ${NERD_AUTHORIZED_KEYS:?}
+      NERD_OPERATOR_URL: ${NERD_OPERATOR_URL:-}
+      # Empty unless NERD_LLAMA=mlx: llama-server reports its own context.
+      NERD_CTX: ${NERD_AGENT_CTX:-}
+      NERD_SAMPLING: ${NERD_SAMPLING:-}
+    volumes:
+      - ws:/workspace
+      - logs:/logs
+      - ssh:/ssh
+      - home:/home/nerd
+      - cache:/home/nerd/.cache
+    tmpfs:
+      - /tmp:rw,exec,nosuid,size=${NERD_TMP_SIZE:?}
+    # Chromium for `browse` needs more than docker's 64 MB /dev/shm.
+    shm_size: ${NERD_SHM_SIZE:?}
+    ports:
+      - ${NERD_BIND:?}:${NERD_SSH_PORT}:${NERD_SSH_PORT}
+      - ${NERD_BIND}:${NERD_APP_PORT}:${NERD_APP_PORT}
+    networks: [net]
+
+networks:
+  net:
+    external: true
+    name: ${NERD_NAME}-net
+
+volumes:
+  models:
+    external: true
+    name: ${NERD_MODELS_VOLUME:?}
+  ws:
+    external: true
+    name: ${NERD_NAME}-ws
+  logs:
+    external: true
+    name: ${NERD_NAME}-logs
+  ssh:
+    external: true
+    name: ${NERD_NAME}-ssh
+  home:
+    external: true
+    name: ${NERD_NAME}-home
+  cache:
+    external: true
+    name: ${NERD_NAME}-cache

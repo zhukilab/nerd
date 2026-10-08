@@ -4,8 +4,12 @@
 //
 // Environment:
 //   NERD_BASE_URL  OpenAI-compatible endpoint (default http://127.0.0.1:18091/v1)
-//   NERD_MODEL     model id to report (default: whatever the server serves)
-//   NERD_CTX       the server's context size in tokens (default 16384)
+//   NERD_MODEL     model id to report (default: whatever the server serves;
+//                  for mlx-vlm's server, the model its /health says it loaded)
+//   NERD_CTX       the server's context size in tokens (default: llama-server's
+//                  /props, else 16384)
+//   NERD_SAMPLING  sampling fields added to every request that does not set
+//                  them, e.g. "temperature=0.7,top_p=0.8,top_k=20" (src/sampling.ts)
 //   NERD_THINKING  off | low | medium | high (default off)
 //   NERD_VERIFY_N  candidates per step for the verifier (default 1: plain loop)
 //   NERD_BASH_TIMEOUT  seconds a bash call may run when the model gives no
@@ -18,12 +22,27 @@
 //                  NERD_PLAN_ANSWER answers its questions (default «на твоё усмотрение»)
 //   NERD_LOOP_GUARD_N  repeats of one call (same arguments, same result) before
 //                  the loop guard's note (default 3, 0 = off; src/loop-guard.ts)
+//   NERD_FETCH_GUARD=0  no note on a web_fetch 404 for an address that no
+//                  web_search result had (src/fetch-guard.ts)
+//   NERD_LINT=0    no linter after write/edit (src/lint-check.ts)
+//   NERD_DONE_GATE=0  no check of the committed project when a turn of work
+//                  ends (src/done-gate.ts); NERD_DONE_GATE_ROUNDS bounds the
+//                  messages it sends back per operator message (default 2)
+//   NERD_BASH_MAX_CHARS  a longer bash output reaches the model as head and tail,
+//                  the whole of it in a file (default 8000, 0 = off; src/output-cap.ts)
+//   NERD_QUIET=0   no quiet defaults (NO_COLOR, npm fund/audit, ...) for the
+//                  model's commands (src/bash-tool.ts)
+//   NERD_ANCHORS=0  no anchors (task, PLAN.md, notes/, changed files) after a
+//                  compaction; NERD_ANCHORS_MAX_CHARS bounds them (4000; src/anchors.ts)
 //   NERD_PI_VCC, NERD_TODO  Pi packages on (1) or off (0): src/packages.ts
 //   NERD_SESSION_DIR  where the session file goes (default: the run's temp agent dir)
 //
+// The temp agent dir (under $TMPDIR) is removed when the run ends, unless the
+// session is in it (no NERD_SESSION_DIR): then its path is printed.
+//
 // The interactive counterpart is tui.ts; what both share is in local.ts.
 
-import { appendFileSync, cpSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { appendFileSync, cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
@@ -153,6 +172,8 @@ async function main() {
 		}
 	} finally {
 		session.dispose();
+		if (process.env.NERD_SESSION_DIR) rmSync(agentDir, { recursive: true, force: true });
+		else console.log(`[agent dir kept, the session is in it: ${agentDir}]`);
 	}
 }
 

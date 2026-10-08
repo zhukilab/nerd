@@ -13,8 +13,8 @@
 #                                 one running with other settings is restarted
 #   tools/llama-host.sh stop | status | logs      (./DOWN runs stop too)
 #
-# Settings from .env (env.example): NERD_MODEL_VARIANT, NERD_CTX,
-# NERD_LLAMA_PORT, and here only:
+# Settings from .env (env.example): NERD_MODEL_VARIANT or NERD_MODEL_GGUF
+# (container/model.sh), NERD_CTX, NERD_LLAMA_PORT, and here only:
 #   NERD_HOST_DIR     where the source, build, model and log go (~/.nerd)
 #   NERD_LLAMA_HOST   address the server listens on (127.0.0.1)
 #   NERD_LLAMA_ARGS   extra llama-server arguments, word-split
@@ -40,8 +40,9 @@ pidf=$dir/llama-server.pid
 argsf=$dir/llama-server.args
 bind=${NERD_LLAMA_HOST:-127.0.0.1}
 port=$NERD_LLAMA_PORT
-nerd_model "$NERD_MODEL_VARIANT" || die "NERD_MODEL_VARIANT must be q1 or q2, not '$NERD_MODEL_VARIANT'"
-model=$models/$file
+msg=$(nerd_model_select) || die "$msg"
+nerd_model_select
+model=$models/$name
 
 # The fork and tag the image builds (Dockerfile ARG lines): one place to change.
 dockerfile_arg() { sed -n "s/^ARG $1=//p" "$NERD_ROOT/Dockerfile" | head -1; }
@@ -108,16 +109,27 @@ build() {
 }
 
 fetch() {
-  local part=$model.part ok=$model.sha256-ok have url t0=$SECONDS
+  local part=$model.part ok=$model.sha256-ok have url t0=$SECONDS msize msha
   mkdir -p "$models"
-  if [ "$(bytes "$model")" = "$size" ] && [ "$(cat "$ok" 2>/dev/null)" = "$sha" ]; then
+  if [ "$as_is" = 1 ]; then
+    [ -f "$model" ] || die "NERD_MODEL_GGUF: $model not found (put the file there, or use hf:<owner>/<repo>/<file>)"
+    say "model (as it is, not checked): $model"; return 0
+  fi
+  # An unpinned hf: file (NERD_MODEL_GGUF) is checked against what Hugging
+  # Face published at its first download, kept next to the marker.
+  if [ -z "$size" ] && [ -s "$ok.meta" ]; then read -r msize msha < "$ok.meta"; size=$msize; sha=${sha:-$msha}; fi
+  if [ -n "$size" ] && [ "$(bytes "$model")" = "$size" ] && [ "$(cat "$ok" 2>/dev/null)" = "$sha" ]; then
     say "model present: $model"; return 0
+  fi
+  if [ -z "$size" ] || [ -z "$sha" ]; then
+    nerd_hf_meta || die "no size and sha256 for $repo/$file@$rev from Hugging Face (a wrong path, a gated repo without HF_TOKEN?)"
+    echo "$size $sha" > "$ok.meta"
   fi
   [ -f "$model" ] && mv "$model" "$part"   # unverified: re-check it as a partial download
   have=$(bytes "$part")
   [ "$have" -gt "$size" ] && { rm -f "$part"; have=0; }
-  url="https://huggingface.co/$repo/resolve/main/$file"
-  say "downloading $file ($size bytes; have $have) from $url"
+  url="https://huggingface.co/$repo/resolve/$rev/$file"
+  say "downloading $name ($size bytes; have $have) from $url"
   for attempt in $(seq 20); do
     [ "$have" = "$size" ] && break
     if [ -n "${HF_TOKEN:-}" ]; then

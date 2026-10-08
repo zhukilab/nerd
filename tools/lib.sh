@@ -89,13 +89,21 @@ nerd_settings() {
     # Blackwell (10.0 and up) needs CUDA 12.8+; 13.0.1 is the tested one (GB10).
     if [ "${NERD_CUDA_ARCH:0:3}" -ge 100 ] 2>/dev/null; then NERD_CUDA_VERSION=13.0.1; else NERD_CUDA_VERSION=12.4.1; fi
   fi
-  # Where llama-server runs: container (its own container <name>-llm, from
-  # the server image, with the GPU) or host (on the machine itself,
-  # tools/llama-host.sh). auto: host on macOS, where docker cannot reach the
-  # GPU, container elsewhere. The agent is always its own container <name>.
+  # Where the model server runs: container (llama-server in its own container
+  # <name>-llm, from the server image, with the GPU), host (llama-server on
+  # the machine itself, tools/llama-host.sh) or mlx (mlx-vlm's server on a Mac,
+  # the model in Apple's MLX format, tools/mlx-host.sh). auto: host on macOS,
+  # where docker cannot reach the GPU, container elsewhere. The agent is
+  # always its own container <name>.
   NERD_LLAMA=${NERD_LLAMA:-auto}
   if [ "$NERD_LLAMA" = auto ]; then
     if [ "$(uname -s)" = Darwin ]; then NERD_LLAMA=host; else NERD_LLAMA=container; fi
+  fi
+  # mlx-vlm's server decodes greedily unless a request names its sampling;
+  # these are the model card's values for non-thinking use (Bonsai 2). The
+  # agent adds them to requests that do not set them (agent/src/sampling.ts).
+  if [ "$NERD_LLAMA" = mlx ]; then
+    NERD_SAMPLING=${NERD_SAMPLING:-temperature=0.7,top_p=0.8,top_k=20,presence_penalty=1.5}
   fi
   NERD_IMAGE=${NERD_IMAGE:-nerd:agent}
   NERD_SERVER_IMAGE=${NERD_SERVER_IMAGE:-nerd:server-sm${NERD_CUDA_ARCH//;/-}}
@@ -105,10 +113,17 @@ nerd_settings() {
   # gateway), the server container by name on <name>-net, or loopback when
   # both share NERD_NETWORK's network namespace.
   if [ -z "${NERD_LLAMA_URL:-}" ]; then
-    if [ "$NERD_LLAMA" = host ]; then NERD_LLAMA_URL=http://host.docker.internal:$NERD_LLAMA_PORT/v1
+    if nerd_on_host; then NERD_LLAMA_URL=http://host.docker.internal:$NERD_LLAMA_PORT/v1
     elif [ -n "${NERD_NETWORK:-}" ]; then NERD_LLAMA_URL=http://127.0.0.1:$NERD_LLAMA_PORT/v1
     else NERD_LLAMA_URL=http://$NERD_LLM_NAME:$NERD_LLAMA_PORT/v1; fi
   fi
+}
+
+# The model server runs on this machine, not in a container (NERD_LLAMA=host
+# or mlx); ./UP starts it with nerd_host_tool and ./DOWN stops it.
+nerd_on_host() { [ "$NERD_LLAMA" = host ] || [ "$NERD_LLAMA" = mlx ]; }
+nerd_host_tool() {
+  if [ "$NERD_LLAMA" = mlx ]; then echo "$NERD_ROOT/tools/mlx-host.sh"; else echo "$NERD_ROOT/tools/llama-host.sh"; fi
 }
 
 # The docker daemon resolves CDI devices (docker info lists spec directories:
@@ -119,7 +134,7 @@ nerd_docker_cdi() {
 
 # docker run arguments that pass the GPU (none when llama-server is on the host).
 nerd_gpu_args() {
-  [ "$NERD_LLAMA" = host ] && return 0
+  nerd_on_host && return 0
   case "$NERD_GPU" in
     cdi) echo "--device nvidia.com/gpu=all" ;;
     gpus) echo "--gpus all" ;;
@@ -145,7 +160,8 @@ nerd_log() {
 }
 nerd_log_path() { [ -n "${NERD_LOG:-}" ] && echo "[log] $NERD_LOG — send this file if something went wrong"; return 0; }
 
-# The host's llama-server answers /health (NERD_LLAMA=host).
+# The server on this machine answers /health (NERD_LLAMA=host: llama-server;
+# mlx: mlx-vlm's server has one too).
 nerd_host_llama_up() {
   curl -sf -m 3 "http://127.0.0.1:$NERD_LLAMA_PORT/health" >/dev/null 2>&1
 }
@@ -157,4 +173,75 @@ nerd_port_busy() {
   else
     (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null
   fi
+}
+
+# --- docker compose (decision 0012) --------------------------------------------------
+
+# How the server gets the GPU: cdi, gpus, or none (llama-server on the host).
+nerd_gpu_mode() {
+  nerd_on_host && { echo none; return 0; }
+  case "$NERD_GPU" in
+    cdi|gpus) echo "$NERD_GPU" ;;
+    *) if nerd_have_cdi && nerd_docker_cdi; then echo cdi; else echo gpus; fi ;;
+  esac
+}
+
+# Everything compose.yaml reads, exported. Call after nerd_settings. The
+# public key is read here: compose passes it to the agent as NERD_AUTHORIZED_KEYS.
+nerd_compose_env() {
+  local keys
+  NERD_TMP_SIZE=${NERD_TMP_SIZE:-2g}
+  NERD_SHM_SIZE=${NERD_SHM_SIZE:-1g}
+  # Loopback in a shared namespace (NERD_NETWORK may be a VPN sidecar: the
+  # server must not answer there), all addresses of its own network otherwise.
+  if [ -n "${NERD_NETWORK:-}" ]; then NERD_SERVER_HOST=127.0.0.1; else NERD_SERVER_HOST=0.0.0.0; fi
+  if [ -n "${NERD_WORKSPACE:-}" ]; then NERD_WORKSPACE_DIR=${NERD_WORKSPACE/#\~/$HOME}; fi
+  if [ -z "${NERD_AUTHORIZED_KEYS:-}" ] && keys=$(nerd_keys_file) && [ -s "$keys" ]; then
+    NERD_AUTHORIZED_KEYS=$(cat "$keys")
+  fi
+  export NERD_NAME NERD_IMAGE NERD_SERVER_IMAGE NERD_CUDA_ARCH NERD_CUDA_VERSION \
+    NERD_MODEL_VARIANT NERD_CTX NERD_LLAMA_PORT NERD_SERVER_HOST NERD_LLAMA_URL \
+    NERD_SSH_PORT NERD_APP_PORT NERD_BIND NERD_TMP_SIZE NERD_SHM_SIZE \
+    NERD_MODELS_VOLUME NERD_AUTHORIZED_KEYS
+  export NERD_OPERATOR_URL=${NERD_OPERATOR_URL:-} NERD_NETWORK=${NERD_NETWORK:-} \
+    NERD_WORKSPACE_DIR=${NERD_WORKSPACE_DIR:-} HF_TOKEN=${HF_TOKEN:-} \
+    NERD_MODEL_GGUF=${NERD_MODEL_GGUF:-${NERD_MODEL_FILE:-}} NERD_MODEL_SHA256=${NERD_MODEL_SHA256:-} \
+    NERD_MODEL_ALIAS=${NERD_MODEL_ALIAS:-} NERD_SAMPLING=${NERD_SAMPLING:-}
+  # llama-server tells the agent its context (/props); mlx-vlm's server has
+  # none of its own, so the agent is told NERD_CTX.
+  if [ "$NERD_LLAMA" = mlx ]; then export NERD_AGENT_CTX=$NERD_CTX; else export NERD_AGENT_CTX=; fi
+  # The server's service is in a profile, so it is left out where llama-server
+  # runs on the host.
+  if [ "$NERD_LLAMA" = container ]; then export COMPOSE_PROFILES=llm; else export COMPOSE_PROFILES=; fi
+}
+
+# The volumes compose.yaml declares external (the model's is NERD_MODELS_VOLUME).
+nerd_volumes() {
+  echo "$NERD_NAME-ws $NERD_NAME-logs $NERD_NAME-ssh $NERD_NAME-home $NERD_NAME-cache"
+}
+
+# The compose files for this machine, as -f arguments, one per line.
+nerd_compose_files() {
+  local f
+  echo -f; echo "$NERD_ROOT/compose.yaml"
+  case "$(nerd_gpu_mode)" in
+    cdi) echo -f; echo "$NERD_ROOT/compose.cdi.yaml" ;;
+    gpus) echo -f; echo "$NERD_ROOT/compose.gpus.yaml" ;;
+  esac
+  [ -n "${NERD_NETWORK:-}" ] && { echo -f; echo "$NERD_ROOT/compose.netns.yaml"; }
+  [ -n "${NERD_WORKSPACE:-}" ] && { echo -f; echo "$NERD_ROOT/compose.workspace-dir.yaml"; }
+  nerd_on_host && { echo -f; echo "$NERD_ROOT/compose.host-llama.yaml"; }
+  # The operator's own additions (what NERD_DOCKER_ARGS was before compose).
+  f=$NERD_ROOT/compose.override.yaml
+  [ -f "$f" ] && { echo -f; echo "$f"; }
+  return 0
+}
+
+# docker compose for this instance. .env is ours, not compose's: compose
+# would read it with its own rules, so it gets an empty env file and the
+# variables nerd_compose_env exported.
+nerd_compose() {
+  local files=()
+  while IFS= read -r a; do files+=("$a"); done < <(nerd_compose_files)
+  docker compose --project-directory "$NERD_ROOT" --env-file /dev/null -p "$NERD_NAME" "${files[@]}" "$@"
 }

@@ -43,7 +43,7 @@ pretty=$( (. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-}") )
 if [ "$os" = Darwin ]; then
   if [ "$arch" = arm64 ]; then row OK os "macOS $(sw_vers -productVersion 2>/dev/null) $arch (llama-server on the host with Metal, docs/MACOS.md)"
   else row MISSING os "macOS $arch" "only Apple silicon Macs: an Intel Mac has no Metal GPU fast enough for the model"; fi
-  [ "$NERD_LLAMA" = host ] || row MISSING llama-mode "NERD_LLAMA=$NERD_LLAMA" "on macOS the server must run on the host: NERD_LLAMA=host (or leave it unset)"
+  nerd_on_host || row MISSING llama-mode "NERD_LLAMA=$NERD_LLAMA" "on macOS the server must run on the host: NERD_LLAMA=host (or unset), or mlx"
   bv=${BASH_VERSINFO[0]}
   [ "$bv" -ge 4 ] || row MISSING bash "bash $BASH_VERSION (macOS ships 3.2)" "brew install bash (./UP and ./STATUS need bash 4+, first in PATH)"
 elif [ "$os" != Linux ]; then
@@ -82,11 +82,36 @@ else
   else
     row MISSING buildx "docker buildx plugin not found (BuildKit is needed to build)" "sudo apt-get install docker-buildx-plugin (Docker's repo) or tools/install-prerequisites.sh"
   fi
+  # ./UP runs docker compose (decision 0012); compose.netns.yaml uses !reset (2.24).
+  cv=$(docker compose version --short 2>/dev/null || true)
+  if [ -z "$cv" ]; then
+    row MISSING compose "docker compose (v2) not found" "sudo apt-get install docker-compose-plugin (Docker's repo) or tools/install-prerequisites.sh"
+  elif nerd_ver_ge "${cv#v}" 2.24; then
+    row OK compose "$cv"
+  else
+    row MISSING compose "docker compose $cv, 2.24 or newer needed" "sudo apt-get install --only-upgrade docker-compose-plugin"
+  fi
 fi
 
-# --- llama-server on the host (NERD_LLAMA=host) ------------------------------------
+# --- the server on the host (NERD_LLAMA=host or mlx) -------------------------------
 gpu_ok=0 vram_mib="" cc=""
-if [ "$NERD_LLAMA" = host ]; then
+if [ "$NERD_LLAMA" = mlx ]; then
+  # mlx-vlm's server in a venv (tools/mlx-host.sh): Python 3.12 or 3.13.
+  if py=$("$NERD_ROOT/tools/mlx-host.sh" python 2>/dev/null); then row OK python "$py (for tools/mlx-host.sh)"
+  else row MISSING python "no Python 3.12 or 3.13" "brew install python@3.13 (or set NERD_MLX_PYTHON in .env)"; fi
+  if nerd_host_llama_up; then row OK mlx-host "a server answers on 127.0.0.1:$NERD_LLAMA_PORT"
+  else row WARN mlx-host "not running" "./UP installs mlx-vlm, downloads the model and starts it"; fi
+  # Unified memory: Bonsai 2 in MLX is 8.6 GB on disk (the vision tower is
+  # loaded too), plus its cache, which grows with the conversation.
+  need_mib=$(( 9500 + NERD_CTX * 23 / 1024 ))
+  mem=$(sysctl -n hw.memsize 2>/dev/null || echo 0)
+  gpu_mib=$(( mem / 1024 / 1024 * 2 / 3 ))
+  if [ "$gpu_mib" -gt 0 ] && [ "$need_mib" -gt "$gpu_mib" ]; then
+    row MISSING memory "MLX Bonsai 2 at context $NERD_CTX needs about $need_mib MiB; the GPU may use about $gpu_mib" "a Mac with more memory, or NERD_CTX=32768 in .env"
+  elif [ "$gpu_mib" -gt 0 ]; then
+    row OK memory "MLX Bonsai 2 at context $NERD_CTX needs about $need_mib MiB of about $gpu_mib the GPU may use"
+  fi
+elif [ "$NERD_LLAMA" = host ]; then
   for t in cmake c++; do
     if command -v "$t" >/dev/null 2>&1; then row OK "$t" "$(command -v "$t") (to build llama-server)"
     else row MISSING "$t" "not found (tools/llama-host.sh build needs it)" "macOS: xcode-select --install; brew install cmake"; fi
@@ -118,7 +143,7 @@ else
   gname=${gname# } gdrv=${gdrv# } gmem=${gmem# } cc=${cc# }
   dcuda=$(nerd_driver_cuda)
   row OK nvidia-driver "$gdrv (CUDA up to ${dcuda:-?}), $gname, compute capability $cc"
-  [ "$(grep -c . <<< "$q")" -gt 1 ] && row WARN gpus "$(grep -c . <<< "$q") GPUs; the container gets all, llama-server uses them together" "add NERD_DOCKER_ARGS=\"-e CUDA_VISIBLE_DEVICES=0\" to pin one"
+  [ "$(grep -c . <<< "$q")" -gt 1 ] && row WARN gpus "$(grep -c . <<< "$q") GPUs; the container gets all, llama-server uses them together" "CUDA_VISIBLE_DEVICES: \"0\" for the llm service in compose.override.yaml pins one (docs/OPERATE.md)"
   [[ "$gmem" =~ ^[0-9]+$ ]] && vram_mib=$gmem
   # The image's CUDA must not be newer than the driver supports.
   need=${NERD_CUDA_VERSION%.*}
@@ -136,7 +161,7 @@ else
 fi
 
 # --- container toolkit / CDI --------------------------------------------------------
-if [ "$NERD_LLAMA" = host ]; then
+if nerd_on_host; then
   :   # no GPU in the container
 elif [ $docker_ok = 1 ]; then
   cdi=0 rt=0

@@ -21,6 +21,7 @@ export function stayOffline() {
 // replace the two lines on small steps and trusting output.
 export const SYSTEM_PROMPT = `You are a software engineer working alone in a Linux container.
 Tools: read, bash, edit, write. The working directory is the project.
+A language the image lacks: \`nerd-get go|rust|uv\` installs it in your home, which survives restarts (npm -g and uv tools go there too).
 Method:
 - Small steps: change one thing (edit a working file, do not rewrite it), run it, read the output.
 - Keep each check as a script or test in the project and rerun all of them after later changes.
@@ -49,18 +50,41 @@ export const TOOLS = ["read", "bash", "edit", "write"];
 
 export type Thinking = "off" | "low" | "medium" | "high";
 
+/**
+ * What serves the model: llama-server (in its container, or on the host), or
+ * mlx-vlm's server (NERD_LLAMA=mlx on macOS, tools/mlx-host.sh).
+ */
+export type Server = "llama" | "mlx";
+
 export interface LocalModel {
 	baseUrl: string;
 	id: string;
 	ctx: number;
 	thinking: Thinking;
 	verifyN: number;
+	server?: Server;
 }
 
 async function servedModelId(baseUrl: string): Promise<string> {
 	const r = await fetch(`${baseUrl}/models`);
 	const body = (await r.json()) as { data: { id: string }[] };
 	return body.data[0].id;
+}
+
+/**
+ * The model mlx-vlm's server has loaded, from its /health (llama-server's
+ * /health has no such field). Its /v1/models also lists every model in the
+ * Hugging Face cache, sorted by name, so the first entry need not be the one
+ * it serves, and a request naming another model makes it load that one.
+ */
+export async function mlxLoadedModel(baseUrl: string): Promise<string | undefined> {
+	try {
+		const r = await fetch(`${baseUrl.replace(/\/v1\/?$/, "")}/health`);
+		const body = (await r.json()) as { loaded_model?: unknown };
+		return typeof body.loaded_model === "string" && body.loaded_model ? body.loaded_model : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 /** The context size the server actually runs with (llama-server /props), so Pi's budget cannot drift from it. */
@@ -77,12 +101,15 @@ async function servedContext(baseUrl: string): Promise<number | undefined> {
 /** The model as the environment and the running server describe it (NERD_* variables, see run.ts). */
 export async function localModel(): Promise<LocalModel> {
 	const baseUrl = process.env.NERD_BASE_URL ?? "http://127.0.0.1:18091/v1";
+	const mlx = await mlxLoadedModel(baseUrl);
 	return {
 		baseUrl,
-		ctx: Number(process.env.NERD_CTX ?? (await servedContext(baseUrl)) ?? 16384),
+		// mlx-vlm has no fixed context (its cache grows): ./UP passes NERD_CTX.
+		ctx: Number(process.env.NERD_CTX || (mlx ? undefined : await servedContext(baseUrl)) || 16384),
 		thinking: (process.env.NERD_THINKING ?? "off") as Thinking,
-		id: process.env.NERD_MODEL ?? (await servedModelId(baseUrl)),
+		id: process.env.NERD_MODEL || mlx || (await servedModelId(baseUrl)),
 		verifyN: Number(process.env.NERD_VERIFY_N ?? 1),
+		server: mlx ? "mlx" : "llama",
 	};
 }
 
@@ -110,7 +137,9 @@ export function modelDefinition(m: LocalModel) {
 			supportsUsageInStreaming: true,
 			supportsStrictMode: false,
 			maxTokensField: "max_tokens" as const,
-			thinkingFormat: "qwen-chat-template" as const,
+			// mlx-vlm's server ignores chat_template_kwargs and reads a top-level
+			// enable_thinking, which is what Pi sends for "qwen".
+			thinkingFormat: m.server === "mlx" ? ("qwen" as const) : ("qwen-chat-template" as const),
 		},
 	};
 }

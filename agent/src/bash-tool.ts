@@ -33,9 +33,37 @@ export function timeoutMessage(secs: number): string {
 	);
 }
 
+/**
+ * Quiet defaults for the model's commands (ticket 057 of the process): no
+ * colour codes, no progress bars, no npm fund/audit/update notices, no pager.
+ * Every line of that is context the model pays for and learns nothing from. Only
+ * the commands of the bash tool get them, not Pi's own screen; a variable the
+ * environment already sets wins. NERD_QUIET=0 turns them off.
+ */
+export const QUIET_ENV: Record<string, string> = {
+	NO_COLOR: "1",
+	FORCE_COLOR: "0",
+	NPM_CONFIG_FUND: "false",
+	NPM_CONFIG_AUDIT: "false",
+	NPM_CONFIG_UPDATE_NOTIFIER: "false",
+	NPM_CONFIG_PROGRESS: "false",
+	NPM_CONFIG_LOGLEVEL: "error",
+	PIP_DISABLE_PIP_VERSION_CHECK: "1",
+	PIP_PROGRESS_BAR: "off",
+	UV_NO_PROGRESS: "1",
+	CARGO_TERM_PROGRESS_WHEN: "never",
+	CARGO_TERM_COLOR: "never",
+	GIT_PAGER: "cat",
+	PAGER: "cat",
+};
+
+export function quietEnv(base: NodeJS.ProcessEnv, env = process.env): NodeJS.ProcessEnv {
+	return env.NERD_QUIET === "0" ? base : { ...QUIET_ENV, ...base };
+}
+
 /** The built-in bash tool for `cwd` with a default timeout of `defaultSecs`. */
 export function nerdBashTool(cwd: string, defaultSecs = bashTimeout()) {
-	const base = createBashToolDefinition(cwd);
+	const base = createBashToolDefinition(cwd, { spawnHook: (c) => ({ ...c, env: quietEnv(c.env) }) });
 	// Pi's schema says "no default timeout"; the same schema with our default
 	// in the description (spread keeps TypeBox's symbol keys).
 	const p = base.parameters;

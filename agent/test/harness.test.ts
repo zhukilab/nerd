@@ -5,10 +5,9 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
@@ -17,6 +16,7 @@ import { headlessSession } from "../src/headless.ts";
 import { modelDefinition, settingsFor } from "../src/local.ts";
 import { LoopGuard, loopGuardN } from "../src/loop-guard.ts";
 import { DEFAULT_PLAN_MAX_CALLS, parsePlanReply, planFileText, planMaxCalls } from "../src/plan-step.ts";
+import { tempDir } from "./tmp.ts";
 
 for (const [k, v] of Object.entries({
 	GIT_AUTHOR_NAME: "t",
@@ -173,9 +173,11 @@ async function runHeadless(
 	operator = false,
 	later: string[] = [],
 	inspect?: (session: Awaited<ReturnType<typeof headlessSession>>) => Promise<void>,
+	setup?: (cwd: string) => void,
 ) {
-	const cwd = mkdtempSync(join(tmpdir(), "nerd-harness-ws-"));
-	const agentDir = mkdtempSync(join(tmpdir(), "nerd-harness-agent-"));
+	const cwd = tempDir("nerd-harness-ws-");
+	setup?.(cwd);
+	const agentDir = tempDir("nerd-harness-agent-");
 	const local = { baseUrl, id: "fake", ctx: 32768, thinking: "off" as const, verifyN: 1 };
 	writeFileSync(
 		join(agentDir, "models.json"),
@@ -219,7 +221,7 @@ test("headless: questions get NERD_PLAN_ANSWER, the final plan is committed, the
 		][n - 1] ?? { text: "extra" },
 	);
 	try {
-		const cwd = await runHeadless(srv.url, "Make hello.txt", { NERD_PLAN_ANSWER: "euros" });
+		const cwd = await runHeadless(srv.url, "Make hello.txt", { NERD_PLAN_ANSWER: "euros", NERD_DONE_GATE: "0" });
 		assert.equal(srv.seen.length, 4);
 		assert.deepEqual(srv.seen[0].tools, READ_ONLY, "plan turn: reading only");
 		assert.match(srv.seen[0].lastUser, /\[harness\] A new task/);
@@ -395,3 +397,24 @@ test("pi-vcc (default): loaded from node_modules, vcc_recall searches the sessio
 	}
 });
 
+
+test("headless: the done gate sends uncommitted work back once, and is silent when it is committed", async () => {
+	const srv = await scriptedServer((n) =>
+		[
+			{ call: { name: "write", args: { path: "hello.txt", content: "hi\n" } } },
+			{ text: "Done: hello.txt written." },
+			{ call: { name: "bash", args: { command: "git add -A && git commit -qm hello" } } },
+			{ text: "Done, committed." },
+		][n - 1] ?? { text: "extra" },
+	);
+	try {
+		const cwd = await runHeadless(srv.url, "Make hello.txt", { NERD_PLAN_STEP: "0" }, false, [], undefined, (d) =>
+			execFileSync("git", ["init", "-q"], { cwd: d }),
+		);
+		assert.equal(srv.seen.length, 4);
+		assert.match(srv.seen[2].lastUser, /^\[done gate 1\/2\][\s\S]*Nothing is committed yet/);
+		assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd }).toString(), "");
+	} finally {
+		srv.close();
+	}
+});

@@ -66,19 +66,21 @@ else repo=debian codename=${VERSION_CODENAME:-}; fi
 wsl=0; grep -qi microsoft /proc/version 2>/dev/null && wsl=1
 changed_docker=0
 
-# 1. Docker Engine with buildx.
+# 1. Docker Engine with buildx and compose (./UP runs docker compose, decision 0012).
 say "1. Docker Engine ($repo $codename)"
-if command -v docker >/dev/null 2>&1 && docker buildx version >/dev/null 2>&1; then
-  echo "   already installed: $(docker --version)"
-elif command -v docker >/dev/null 2>&1 && ! dpkg -s docker-ce >/dev/null 2>&1; then
+if command -v docker >/dev/null 2>&1 && docker buildx version >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+  echo "   already installed: $(docker --version), $(docker compose version --short 2>/dev/null)"
+elif command -v docker >/dev/null 2>&1 && dpkg -s docker-ce >/dev/null 2>&1; then
+  root "apt-get update && apt-get install -y docker-buildx-plugin docker-compose-plugin"
+elif command -v docker >/dev/null 2>&1; then
   echo "   docker is installed but not from Docker's repository (docker.io, snap or Docker Desktop)."
-  echo "   It needs the buildx plugin: sudo apt-get install docker-buildx (Ubuntu's) or switch to docker-ce:"
+  echo "   It needs the buildx and compose plugins: sudo apt-get install docker-buildx docker-compose-v2 (Ubuntu's) or switch to docker-ce:"
   echo "   https://docs.docker.com/engine/install/$repo/ (remove the other packages first). Not changed by this script."
 else
   root "apt-get update && apt-get install -y ca-certificates curl gnupg"
   root "install -m 0755 -d /etc/apt/keyrings && curl -fsSL https://download.docker.com/linux/$repo/gpg -o /etc/apt/keyrings/docker.asc && chmod a+r /etc/apt/keyrings/docker.asc"
   root "echo \"deb [arch=\$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/$repo $codename stable\" > /etc/apt/sources.list.d/docker.list"
-  root "apt-get update && apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin"
+  root "apt-get update && apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin"
   changed_docker=1
 fi
 if [ -d /run/systemd/system ]; then

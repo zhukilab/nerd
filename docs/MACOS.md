@@ -56,7 +56,6 @@ brew install bash cmake
 # Docker Desktop: install, start it, Settings → Resources → Memory 4–6 GB
 
 git clone https://github.com/zhukilab/nerd && cd nerd
-git checkout m1                         # until the macOS support is merged into main
 
 tools/check-prerequisites.sh            # OK / WARN / MISSING per line, with a hint
 cp env.example .env                     # optional; NERD_CTX=32768 here if memory is tight
@@ -133,3 +132,56 @@ RAM; macOS version; whether `./UP` built and started llama-server; from
 `~/.nerd/llama-server.log` a few `prompt eval time` / `eval time` lines during a
 task; memory pressure in Activity Monitor while the agent works; whether the
 agent finished a small task (a web page it serves on port 8000, say).
+
+## MLX instead of llama-server (`NERD_LLAMA=mlx`)
+
+**Status: new, never run on a Mac.** Apple's own format and framework, MLX, in
+place of the llama.cpp build: nothing to compile, and PrismML's figures for
+Bonsai 2 in MLX are about 47 tokens/s on an M5 Max. The same model in a
+different packing ([prism-ml/Ternary-Bonsai-2-27B-mlx-2bit](https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-mlx-2bit),
+8.6 GB, the 2-bit MLX form of the same ternary weights) served by mlx-vlm's
+OpenAI-compatible server; the agent and its container stay as they are.
+
+What it does: `tools/mlx-host.sh` makes a Python venv in `~/.nerd/mlx-venv`
+with mlx 0.32.2, mlx-vlm 0.7.2 and transformers 5.14.1 (the set PrismML tests
+this model with; every package pinned by sha256, wheels only:
+`tools/mlx-requirements.txt`), downloads the model at a pinned revision into
+`~/.nerd/mlx-models/` and checks every file against the pack's `files.json`,
+then runs `python -m mlx_vlm.server` on `127.0.0.1:8080`. Bonsai 2's pack
+needs mlx-vlm's own loader for it; the script checks that it is there.
+
+Needs, besides the list above: **Python 3.12 or 3.13** (`brew install
+python@3.13`), **about 12 GB of disk** for the model and the venv, **24 GB of
+RAM or more** recommended (the model is 8.6 GB, its vision part included, and
+Docker's VM comes on top; 16 GB may work with `NERD_CTX=32768`).
+
+```sh
+echo NERD_LLAMA=mlx >> .env
+tools/check-prerequisites.sh            # python, memory: OK / MISSING
+./UP                                    # first time: the venv (~120 MB), the model (8.6 GB),
+                                        # loading it (a minute or two); then the agent as above
+tools/mlx-host.sh status                # the model it serves
+ssh -p 2222 nerd@localhost
+```
+
+To try the whole path quickly with a small model first (it is too weak for real
+work): `NERD_MLX_MODEL=mlx-community/Qwen3.5-2B-4bit` in `.env`, `./UP`; back to
+Bonsai 2: remove the line, `./UP` (the server restarts with the other model).
+
+| | |
+|---|---|
+| the server's log | `tools/mlx-host.sh logs`; the venv's install log `~/.nerd/mlx-install.log` |
+| another model | `NERD_MLX_MODEL=<owner>/<repo>[@<revision>]` (Hugging Face) or a directory |
+| sampling | `NERD_SAMPLING` in `.env` (default for mlx: the model card's non-thinking values, `temperature=0.7,top_p=0.8,top_k=20,presence_penalty=1.5`) |
+| back to llama-server | `NERD_LLAMA=host` (or remove the line), `./UP` |
+
+**What to send back** — this is the first run anywhere, so all of it helps:
+
+1. `var/log/mlx-host-*.log` and `var/log/up-*.log`, or whatever failed and its last lines;
+2. Mac model, chip, RAM, macOS version, `python3 --version`;
+3. `tools/mlx-host.sh status`, and `./STATUS`;
+4. speed: from `~/.nerd/mlx-server.log` the lines about a request while the agent
+   works (prompt tokens, generation speed), and memory pressure in Activity Monitor;
+5. whether the agent's first answer is sensible text with its questions and a plan
+   (garbage there means the model loaded without its own loader — send the log);
+6. whether it finishes a small task, e.g. "a web page with a counter, served on port 8000".

@@ -1,0 +1,6 @@
+# The GPU as a CDI device (docker run --device nvidia.com/gpu=all): a CDI
+# spec exists and the docker daemon resolves it (NERD_GPU=cdi, or auto).
+services:
+  llm:
+    devices:
+      - nvidia.com/gpu=all

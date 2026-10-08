@@ -115,6 +115,31 @@ RUN set -eu; \
     /opt/searxng/venv/bin/pip install -q --no-cache-dir -U pip; \
     /opt/searxng/venv/bin/pip install -q --no-cache-dir -r requirements.txt
 
+# Linters the harness runs after every edit (process ticket 051): single
+# binaries from their releases, pinned, each checked against its sha256.
+FROM ubuntu:${UBUNTU_VERSION} AS linters
+ARG TARGETARCH
+ARG RUFF_VERSION=0.16.10
+ARG RUFF_SHA_amd64=9567ff1201e2fb3da31ff04c35587d768c66d6cb42dfa84de474e2bfe360b608
+ARG RUFF_SHA_arm64=dc0d74de837ef0a7bcc62ce98c48a622b075d057161f13b958be2934becd55a6
+ARG BIOME_VERSION=2.5.15
+ARG BIOME_SHA_amd64=5d867a0b2ccea1755b7e508b01d836a8c64e31a1e4d11ec24b43b6b4eec8b3b6
+ARG BIOME_SHA_arm64=a56bcd73ddbfdb0f57a82bb67b7ea698eed4027aff602b95aa18fafe919d59e0
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+RUN set -eu; mkdir -p /out; cd /tmp; \
+    case "${TARGETARCH}" in \
+      amd64) t=x86_64-unknown-linux-gnu b=x64 rs=${RUFF_SHA_amd64} bs=${BIOME_SHA_amd64} ;; \
+      arm64) t=aarch64-unknown-linux-gnu b=arm64 rs=${RUFF_SHA_arm64} bs=${BIOME_SHA_arm64} ;; \
+      *) echo "unsupported TARGETARCH ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL -o ruff.tgz "https://github.com/astral-sh/ruff/releases/download/${RUFF_VERSION}/ruff-$t.tar.gz"; \
+    echo "$rs  ruff.tgz" | sha256sum -c -; \
+    tar -xzf ruff.tgz; install -m 755 "ruff-$t/ruff" /out/ruff; \
+    curl -fsSL -o biome "https://github.com/biomejs/biome/releases/download/%40biomejs/biome%40${BIOME_VERSION}/biome-linux-$b"; \
+    echo "$bs  biome" | sha256sum -c -; \
+    install -m 755 biome /out/biome
+
 FROM node AS agent-build
 ENV PATH=/opt/node/bin:$PATH
 WORKDIR /opt/nerd/agent
@@ -131,6 +156,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         tini curl ca-certificates git python3 procps less xz-utils \
         openssh-server tmux ncurses-term ripgrep fd-find \
         iproute2 tcpdump netcat-openbsd socat \
+        sqlite3 jq unzip zip file build-essential python3-venv python3-pip rsync dnsutils shellcheck \
  && rm -rf /var/lib/apt/lists/* \
  && rm -f /etc/ssh/ssh_host_* \
  && ln -s /usr/bin/fdfind /usr/local/bin/fd
@@ -138,7 +164,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # PAM and sets the same in its own config, but a stock login gets it too.
 # Without a UTF-8 LANG tmux draws borders as "qqqq" in PuTTY.
 RUN printf '%s\n' 'LANG=C.UTF-8' 'LC_ALL=C.UTF-8' \
-        'PATH="/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' \
+        'PATH="/home/nerd/.local/bin:/home/nerd/.cargo/bin:/home/nerd/go/bin:/home/nerd/.local/go/bin:/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"' \
         > /etc/environment \
  && mkdir -p /run/sshd
 ENV LANG=C.UTF-8
@@ -155,6 +181,9 @@ RUN --mount=type=bind,from=agent-build,source=/opt/nerd/agent/node_modules/playw
     PLAYWRIGHT_BROWSERS_PATH=/opt/nerd/browsers /opt/node/bin/node /tmp/pw/cli.js install --with-deps --only-shell chromium \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=agent-build /opt/nerd/agent /opt/nerd/agent
+# The done gate (agent/src/done-gate.ts) finds the start command by the
+# acceptance checker's own rule: one source, ../../acceptance from src/.
+COPY acceptance/lib/parse.mjs acceptance/lib/parse.d.mts /opt/nerd/acceptance/lib/
 COPY --from=searxng /opt/searxng /opt/searxng
 COPY container/searxng.yml /opt/searxng/settings.yml
 COPY container/entrypoint.sh container/model.sh container/ssh-login.sh container/sshd_config /opt/nerd/
@@ -167,6 +196,10 @@ COPY --chmod=755 container/pkill-guard.sh /usr/local/bin/pgrep
 COPY --chmod=755 container/test-pkill-guard.sh /opt/nerd/
 COPY --chmod=755 container/browse.sh /usr/local/bin/browse
 COPY --chmod=755 container/test-browse.sh /opt/nerd/
+COPY --from=linters /out/ruff /out/biome /usr/local/bin/
+# Languages and their packages live in the agent's home, a volume (decision
+# 0012): nerd-get installs go, rust, uv there, pinned and checked.
+COPY --chmod=755 container/nerd-get.sh /usr/local/bin/nerd-get
 # The agent runs whatever the model asks for, so not as root. The mount points
 # exist in the image, owned by nerd, so fresh named volumes inherit that owner.
 # Password "*" instead of useradd's "!": no password can match, but the
@@ -179,8 +212,8 @@ RUN if id -u ubuntu >/dev/null 2>&1; then \
  && usermod -G '' nerd \
  && [ "$(id -u nerd)" = 1000 ] && [ "$(id -G nerd)" = 1000 ] \
  && usermod -p '*' nerd \
- && mkdir -p /workspace /logs /ssh \
- && chown nerd:nerd /workspace /logs /ssh \
+ && mkdir -p /workspace /logs /ssh /home/nerd/.cache \
+ && chown nerd:nerd /workspace /logs /ssh /home/nerd/.cache \
  && chmod 700 /ssh \
  && git config --system user.name "nerd agent" \
  && git config --system user.email nerd@localhost \
@@ -192,7 +225,15 @@ RUN if id -u ubuntu >/dev/null 2>&1; then \
 # bind-mounted from the host belongs to another uid there, and git refused it
 # ("detected dubious ownership"), so the plan step could not commit PLAN.md
 # (A/B of ticket 048, ticket 054).
-ENV PATH=/opt/node/bin:$PATH
+# /home/nerd is a volume and /home/nerd/.cache another (compose.yaml): Docker
+# fills a new volume from the image once, so nothing the image needs later is
+# put in the home; tools are pointed at it here. Caches go to ~/.cache, which
+# can be thrown away without losing what was installed.
+ENV CARGO_HOME=/home/nerd/.cargo RUSTUP_HOME=/home/nerd/.rustup \
+    GOPATH=/home/nerd/go GOMODCACHE=/home/nerd/.cache/go-mod GOCACHE=/home/nerd/.cache/go-build \
+    UV_CACHE_DIR=/home/nerd/.cache/uv PIP_CACHE_DIR=/home/nerd/.cache/pip \
+    npm_config_cache=/home/nerd/.cache/npm NPM_CONFIG_PREFIX=/home/nerd/.local
+ENV PATH=/home/nerd/.local/bin:/home/nerd/.cargo/bin:/home/nerd/go/bin:/home/nerd/.local/go/bin:/opt/node/bin:$PATH
 USER nerd
 WORKDIR /workspace
 # tui mode: 2222 ssh, 8000 the app the agent builds (defaults of NERD_SSH_PORT

@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
 # Stop everything nerd runs: the agent <name>, the server <name>-llm (or,
-# with NERD_LLAMA=host, the llama-server on this machine: tools/llama-host.sh
-# stop), and their network <name>-net. The GPU and memory are free after it.
+# with NERD_LLAMA=host or mlx, the server on this machine: tools/llama-host.sh
+# stop or tools/mlx-host.sh stop), and their network <name>-net. The GPU and
+# memory are free after it.
 # Volumes are kept, so ./UP continues with the same workspace, conversation,
-# ssh host key and model.
+# ssh host key, home (installed languages, memory), caches and model.
 #
 #   ./DOWN                  stop and remove the containers, stop the server
 #   ./DOWN --agent          only the agent (the model stays loaded; ./UP brings it back)
 #   ./DOWN --purge          also delete the volumes: workspace, logs and
-#                           conversations, ssh host keys (NOT the model)
+#                           conversations, ssh host keys, home, caches (NOT the model)
 #   ./DOWN --purge-models   --purge, and the model volume too (6-7 GB to download again)
 set -euo pipefail
 # shellcheck source=tools/lib.sh
@@ -28,31 +29,38 @@ done
 
 nerd_load_env
 nerd_settings
+nerd_compose_env
+# compose.yaml needs a key to resolve; stopping does not.
+export NERD_AUTHORIZED_KEYS=${NERD_AUTHORIZED_KEYS:-none}
 
-down() {
+# A container compose did not start (./UP before decision 0012) is stopped
+# by name, as ./DOWN did then.
+down_plain() {
   if docker container inspect "$1" >/dev/null 2>&1; then
     docker stop -t 30 "$1" >/dev/null
     docker rm "$1" >/dev/null
     echo "[DOWN] container $1 stopped and removed"
-  else
-    echo "[DOWN] no container $1"
   fi
 }
-down "$NERD_NAME"
-[ "$agent_only" = 1 ] && exit 0
-if [ "$NERD_LLAMA" = container ]; then
-  down "$NERD_LLM_NAME"
-else
+ours() { [ "$(docker inspect -f '{{index .Config.Labels "com.docker.compose.project"}}' "$1" 2>/dev/null)" = "$NERD_NAME" ]; }
+
+if [ "$agent_only" = 1 ]; then
+  if ours "$NERD_NAME"; then nerd_compose rm -s -f agent; else down_plain "$NERD_NAME"; fi
+  exit 0
+fi
+for c in "$NERD_NAME" "$NERD_LLM_NAME"; do ours "$c" || down_plain "$c"; done
+nerd_compose down --timeout 30
+if nerd_on_host; then
   # ./UP started it, so ./DOWN stops it: whoever runs ./DOWN expects the GPU
-  # and memory back. Only the server llama-host.sh started (its pid file).
-  "$NERD_ROOT/tools/llama-host.sh" stop
+  # and memory back. Only the server the host script started (its pid file).
+  "$(nerd_host_tool)" stop
 fi
 if [ -z "${NERD_NETWORK:-}" ] && docker network inspect "$NERD_NAME-net" >/dev/null 2>&1; then
   docker network rm "$NERD_NAME-net" >/dev/null && echo "[DOWN] network $NERD_NAME-net removed"
 fi
 
 if [ "$purge" = 1 ]; then
-  vols=("$NERD_NAME-ws" "$NERD_NAME-ssh" "$NERD_NAME-logs")
+  read -r -a vols <<< "$(nerd_volumes)"
   [ "$models" = 1 ] && vols+=("$NERD_MODELS_VOLUME")
   for v in "${vols[@]}"; do
     if docker volume inspect "$v" >/dev/null 2>&1; then

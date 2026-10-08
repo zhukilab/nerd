@@ -1,0 +1,11 @@
+# NERD_NETWORK=container:<name>: both containers join that container's
+# network namespace (e.g. a VPN sidecar) instead of <name>-net; nothing is
+# published, the server listens on loopback only (NERD_SERVER_HOST).
+services:
+  llm:
+    network_mode: ${NERD_NETWORK:?}
+    networks: !reset []
+  agent:
+    network_mode: ${NERD_NETWORK:?}
+    networks: !reset []
+    ports: !reset []

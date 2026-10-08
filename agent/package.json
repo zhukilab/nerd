@@ -9,7 +9,7 @@
   },
   "scripts": {
     "run": "node src/run.ts",
-    "test": "node --test 'test/**/*.test.ts'",
+    "test": "NODE_COMPILE_CACHE=${XDG_CACHE_HOME:-$HOME/.cache}/nerd/node-compile-cache JITI_FS_CACHE=false node --test 'test/**/*.test.ts'",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

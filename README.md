@@ -57,7 +57,9 @@ containers by hand.
 
 ## Running the containers by hand
 
-`./UP` does this for you; this is what it does. Two images from one
+`./UP` does this for you, through docker compose (`compose.yaml`, with the
+volumes for the agent's home and caches and `/tmp` as a tmpfs; docs/OPERATE.md);
+by hand it comes down to the commands below. Two images from one
 Dockerfile: the server (built once per GPU architecture; `CUDA_ARCH` is the
 compute capability without the dot) and the agent (no CUDA, the same
 everywhere):
@@ -184,6 +186,37 @@ skips the step. The loop guard ([`agent/src/loop-guard.ts`](agent/src/loop-guard
 appends a note to a tool result when the same call with the same result has
 come `NERD_LOOP_GUARD_N` times (3; 0 = off) among the recent calls: the model is
 told it is repeating itself and must change approach. It does not stop the run.
+The fetch guard ([`agent/src/fetch-guard.ts`](agent/src/fetch-guard.ts)) does the
+same for `web_fetch`: a 404 for an address that no `web_search` result had (the
+model guessed it) gets a note to search instead of guessing again, and
+npmjs.com's 403 a pointer to the registry (`NERD_FETCH_GUARD=0` = off).
+After every successful `write` or `edit` the harness runs a linter on the file
+([`agent/src/lint-check.ts`](agent/src/lint-check.ts)): biome for JS/TS, JSON,
+CSS and a page's inline scripts, ruff for Python, shellcheck for shell. Only
+what the linter calls an error, never style: a script that does not parse, an
+undeclared name (a missing import). It is appended to the tool's result; a
+clean file adds nothing (`NERD_LINT=0` = off).
+When a turn of work ends, the harness checks the committed project the way
+the operator's checker will, in a clean clone of HEAD
+([`agent/src/done-gate.ts`](agent/src/done-gate.ts)): nothing left
+uncommitted; with a `package.json`, a real `test` script (not `npm init`'s
+placeholder) that passes, and a start command (`scripts.start`, or one
+node/npm command in a README "Run" section) that serves `/` on `$PORT`; no
+linter errors in the files changed. What fails goes back to the model as one
+message, at most twice per operator message (`NERD_DONE_GATE_ROUNDS`); a
+passing check adds nothing (`NERD_DONE_GATE=0` = off).
+A `bash` output longer than `NERD_BASH_MAX_CHARS` (8000 characters; 0 = off)
+reaches the model as its first and last lines, with the place of the whole
+output in between ([`agent/src/output-cap.ts`](agent/src/output-cap.ts)); runs
+of identical lines are collapsed first. Most of it is the tail, where a test
+runner's summary and a build's error end up; lines of the left-out middle that
+read like errors are shown with their line numbers. The model's commands run with
+quiet defaults: no colour, no progress bars, no npm fund/audit notices, no pager
+(`NERD_QUIET=0` = off). After each compaction of the conversation the harness
+hands the model its anchors in one message: the task in the operator's words,
+the latest remark, `PLAN.md`, the `notes/` index and the files changed since the
+task began, within `NERD_ANCHORS_MAX_CHARS` (4000)
+([`agent/src/anchors.ts`](agent/src/anchors.ts); `NERD_ANCHORS=0` = off).
 
 **`browse`: a page as the user sees it.** `curl` cannot tell a working page
 from one whose script dies on load or that is served as `text/plain`. The
@@ -228,16 +261,22 @@ docker run -d --name nerd-llm --network nerd-net --gpus all -e NERD_MODEL_VARIAN
 Both variants need the fork; stock llama.cpp rejects these quantizations or
 loads them and produces garbage.
 
+Another model: `NERD_MODEL_GGUF=hf:<owner>/<repo>/<file>.gguf` in `.env`
+(downloaded once, its sha256 checked against what Hugging Face publishes), or
+the name of a GGUF already in the models volume; the server calls it by the
+file's name (`NERD_MODEL_ALIAS`). On a Mac the same model also runs in Apple's
+MLX format: `NERD_LLAMA=mlx` ([docs/MACOS.md](docs/MACOS.md)).
+
 ### Settings
 
-Server defaults, each overridable with `-e` on the server's container (through
+Server defaults, each overridable in the server's environment (through
 `./UP`: `NERD_CTX`, `NERD_MODEL_VARIANT` in `.env`, the rest in
-`NERD_SERVER_DOCKER_ARGS`): context `NERD_CTX=65536`, KV cache
+`compose.override.yaml`, docs/OPERATE.md): context `NERD_CTX=65536`, KV cache
 `NERD_KV=q4_0`, `NERD_NGL=99` (all layers on the GPU), flash attention on,
 `NERD_SLOTS=1`, prompt cache off (`--cache-ram 0`: its KV snapshots overflow an
 8 GB card), extra flags in `NERD_LLAMA_ARGS`. The agent's own variables
 (`NERD_THINKING`, `NERD_VERIFY_N`, `NERD_SPEC_CHECK`, `NERD_BASH_TIMEOUT`,
-`NERD_PLAN_STEP`, `NERD_PLAN_ANSWER`, `NERD_LOOP_GUARD_N`, `NERD_PI_VCC`, `NERD_WEB`) are described in
+`NERD_PLAN_STEP`, `NERD_PLAN_ANSWER`, `NERD_LOOP_GUARD_N`, `NERD_FETCH_GUARD`, `NERD_LINT`, `NERD_DONE_GATE`, `NERD_BASH_MAX_CHARS`, `NERD_QUIET`, `NERD_ANCHORS`, `NERD_PI_VCC`, `NERD_WEB`) are described in
 [`agent/src/run.ts`](agent/src/run.ts). `HF_TOKEN` is sent to Hugging Face if
 set. Header comments of [`Dockerfile`](Dockerfile) and
 [`container/entrypoint.sh`](container/entrypoint.sh) list the rest.

@@ -6,23 +6,48 @@
 ./UP                  # build the images if missing, start the server and the agent, wait, print how to connect
 ./UP --build          # rebuild first (after git pull)
 ./UP --no-wait        # return at once; ./STATUS says when it is ready
-./UP --dry-run        # print the docker commands only
+./UP --dry-run        # print the compose command and the resolved compose configuration only
 ./STATUS              # both containers, llama-server as the agent reaches it, sshd, the agent's tmux session, the app port
 ./DOWN                # stop and remove both containers; volumes stay
 ./DOWN --agent        # only the agent; the model stays loaded
-./DOWN --purge        # ... and delete the workspace, logs/conversations, ssh host keys
+./DOWN --purge        # ... and delete the workspace, logs/conversations, ssh host keys, home, caches
 ./DOWN --purge-models # ... and the model volume too
 ```
 
 Two containers: the server `<name>-llm` (llama-server with the model, the GPU)
 and the agent `<name>` (Pi, sshd, the workspace), on the network `<name>-net`
-(docs/ARCHITECTURE.md). Both run with `--restart unless-stopped`: they come
-back after a reboot or a docker restart, and stay down after `./DOWN` or
-`docker stop`. `./UP` on a running instance replaces the agent's container and
-keeps the volumes: the conversation continues, processes the agent started (a
-web server) do not. The server's container is kept if it runs with the same
-image and settings, so the model is not reloaded; a change of variant,
-context or image replaces it.
+(docs/ARCHITECTURE.md). `compose.yaml` describes them; `./UP` works out the
+machine (GPU and how docker reaches it, macOS, the ssh key, free ports),
+passes the settings to docker compose and picks the overlays that fit
+(`compose.cdi.yaml` or `compose.gpus.yaml`, `compose.netns.yaml`,
+`compose.workspace-dir.yaml`, `compose.host-llama.yaml`). Run them through
+`./UP`, not `docker compose` by hand: compose does not read `.env`. Both run
+with `restart: unless-stopped`: they come back after a reboot or a docker
+restart, and stay down after `./DOWN` or `docker stop`. `./UP` on a running
+instance replaces only a container whose image or settings changed: after
+`./UP --build` the agent's container is new, the volumes stay, the
+conversation continues, processes the agent started (a web server) do not.
+The model is not reloaded unless the server's variant, context or image
+changed.
+
+## What lives outside the containers
+
+| volume | in the container | holds |
+|---|---|---|
+| `NERD_MODELS_VOLUME` (`nerd-models`) | server `/models` | the model, shared by every instance |
+| `<name>-ws` (or `NERD_WORKSPACE`) | `/workspace` | the projects |
+| `<name>-logs` | `/logs` | logs and Pi's conversations |
+| `<name>-ssh` | `/ssh` | the ssh host keys (the fingerprint survives a rebuild) |
+| `<name>-home` | `/home/nerd` | what the agent installed: `nerd-get go\|rust\|uv`, `npm -g`, uv tools; its memory |
+| `<name>-cache` | `/home/nerd/.cache` | npm, go, uv, pip caches: safe to throw away |
+
+`/tmp` is a tmpfs in both containers (`NERD_TMP_SIZE`, 2g): it is memory, it
+is empty after a restart, and programs may run from it. Command-line tools
+that change rarely (git, python3, sqlite3, jq, gcc and make, tcpdump, tmux,
+shellcheck, ruff, biome) are in the image; languages and their packages are
+not, `nerd-get` puts them in the home. The image puts nothing into
+`/home/nerd` that it needs later: docker fills a new volume from the image
+only once.
 
 The first start downloads the model (6-7 GB, resumable, checked against a
 pinned sha256); later starts take seconds. `./UP` shows the progress of both.
@@ -35,13 +60,16 @@ environment wins over the file (`NERD_NAME=test ./UP`).
 
 | setting | default | |
 |---|---|---|
-| `NERD_NAME` | `nerd` | the agent's container; the server's is `<name>-llm`, the network `<name>-net`, volumes `<name>-ws`, `<name>-ssh`, `<name>-logs` |
+| `NERD_NAME` | `nerd` | the agent's container and the compose project; the server's is `<name>-llm`, the network `<name>-net`, volumes `<name>-ws`, `-logs`, `-ssh`, `-home`, `-cache` |
 | `NERD_IMAGE` | `nerd:agent` | the agent's image tag |
 | `NERD_SERVER_IMAGE` | `nerd:server-sm<arch>` | the server's image tag |
 | `NERD_CUDA_ARCH`, `NERD_CUDA_VERSION` | detected | the server's build arguments (see INSTALL.md) |
 | `NERD_GPU` | `auto` | `cdi`, `gpus` or `auto` |
-| `NERD_LLAMA` | `auto` | `container` (Linux) or `host` (macOS: the server on the machine, MACOS.md) |
+| `NERD_LLAMA` | `auto` | `container` (Linux), `host` (macOS: llama-server on the machine, MACOS.md) or `mlx` (macOS: mlx-vlm's server, the model in MLX format, MACOS.md) |
 | `NERD_MODEL_VARIANT` | `q1` | `q1` or `q2` |
+| `NERD_MODEL_GGUF` | none | another GGUF: `hf:<owner>/<repo>/<file>.gguf[@rev]` (downloaded, sha256 checked; `NERD_MODEL_SHA256` pins it) or a file already in the models volume; named `NERD_MODEL_ALIAS` |
+| `NERD_MLX_MODEL` | Bonsai 2, MLX 2-bit, pinned | `NERD_LLAMA=mlx`: `<owner>/<repo>[@rev]` or a directory |
+| `NERD_SAMPLING` | none (mlx: the model card's) | sampling fields added to every request, e.g. `temperature=0.7,top_p=0.8,top_k=20` |
 | `NERD_CTX` | `65536` | context in tokens |
 | `NERD_SSH_PORT` | `2222` | ssh into the agent's terminal |
 | `NERD_APP_PORT` | `8000` | where the agent serves what it builds |
@@ -52,14 +80,34 @@ environment wins over the file (`NERD_NAME=test ./UP`).
 | `NERD_WORKSPACE` | volume `<name>-ws` | a host directory instead (writable by uid 1000) |
 | `NERD_MODELS_VOLUME` | `nerd-models` | shared by all instances on the machine |
 | `NERD_NETWORK` | none | `container:<name>`: both join another container's network, publish nothing |
-| `NERD_DOCKER_ARGS` | none | more `docker run` arguments for the agent, e.g. `-e NERD_VERIFY_N=2` |
-| `NERD_SERVER_DOCKER_ARGS` | none | the same for the server, e.g. `-e HTTPS_PROXY=...` or `-e NERD_LLAMA_ARGS=...` |
+| `NERD_TMP_SIZE` | `2g` | size of `/tmp` (a tmpfs) in both containers |
+| `NERD_SHM_SIZE` | `1g` | the agent's `/dev/shm` (its headless browser) |
 | `HF_TOKEN` | none | sent to Hugging Face if set |
 
-The agent's own variables (`NERD_THINKING`, `NERD_VERIFY_N`,
-`NERD_SPEC_CHECK`, `NERD_BASH_TIMEOUT`, `NERD_PLAN_STEP`, `NERD_LOOP_GUARD_N`,
-`NERD_PI_VCC` ...) are passed with `NERD_DOCKER_ARGS="-e NAME=value"`; the README's
-"Settings" section and the header of `agent/src/run.ts` describe them.
+## Your own additions: `compose.override.yaml`
+
+Anything else for a container goes into `compose.override.yaml` next to
+`compose.yaml` (git-ignored); `./UP` adds it when it exists, and compose
+merges it over the rest. The agent's own variables (`NERD_THINKING`,
+`NERD_VERIFY_N`, `NERD_SPEC_CHECK`, `NERD_BASH_TIMEOUT`, `NERD_PLAN_STEP`,
+`NERD_LOOP_GUARD_N`, `NERD_FETCH_GUARD`, `NERD_LINT`, `NERD_DONE_GATE`, `NERD_BASH_MAX_CHARS`, `NERD_ANCHORS`, `NERD_PI_VCC` ...; the README's "Settings" section and
+the header of `agent/src/run.ts`), the server's (`NERD_LLAMA_ARGS`,
+`NERD_KV`), a proxy, one GPU of several:
+
+```yaml
+services:
+  agent:
+    environment:
+      NERD_VERIFY_N: "2"
+  llm:
+    environment:
+      HTTPS_PROXY: http://proxy:3128
+      CUDA_VISIBLE_DEVICES: "0"
+```
+
+`./UP --dry-run` shows the merged result. (Before decision 0012 the same went
+into `NERD_DOCKER_ARGS` / `NERD_SERVER_DOCKER_ARGS`; `./UP` now refuses those
+and says where to move them.)
 
 **Several instances on one machine:** give each its own `NERD_NAME` and
 ports (a separate checkout, or `NERD_NAME=b NERD_SSH_PORT=2223
