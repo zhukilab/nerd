@@ -6,8 +6,9 @@
 // edit of PLAN.md is reported, not run; a check whose own files changed after it
 // failed is reported too when it passes.
 
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { INSTALL_MS, isolatedEnv, listeningPorts, sh, TEST_MS, testExcerpt } from "./done-gate.ts";
@@ -24,6 +25,8 @@ export interface ItemResult extends DoneItem {
 	why: string;
 	/** The command's exit code (null: a timeout; undefined: not run). */
 	rc?: number | null;
+	/** The check itself is unusable (no command, cannot fail, does not parse): not run. */
+	unusable?: boolean;
 }
 
 // A fact from the web shown in the README carries its quote and the page the
@@ -50,30 +53,142 @@ export function checkQuotes(app: string): string[] {
 
 // "- <claim> — check: `<command>`", also with words around the command, as the
 // model writes it: "check: run `npm test` from the root" or "check: `npm test` → exit 0".
-const CHECK = /^(.*?)\s*(?:—|–|--|-|:)?\s*check:[^`]*`([^`]+)`.*$/i;
+const CHECK = /^(.*?)\s*(?:—|–|--|-|:)?\s*check:[^`]*`([^`]+)`(.*)$/i;
+// Two more forms from the stand of ticket 060 (2026-10-09), which used to become
+// "no check": the command inside the claim and "check: exits 0" after it, and an
+// item that is the command itself followed by "exits 0".
+const SAYS_EXIT_0 = /\b(exits?|exit code|returns?)\b[^.;]*\b0\b|\b(passes|succeeds)\b/i;
+const CHECK_AFTER = /^(.*?)`([^`]+)`(.*?)\s*(?:—|–|--|-|:)?\s*check:\s*(.*)$/i;
+const CMD_ITEM = /^`([^`]+)`\s+((?:exits?|returns?)\s+(?:with\s+)?(?:code\s+)?0\b.*)$/i;
+// And the command after "check:" with no backticks at all (the plan-only stand of
+// ticket 065: kept so even after the lint's retry), when it starts like a command.
+const COMMAND = /^(?:!\s*)?(?:node|npm|npx|test|\[|grep|git|sh|bash|curl|browse|cd|ls|diff|cmp|python3?|jq)\b/;
+const BARE = new RegExp(`^(.*?)\\s*(?:—|–|--|-|:)?\\s*check:\\s*(${COMMAND.source.slice(1)}.*)$`, "i");
+// From the stand of ticket 070: the closing backtick forgotten at the end of the
+// line, and "<claim>: `<command>`" with no "check:" at all.
+const UNCLOSED = /^(.*?)\s*(?:—|–|--|-|:)?\s*check:\s*`([^`]+)$/i;
+const TAIL = /^([^`]*?)\s*(?:—|–|--|:)\s*`([^`]+)`\s*\.?$/;
+// And "check:" inside the backticks: "- `check: npm test` → exit code 0".
+const INSIDE = /^(.*?)`check:\s*([^`]+)`(.*)$/i;
 
-/** The items of a plan's "Done when" section (PLAN.md as plan-step.ts writes it). */
-export function parseDoneWhen(plan: string): DoneItem[] {
+export interface ParsedItem extends DoneItem {
+	/** The words after the command ("prints 3", "exits 0"); "" when none. */
+	after: string;
+}
+
+/** One Done when item (the text after "- "), in any of the forms above. */
+export function parseItem(text: string): ParsedItem {
+	const c = CHECK.exec(text);
+	if (c) return { claim: c[1].trim(), cmd: c[2].trim(), after: c[3].trim() };
+	const a = CHECK_AFTER.exec(text);
+	if (a && !a[1].includes("`") && !a[3].includes("`") && SAYS_EXIT_0.test(a[4])) return { claim: a[1].trim(), cmd: a[2].trim(), after: a[4].trim() };
+	const i = CMD_ITEM.exec(text);
+	if (i) return { claim: text.trim(), cmd: i[1].trim(), after: i[2].trim() };
+	const n = INSIDE.exec(text);
+	if (n) return { claim: (n[1].trim() || text).trim(), cmd: n[2].trim(), after: n[3].trim() };
+	const u = UNCLOSED.exec(text);
+	if (u && COMMAND.test(u[2].trim())) return { claim: u[1].trim(), cmd: u[2].trim(), after: "" };
+	const t = TAIL.exec(text);
+	if (t && COMMAND.test(t[2].trim())) return { claim: t[1].trim(), cmd: t[2].trim(), after: "" };
+	const b = text.includes("`") ? null : BARE.exec(text);
+	if (b) return { claim: b[1].trim(), cmd: b[2].trim(), after: "" };
+	return { claim: text.trim(), after: "" };
+}
+
+export interface DoneLine extends ParsedItem {
+	/** 1-based line of the item in the plan. */
+	line: number;
+}
+
+/** The items of a plan's "Done when" section with their lines; undefined: no such section. */
+export function doneWhenLines(plan: string): DoneLine[] | undefined {
 	const lines = plan.split("\n");
 	const start = lines.findIndex((l) => /^#{1,3}\s*done when\s*$/i.test(l.trim()) || /^DONE WHEN\s*$/.test(l.trim()));
-	if (start < 0) return [];
-	const items: DoneItem[] = [];
-	for (const raw of lines.slice(start + 1)) {
+	if (start < 0) return undefined;
+	const items: DoneLine[] = [];
+	for (const [k, raw] of lines.slice(start + 1).entries()) {
 		const l = raw.trim();
 		if (/^#{1,3}\s/.test(l) || /^[A-Z][A-Z ]+$/.test(l)) break;
 		const m = /^[-*]\s+(.*)$/.exec(l);
-		if (!m) continue;
-		const c = CHECK.exec(m[1]);
-		items.push(c ? { claim: c[1].trim(), cmd: c[2].trim() } : { claim: m[1].trim() });
+		if (m) items.push({ ...parseItem(m[1]), line: start + 2 + k });
 	}
 	return items;
 }
 
+/** The items of a plan's "Done when" section (PLAN.md as plan-step.ts writes it). */
+export function parseDoneWhen(plan: string): DoneItem[] {
+	return (doneWhenLines(plan) ?? []).map((i) => (i.cmd === undefined ? { claim: i.claim } : { claim: i.claim, cmd: i.cmd }));
+}
+
+/** Shell words of a command, quotes removed; undefined when it has expansions we do not follow. */
+function shellWords(cmd: string): string[] | undefined {
+	const words: string[] = [];
+	let w = "";
+	let inWord = false;
+	for (let k = 0; k < cmd.length; k++) {
+		const ch = cmd[k];
+		if (ch === "'") {
+			const end = cmd.indexOf("'", k + 1);
+			if (end < 0) return undefined;
+			w += cmd.slice(k + 1, end);
+			k = end;
+			inWord = true;
+		} else if (ch === '"') {
+			k++;
+			for (; k < cmd.length && cmd[k] !== '"'; k++) {
+				if (cmd[k] === "\\" && /["\\$`]/.test(cmd[k + 1] ?? "")) w += cmd[++k];
+				else if (cmd[k] === "`" || (cmd[k] === "$" && cmd[k + 1] === "(")) return undefined;
+				else w += cmd[k];
+			}
+			if (k >= cmd.length) return undefined;
+			inWord = true;
+		} else if (ch === "\\") {
+			w += cmd[++k] ?? "";
+			inWord = true;
+		} else if (/\s/.test(ch) || /[;&|()<>]/.test(ch)) {
+			if (inWord) words.push(w);
+			w = "";
+			inWord = false;
+			if (!/\s/.test(ch)) words.push(ch);
+		} else {
+			w += ch;
+			inWord = true;
+		}
+	}
+	if (inWord) words.push(w);
+	return words;
+}
+
+/** The scripts a command gives to `node -e`/`--eval`/`-p`, with whether they run as ES modules. */
+export function nodeScripts(cmd: string): { body: string; module: boolean; prints: boolean }[] {
+	const words = shellWords(cmd);
+	if (!words) return [];
+	const out: { body: string; module: boolean; prints: boolean }[] = [];
+	for (let k = 0; k < words.length; k++) {
+		if (words[k] !== "node") continue;
+		let module = false;
+		for (let j = k + 1; j < words.length && words[j].startsWith("-"); j++) {
+			if (words[j] === "--input-type=module") module = true;
+			if (["-e", "--eval", "-p", "--print"].includes(words[j]) && j + 1 < words.length) {
+				const body = words[j + 1];
+				module ||= /^\s*(import|export)\s|^\s*await\s|[;\n]\s*await\s/m.test(body);
+				out.push({ body, module, prints: words[j] === "-p" || words[j] === "--print" });
+				break;
+			}
+		}
+	}
+	return out;
+}
+
+const PRINTS = /console\.(log|error|info|warn|dir|table)\s*\(|process\.std(out|err)\.write\s*\(/;
+const DECIDES = /process\.exit(Code)?\b|\bassert\b|\bthrow\b/;
+
 /**
  * Why a check command can never fail, or undefined. A check that ends in
  * `|| true`, `|| echo …`, `; exit 0`, prints PASS/FAIL instead of exiting with
- * it, or asserts with console.assert (which only logs) "passes" whatever the
- * project does. Our own rules (the idea, not the code, of a Pi package that
+ * it, asserts with console.assert (which only logs), runs a node script that only
+ * prints, or shows a git diff (exit 0 with or without changes) "passes" whatever
+ * the project does. Our own rules (the idea, not the code, of a Pi package that
  * flags such commands): conservative, on the command text, top level only.
  */
 export function unfailable(cmd: string): string | undefined {
@@ -85,6 +200,37 @@ export function unfailable(cmd: string): string | undefined {
 	if (/\|\|\s*(echo|printf|true|:)\b/.test(c)) return "a failure inside it is swallowed (`|| echo …`, `|| true`)";
 	if (/console\.assert\s*\(/.test(c) && !/process\.exit(Code)?\b|assert\.|throw\b/.test(c)) return "console.assert only logs: a failed assertion still exits 0";
 	if (/\|\s*[^|]*\$\?/.test(c)) return "it reads $? after a pipe, which is the last command's code, not the check's";
+	if (/(^|[;&|]\s*)git diff\b/.test(c) && !/--exit-code|--quiet/.test(c) && !/git diff[^;&|]*\|/.test(c)) return "`git diff` exits 0 whether or not there are changes (add --exit-code or --quiet)";
+	for (const s of nodeScripts(cmd)) {
+		if ((s.prints || PRINTS.test(s.body)) && !DECIDES.test(s.body) && !/\|\s*grep\b/.test(c)) {
+			return "its node script only prints: the harness reads the exit code, not the output (exit non-zero with process.exit, assert or throw)";
+		}
+	}
+	return undefined;
+}
+
+/** Why a check command cannot even start (its own syntax), or undefined. Runs no part of it. */
+export function syntaxError(cmd: string): string | undefined {
+	const shell = spawnSync("sh", ["-n", "-c", cmd], { encoding: "utf8", timeout: 10_000 });
+	if (shell.status !== 0) return `the command does not parse in the shell: ${(shell.stderr || "").trim().split("\n")[0]}`;
+	for (const s of nodeScripts(cmd)) {
+		const dir = mkdtempSync(join(tmpdir(), "nerd-check-"));
+		try {
+			// As node itself does for -e: CommonJS first, then an ES module (top-level await, import).
+			const check = (ext: string) => {
+				const file = join(dir, `check.${ext}`);
+				writeFileSync(file, s.body);
+				return spawnSync(process.execPath, ["--check", file], { encoding: "utf8", timeout: 10_000 });
+			};
+			const first = check(s.module ? "mjs" : "cjs");
+			if (first.status !== 0 && (s.module || check("mjs").status !== 0)) {
+				const err = (first.stderr || "").split("\n").find((l) => /Error/.test(l)) ?? "a syntax error";
+				return `its node script does not parse: ${err.trim()}`;
+			}
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	}
 	return undefined;
 }
 
@@ -142,12 +288,17 @@ export async function runDoneWhen(cwd: string, items: DoneItem[], timeoutMs = TE
 		const out: ItemResult[] = [];
 		for (const i of items) {
 			if (!i.cmd) {
-				out.push({ ...i, ok: false, why: "no check: the plan gives no command for this item" });
+				out.push({ ...i, ok: false, unusable: true, why: "no check: the plan gives no command for this item" });
 				continue;
 			}
 			const never = unfailable(i.cmd);
 			if (never) {
-				out.push({ ...i, ok: false, why: `the check cannot fail: ${never}. A check must exit non-zero when the claim is false` });
+				out.push({ ...i, ok: false, unusable: true, why: `the check cannot fail: ${never}. A check must exit non-zero when the claim is false` });
+				continue;
+			}
+			const broken = syntaxError(i.cmd);
+			if (broken) {
+				out.push({ ...i, ok: false, unusable: true, why: `the check is broken: ${broken}` });
 				continue;
 			}
 			const r = await sh("sh", ["-c", i.cmd], app, timeoutMs, isolatedEnv(blocked, { CI: "1" }));

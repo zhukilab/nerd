@@ -20,6 +20,12 @@
 //                  the workspace there before the check, for measurement
 //   NERD_PLAN_STEP=0  no questions-and-plan turn before the work (src/plan-step.ts);
 //                  NERD_PLAN_ANSWER answers its questions (default «на твоё усмотрение»)
+//   NERD_PLAN_LINT=0  no plan-lint of the final plan (src/plan-lint.ts): placeholders,
+//                  tool-call text instead of a plan, and with NERD_RALPH=1 Done when
+//                  checks that cannot run, cannot fail or do not parse go back once;
+//                  NERD_PLAN_MAX_TOKENS caps each reply of the step (default 6144, 0 = off)
+//   NERD_REPEAT_GUARD=0  no cut of a reply that repeats one piece of text over and
+//                  over (src/repeat-guard.ts; then a steer, at most twice per task)
 //   NERD_LOOP_GUARD_N  repeats of one call (same arguments, same result) before
 //                  the loop guard's note (default 3, 0 = off; src/loop-guard.ts)
 //   NERD_FETCH_GUARD=0  no note on a web_fetch 404 for an address that no
@@ -57,7 +63,7 @@ import { appendFileSync, cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { harness } from "./harness.ts";
+import { type HarnessHooks, harness } from "./harness.ts";
 import { headlessSession } from "./headless.ts";
 import { localModel, modelDefinition, settingsFor, stayOffline, withVerifier } from "./local.ts";
 import { enabledPackages } from "./packages.ts";
@@ -103,6 +109,7 @@ async function main() {
 	if (!model) throw new Error(`model local/${modelId} not registered`);
 
 	// No operator here: the plan step answers its questions with NERD_PLAN_ANSWER.
+	const hooks: HarnessHooks = {};
 	const session = await headlessSession({
 		cwd,
 		agentDir,
@@ -110,7 +117,7 @@ async function main() {
 		modelRuntime,
 		thinking,
 		settings: settingsFor(local),
-		extensions: [harness(false)],
+		extensions: [harness(false, process.env, hooks)],
 		// A file, so vcc_recall (NERD_PI_VCC) has something to search.
 		sessionDir: process.env.NERD_SESSION_DIR ?? join(agentDir, "sessions"),
 	});
@@ -145,13 +152,23 @@ async function main() {
 		}
 	});
 
+	// A reply the repeat guard cut ends Pi's run; its steer goes on as the next
+	// prompt (at most twice per task, repeat-guard.ts).
+	const prompt = async (text: string) => {
+		await session.prompt(text);
+		for (let s = hooks.takeSteer?.(); s; s = hooks.takeSteer?.()) {
+			process.stdout.write(`\n[repeat guard: the reply was cut]\n`);
+			await session.prompt(s);
+		}
+	};
 	try {
-		await session.prompt(task);
+		await prompt(task);
 		// The Ralph loop (decision 0014): rounds from the files until the DONE
 		// WHEN checks pass, no progress, or the budget.
 		if (ralphOn()) {
 			const opts = ralphOptions();
-			const d = await runRalphHeadless(session, cwd, task, opts, (r) => {
+			const guarded = { compact: (i?: string) => session.compact(i), prompt };
+			const d = await runRalphHeadless(guarded, cwd, task, opts, (r) => {
 				if (logPath) appendFileSync(logPath, `${JSON.stringify({ t: Date.now() - t0, type: "ralph_round", ...r })}\n`);
 				process.stdout.write(`\n[ralph round ${r.round}/${opts.maxRounds}: ${r.kind}, ${r.failures.length} failing]\n`);
 			});

@@ -84,6 +84,34 @@ test("the checks are the plan as committed; a later edit is reported, not run", 
 	assert.equal(changedItems(frozen, parseDoneWhen(PLAN.replace("grep -q 42 out.txt", "true"))).length, 1);
 });
 
+test("an unusable check is not a reason for a round, and is reported as not demonstrated", async () => {
+	// The stops of the 060 stand: the plan is frozen, so such a check can never be fixed.
+	const plan = "## Done when\n- the file exists — check: `test -f out.txt`\n- nothing changed — check: `git diff -- test/`\n- it is pretty\n";
+	const d = repo({ "PLAN.md": plan }, "Plan");
+	commit(d, { "out.txt": "x\n" }, "work");
+	const c = await checkRound(d, newState());
+	assert.ok(!c.failures.some((f) => /nothing changed|it is pretty/.test(f)), c.failures.join("\n"));
+	assert.ok(c.notes.some((n) => /unusable/.test(n) && /nothing changed/.test(n) && /it is pretty/.test(n)));
+	assert.deepEqual(
+		c.items.map((i) => [i.ok, !!i.unusable]),
+		[
+			[true, false],
+			[false, true],
+			[false, true],
+		],
+	);
+	const done = decide(newState(), c, "t", undefined, { maxRounds: 3, maxMs: 0 });
+	assert.equal(done.kind, c.failures.length ? "next" : "done");
+	if (done.kind === "done") assert.match(done.report, /1 of 3 Done when checks .* not demonstrated/);
+});
+
+test("a check whose node script does not parse is unusable, not run", async () => {
+	const d = repo({ "PLAN.md": "## Done when\n- compare — check: `node -e 'process.exit(1));'`\n" }, "Plan");
+	const r = await runDoneWhen(d, parseDoneWhen("## Done when\n- compare — check: `node -e 'process.exit(1));'`\n"));
+	assert.equal(r[0].unusable, true);
+	assert.match(r[0].why, /broken: its node script does not parse/);
+});
+
 test("a check that passes after its own file changed is reported", async () => {
 	const plan = "## Done when\n- strong bots — check: `sh check.sh`\n";
 	const d = repo({ "PLAN.md": plan }, "Plan");

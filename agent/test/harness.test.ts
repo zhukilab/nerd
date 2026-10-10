@@ -11,7 +11,7 @@ import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { harness } from "../src/harness.ts";
+import { type HarnessHooks, harness } from "../src/harness.ts";
 import { headlessSession } from "../src/headless.ts";
 import { modelDefinition, settingsFor } from "../src/local.ts";
 import { LoopGuard, loopGuardN } from "../src/loop-guard.ts";
@@ -112,7 +112,7 @@ test("plan step budget: NERD_PLAN_MAX_CALLS from the environment, 0 = no budget,
 
 // --- in a headless session against a scripted server ------------------------
 
-type Reply = { text?: string; call?: { name: string; args: Record<string, unknown> } };
+type Reply = { text?: string; call?: { name: string; args: Record<string, unknown> }; stream?: string[] };
 interface Seen {
 	tools: string[];
 	lastUser: string;
@@ -151,6 +151,27 @@ async function scriptedServer(script: (n: number, seen: Seen) => Reply) {
 			res.writeHead(200, { "content-type": "text/event-stream" });
 			const chunk = (delta: unknown, finish: string | null) =>
 				res.write(`data: ${JSON.stringify({ id: "x", object: "chat.completion.chunk", choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`);
+			if (reply.stream) {
+				// Piece by piece, a few ms apart, until done or the client goes away.
+				const pieces = [...reply.stream];
+				let gone = false;
+				res.on("close", () => {
+					gone = true;
+				});
+				const next = () => {
+					if (gone) return;
+					const p = pieces.shift();
+					if (p === undefined) {
+						chunk({}, "stop");
+						res.end("data: [DONE]\n\n");
+						return;
+					}
+					chunk({ role: "assistant", content: p }, null);
+					setTimeout(next, 2);
+				};
+				next();
+				return;
+			}
 			if (reply.call) {
 				chunk(
 					{
@@ -180,6 +201,7 @@ async function runHeadless(
 	later: string[] = [],
 	inspect?: (session: Awaited<ReturnType<typeof headlessSession>>) => Promise<void>,
 	setup?: (cwd: string) => void,
+	hooks?: HarnessHooks,
 ) {
 	const cwd = tempDir("nerd-harness-ws-");
 	setup?.(cwd);
@@ -198,7 +220,7 @@ async function runHeadless(
 		modelRuntime,
 		thinking: "off",
 		settings: { ...settingsFor(local), retry: { enabled: false, maxRetries: 0 } },
-		extensions: [harness(operator, env)],
+		extensions: [harness(operator, env, hooks)],
 		sessionDir: join(agentDir, "sessions"),
 		env,
 	});
@@ -467,5 +489,37 @@ test("operator's rules: RULES.md reaches the system prompt of each turn; a rule 
 		assert.doesNotMatch(none.seen[0].system, /operator's rules/, "no file, no section");
 	} finally {
 		none.close();
+	}
+});
+
+test("repeat guard (process ticket 071): a looping reply is cut, and its steer goes on as the next prompt", async () => {
+	const unit = "I will run the tests once more to be completely sure.\n";
+	const looping = Array.from({ length: 200 }, () => unit);
+	const srv = await scriptedServer((n) => (n === 1 ? { stream: looping } : { text: "Done: the tests pass." }));
+	const hooks: HarnessHooks = {};
+	try {
+		await runHeadless(
+			srv.url,
+			"Run the tests",
+			{ NERD_PLAN_STEP: "0", NERD_DONE_GATE: "0" },
+			false,
+			[],
+			async (session) => {
+				// as run.ts does after each prompt
+				const steer = hooks.takeSteer?.();
+				assert.match(steer ?? "", /cut: it repeated/);
+				await session.prompt(steer as string);
+				assert.equal(hooks.takeSteer?.(), undefined);
+				const last = session.messages.at(-1) as { role?: string; content?: { text?: string }[] };
+				assert.equal(last.role, "assistant");
+				assert.match(last.content?.map((c) => c.text ?? "").join("") ?? "", /tests pass/);
+			},
+			undefined,
+			hooks,
+		);
+		assert.equal(srv.seen.length, 2, "the loop was cut, the steer was one more request");
+		assert.match(srv.seen[1].lastUser, /repeated the same text/);
+	} finally {
+		srv.close();
 	}
 });

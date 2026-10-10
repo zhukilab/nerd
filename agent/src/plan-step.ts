@@ -27,6 +27,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { lintPlan, lintRetryMessage, lintSection, planLintOn } from "./plan-lint.ts";
 
 /** Tools of the questions-and-plan turn: reading only. */
 export const PLAN_TOOLS = ["read", "ls", "grep", "find"];
@@ -57,7 +58,7 @@ export function planStepPrompt(checks = process.env.NERD_RALPH === "1"): string 
 	// carries the command the harness runs to check it (done-when.ts).
 	const done = checks
 		? `- <what the operator can do and see when it is finished> — check: \`<a shell command, run from the project root in a clean clone, that exits 0 only if this is true>\`
-(one item per requirement of the request; a claim of quality — harder, faster, correct rules, fits a phone — gets a command that measures it, e.g. plays many games between neighbouring levels, or opens the page with \`browse\` and finds the text; a fact from the web goes into the README as \`> "<the page's exact words>" — notes/web/<file>.md\`, and the harness checks the words against that saved page)`
+(one item per requirement of the request, its command on that one line; only the exit code counts, so a command that prints must also fail when the output is wrong — \`| grep -q "<text>"\`, \`process.exit(ok ? 0 : 1)\`, \`assert\`; a claim of quality — harder, faster, correct rules, fits a phone — gets a command that measures it, e.g. plays many games between neighbouring levels, or \`browse <url> | grep -q "<text on the page>"\`; a fact from the web goes into the README as \`> "<the page's exact words>" — notes/web/<file>.md\`, and the harness checks the words against that saved page)`
 		: "- <what the operator can do and see when it is finished>";
 	return `[harness] A new task. This turn is for questions and a plan only: you can read files, not change them.
 Reply in exactly this form:
@@ -78,6 +79,74 @@ export function finalPlanPrompt(answer?: string): string {
 
 export function workPrompt(saved: string): string {
 	return `[harness] ${saved} All tools are available again. Carry out the plan step by step, checking each step as it says.`;
+}
+
+/**
+ * Tool calls the model wrote as text (`<tool_call><function=read>…`), cut out of a
+ * reply, with the names of the tools it tried (ticket 070). After the call budget
+ * the tools are put away, and the model went on "calling" them as text: 4 of 20
+ * plans on the plan-only stand of ticket 065, and 25 of 184 earlier plans, were
+ * such a call instead of a plan (one was a plan with a call after it).
+ */
+export function stripToolCalls(text: string): { text: string; calls: string[] } {
+	const calls: string[] = [];
+	const name = (m: string) => {
+		const f = /<function=([\w.-]+)/.exec(m);
+		if (f) calls.push(f[1]);
+		return "";
+	};
+	const cut = text.replace(/<tool_call>[\s\S]*?(?:<\/tool_call>|$)/g, name).replace(/<function=[\w.-]+>[\s\S]*?(?:<\/function>|$)/g, name);
+	return { text: cut.trim(), calls };
+}
+
+export function toolTextNote(calls: string[]): string {
+	const names = [...new Set(calls)].map((c) => `\`${c}\``).join(", ");
+	return (
+		`[harness] You wrote a call to ${names} as text. The tools of this turn are put away, so a call written as text is not run and nothing comes back. ` +
+		"Reply now, without tools, with the plan in the form asked for (PLAN, then DONE WHEN), from what you already know; what you could not find out goes under ASSUMPTIONS."
+	);
+}
+
+/** Direct notes about tool calls written as text, per task, before the reply is taken as it is. */
+const TOOL_TEXT_NOTES = 2;
+
+// Ticket 071: one reply of the plan step went on re-drafting the plan ("Hmm…
+// actually, wait…") for 40 minutes, 42 thousand characters, never the same text
+// twice; the longest plan of 184 earlier ones is about 3 thousand tokens. So the
+// step's requests carry their own max_tokens, and a reply cut there gives its last
+// complete draft. (Aborting the stream instead ends Pi's whole run.)
+export const DEFAULT_PLAN_MAX_TOKENS = 6144;
+const DRAFT_NOTES = 2;
+
+export function planMaxTokens(env = process.env): number {
+	const raw = env.NERD_PLAN_MAX_TOKENS;
+	if (raw === undefined || raw.trim() === "") return DEFAULT_PLAN_MAX_TOKENS;
+	const v = Number(raw);
+	return Number.isInteger(v) && v >= 0 ? v : DEFAULT_PLAN_MAX_TOKENS;
+}
+
+/** The last draft in a reply that has a PLAN and a DONE WHEN with items, up to its last item; undefined: none. */
+export function lastDraft(text: string): string | undefined {
+	const starts = [...text.matchAll(new RegExp(heading("PLAN").source, "gim"))].map((m) => m.index ?? 0);
+	for (let k = starts.length - 1; k >= 0; k--) {
+		const lines = text.slice(starts[k], starts[k + 1] ?? text.length).split("\n");
+		const done = lines.findIndex((l) => heading("DONE WHEN").test(l));
+		if (done < 0) continue;
+		let last = -1;
+		for (let j = done + 1; j < lines.length; j++) {
+			if (/^\s*[-*]\s+\S/.test(lines[j])) last = j;
+			else if (lines[j].trim() && last >= 0) break;
+		}
+		if (last >= 0) return lines.slice(0, last + 1).join("\n").trim();
+	}
+	return undefined;
+}
+
+export function draftNote(maxTokens: number): string {
+	return (
+		`[harness] Your reply reached the plan step's length budget (${maxTokens} tokens) while it was still re-drafting the plan. ` +
+		"Give the final plan now, once, in the form asked for (PLAN, then DONE WHEN), with short items and no deliberation before it."
+	);
 }
 
 export interface PlanReply {
@@ -151,6 +220,10 @@ export function savePlan(cwd: string, text: string): string {
 
 type Msg = { role?: string; content?: unknown };
 
+function lastStopReason(messages: Msg[]): string | undefined {
+	return ([...messages].reverse().find((x) => x.role === "assistant") as { stopReason?: string } | undefined)?.stopReason;
+}
+
 function lastAssistantText(messages: Msg[]): string {
 	const m = [...messages].reverse().find((x) => x.role === "assistant");
 	if (!m) return "";
@@ -173,6 +246,12 @@ export interface PlanStepOptions {
 	planTools: string[];
 	/** Tool calls allowed in the plan turn before the tools are taken away (0: no budget). */
 	maxCalls: number;
+	/** plan-lint (plan-lint.ts) on the final plan: one retry on errors. */
+	lint: boolean;
+	/** The plan form asks for check commands (the Ralph loop). */
+	checks: boolean;
+	/** max_tokens of the step's requests (0: as the model's). */
+	maxTokens: number;
 }
 
 export function planStepOptions(
@@ -182,7 +261,16 @@ export function planStepOptions(
 	planTools: string[] = PLAN_TOOLS,
 ): PlanStepOptions | undefined {
 	if (env.NERD_PLAN_STEP === "0") return undefined;
-	return { operator, workTools, planTools, maxCalls: planMaxCalls(env), answer: env.NERD_PLAN_ANSWER || DEFAULT_PLAN_ANSWER };
+	return {
+		operator,
+		workTools,
+		planTools,
+		maxCalls: planMaxCalls(env),
+		answer: env.NERD_PLAN_ANSWER || DEFAULT_PLAN_ANSWER,
+		lint: planLintOn(env),
+		checks: env.NERD_RALPH === "1",
+		maxTokens: planMaxTokens(env),
+	};
 }
 
 /**
@@ -197,6 +285,9 @@ export function planStep(pi: ExtensionAPI, opts: PlanStepOptions) {
 	let answer = "";
 	let explicitTask = false;
 	let calls = 0;
+	let linted = false;
+	let toolNotes = 0;
+	let draftNotes = 0;
 
 	const toWork = () => {
 		phase = "work";
@@ -232,6 +323,9 @@ export function planStep(pi: ExtensionAPI, opts: PlanStepOptions) {
 			assumptions = "";
 			answer = "";
 			calls = 0;
+			linted = false;
+			toolNotes = 0;
+			draftNotes = 0;
 			pi.setActiveTools(opts.planTools);
 			return { message: { customType: "nerd-plan", content: planStepPrompt(), display: true } };
 		}
@@ -242,6 +336,14 @@ export function planStep(pi: ExtensionAPI, opts: PlanStepOptions) {
 			return { message: { customType: "nerd-plan", content: finalPlanPrompt(), display: true } };
 		}
 		return;
+	});
+
+	pi.on("before_provider_request", (event) => {
+		if (phase === "work" || opts.maxTokens <= 0) return;
+		const p = event.payload as Record<string, unknown> | undefined;
+		if (!p || typeof p !== "object") return;
+		const now = typeof p.max_tokens === "number" ? p.max_tokens : Infinity;
+		return now > opts.maxTokens ? { ...p, max_tokens: opts.maxTokens } : p;
 	});
 
 	// The budget: counted over the whole step (both plan turns), not per turn.
@@ -258,7 +360,33 @@ export function planStep(pi: ExtensionAPI, opts: PlanStepOptions) {
 
 	pi.on("agent_before_settle", (event, ctx) => {
 		if (phase === "work" || event.outcome !== "completed") return;
-		const reply = parsePlanReply(lastAssistantText(event.context.contextMessages as Msg[]));
+		const messages = event.context.contextMessages as Msg[];
+		const said = stripToolCalls(lastAssistantText(messages));
+		// A reply with several drafts gives its last complete one; so does a reply cut
+		// at the cap. (A PLAN.md once kept two drafts, and its first Done when, the one
+		// without commands, was what got read.) The assumptions are read from it all.
+		const cut = lastStopReason(messages) === "length";
+		const drafts = [...said.text.matchAll(new RegExp(heading("PLAN").source, "gim"))].length;
+		let draft: string | undefined;
+		if (cut || drafts > 1) {
+			draft = lastDraft(said.text);
+			if (!draft && cut && draftNotes < DRAFT_NOTES) {
+				draftNotes += 1;
+				return {
+					entries: [{ type: "custom_message" as const, customType: "nerd-plan", content: draftNote(opts.maxTokens), display: true }],
+					continue: true,
+				};
+			}
+		}
+		if (said.calls.length && !heading("PLAN").test(said.text) && toolNotes < TOOL_TEXT_NOTES) {
+			toolNotes += 1;
+			return {
+				entries: [{ type: "custom_message" as const, customType: "nerd-plan", content: toolTextNote(said.calls), display: true }],
+				continue: true,
+			};
+		}
+		const reply = parsePlanReply(said.text);
+		if (draft) reply.plan = draft;
 		if (phase === "plan" && reply.questions.length) {
 			questions = reply.questions;
 			assumptions = reply.assumptions;
@@ -272,7 +400,23 @@ export function planStep(pi: ExtensionAPI, opts: PlanStepOptions) {
 		}
 		// The final plan may leave out the assumptions it was asked about.
 		const kept = { assumptions: reply.assumptions || assumptions, plan: reply.plan };
-		const saved = savePlan(ctx.cwd, planFileText(task, kept, questions.length ? { questions, answer } : undefined));
+		let text = planFileText(task, kept, questions.length ? { questions, answer } : undefined);
+		if (opts.lint) {
+			// plan-lint (ticket 065): errors go back once, before the plan is frozen.
+			const findings = lintPlan(text, { checks: opts.checks });
+			const errors = findings.filter((f) => f.severity === "error");
+			if (errors.length && !linted) {
+				linted = true;
+				assumptions = kept.assumptions;
+				phase = "answered";
+				return {
+					entries: [{ type: "custom_message" as const, customType: "nerd-plan-lint", content: lintRetryMessage(findings), display: true }],
+					continue: true,
+				};
+			}
+			text += lintSection(errors);
+		}
+		const saved = savePlan(ctx.cwd, text);
 		toWork();
 		return {
 			entries: [{ type: "custom_message" as const, customType: "nerd-plan", content: workPrompt(saved), display: true }],

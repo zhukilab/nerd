@@ -22,6 +22,7 @@ import { outputCap } from "./output-cap.ts";
 import { packageReadOnlyTools, packageTools, pinWebSearchProvider } from "./packages.ts";
 import { PLAN_TOOLS, planStep, planStepOptions } from "./plan-step.ts";
 import { ralph, ralphOn, ralphOptions } from "./ralph.ts";
+import { repeatGuard, repeatGuardOn } from "./repeat-guard.ts";
 import { rules } from "./rules.ts";
 import { parseSampling, sampling } from "./sampling.ts";
 import { summaryGoal, summaryGoalOn } from "./summary-goal.ts";
@@ -42,9 +43,16 @@ export function allTools(env = process.env): string[] {
 	return [...new Set([...workTools(env), ...planTools(env)])];
 }
 
+/** What the headless run needs from the extensions (run.ts). */
+export interface HarnessHooks {
+	/** The repeat guard's steer after a cut reply, once (repeat-guard.ts). */
+	takeSteer?: () => string | undefined;
+}
+
 /** `operator`: a person answers in this session (TUI), or not (headless). */
-export function harness(operator: boolean, env = process.env): ExtensionFactory {
+export function harness(operator: boolean, env = process.env, hooks: HarnessHooks = {}): ExtensionFactory {
 	return (pi) => {
+		if (repeatGuardOn(env)) hooks.takeSteer = repeatGuard(pi, { operator }).takeSteer;
 		// The read-only tools are registered for the plan step only; the work
 		// declares its own tools alone, as before.
 		const work = workTools(env);

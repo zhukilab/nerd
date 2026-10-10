@@ -94,7 +94,7 @@ the line that is there keeps the file readable.
 Anything else for a container goes into `compose.override.yaml` next to
 `compose.yaml` (git-ignored); `./UP` adds it when it exists, and compose
 merges it over the rest. The agent's own variables (`NERD_THINKING`,
-`NERD_VERIFY_N`, `NERD_SPEC_CHECK`, `NERD_BASH_TIMEOUT`, `NERD_PLAN_STEP`,
+`NERD_VERIFY_N`, `NERD_SPEC_CHECK`, `NERD_BASH_TIMEOUT`, `NERD_PLAN_STEP`, `NERD_PLAN_LINT`, `NERD_PLAN_MAX_TOKENS`, `NERD_REPEAT_GUARD`,
 `NERD_LOOP_GUARD_N`, `NERD_FETCH_GUARD`, `NERD_LINT`, `NERD_DONE_GATE`, `NERD_RALPH`, `NERD_BASH_MAX_CHARS`, `NERD_ANCHORS`, `NERD_WEB_NOTES`, `NERD_RULES_FILE`, `NERD_SUMMARY_GOAL`, `NERD_VCC_RECALL`, `NERD_PI_VCC` ...; the README's "Settings" section and
 the header of `agent/src/run.ts`), the server's (`NERD_LLAMA_ARGS`,
 `NERD_KV`), a proxy, one GPU of several:

@@ -101,7 +101,14 @@ export async function checkRound(cwd: string, state: RalphState, run = runDoneWh
 		}
 	}
 	const gate = (await checkProject(cwd, await changedSince(cwd, undefined))).failures;
-	const failures = [...gate, ...items.filter((r) => !r.ok).map((r) => `Done when "${r.claim}"${r.cmd ? ` — \`${r.cmd}\`` : ""}: ${r.why}`)];
+	// A check that is unusable itself (no command, cannot fail, does not parse)
+	// is not a reason for a round: the plan is frozen, so the model cannot fix it,
+	// and on the stand of ticket 060 (2026-10-09) every "no progress" stop was such
+	// a check (plan-lint, ticket 065, catches them before the freeze). It stays
+	// "not demonstrated" in the report.
+	const unusable = items.filter((r) => !r.ok && r.unusable);
+	if (unusable.length) notes.push(`Not demonstrated, the check itself is unusable (not a reason for another round): ${unusable.map((r) => `"${r.claim}" — ${firstLine(r.why)}`).join("; ")}`);
+	const failures = [...gate, ...items.filter((r) => !r.ok && !r.unusable).map((r) => `Done when "${r.claim}"${r.cmd ? ` — \`${r.cmd}\`` : ""}: ${r.why}`)];
 	const head = (await sh("git", ["rev-parse", "HEAD"], cwd, 30_000)).out.trim() || undefined;
 	return { failures, items, notes, planned: frozen.length > 0, head };
 }
@@ -119,7 +126,12 @@ Fix the project so that these pass, commit, and say done. A check is fixed by ma
 export function decide(state: RalphState, check: RoundCheck, task: string, remark: string | undefined, opts: RalphOptions, now = Date.now()): Decision {
 	const notes = check.notes.length ? `\n${check.notes.map((n) => `- ${n}`).join("\n")}` : "";
 	if (!check.failures.length) {
-		const what = check.planned ? `all ${check.items.length} Done when checks and the gate pass` : "the gate passes (the plan has no Done when checks)";
+		const passed = check.items.filter((i) => i.ok).length;
+		const what = !check.planned
+			? "the gate passes (the plan has no Done when checks)"
+			: passed === check.items.length
+				? `all ${check.items.length} Done when checks and the gate pass`
+				: `${passed} of ${check.items.length} Done when checks and the gate pass; the rest are not demonstrated (unusable checks)`;
 		return { kind: "done", report: `[ralph] Done after ${state.round} round(s): ${what}.${notes}${checkedReport(check)}` };
 	}
 	const key = check.failures.map(firstLine).sort().join("\n");

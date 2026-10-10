@@ -217,7 +217,21 @@ if any fails, the conversation is compacted and a new round starts from the
 files with the failures, until all pass, the same failures come back twice, or
 `NERD_RALPH_ROUNDS` (3) / `NERD_RALPH_MINUTES` are used. The checks are the
 plan as committed; an edit of them, or a check that passes after its own files
-changed, is reported, not hidden.
+changed, is reported, not hidden. Because they cannot be changed later, the
+final plan is checked before it is committed
+([`agent/src/plan-lint.ts`](agent/src/plan-lint.ts)): placeholders (TODO, «as
+in step 2»), tool-call text in place of a plan, and a DONE WHEN item with no
+runnable command, one that cannot fail (`|| true`, a script that only prints,
+`git diff` without `--exit-code`) or one that does not parse go back to the
+model once with the lines quoted; what is still wrong is written into the plan
+and the work goes on (`NERD_PLAN_LINT=0` = off). A check that is unusable itself
+never starts a round: it is reported as not demonstrated.
+A reply cannot run away: each reply of the plan step is capped
+(`NERD_PLAN_MAX_TOKENS`, 6144 tokens, about twice the longest plan seen), and a
+reply cut there, or one with several drafts, gives its last complete plan. In
+every turn, a reply whose tail is the same piece of text three times and more
+is stopped and the model is told what it repeated, at most twice per task
+([`agent/src/repeat-guard.ts`](agent/src/repeat-guard.ts); `NERD_REPEAT_GUARD=0` = off).
 A `bash` output longer than `NERD_BASH_MAX_CHARS` (8000 characters; 0 = off)
 reaches the model as its first and last lines, with the place of the whole
 output in between ([`agent/src/output-cap.ts`](agent/src/output-cap.ts)); runs
@@ -298,7 +312,7 @@ Server defaults, each overridable in the server's environment (through
 `NERD_SLOTS=1`, prompt cache off (`--cache-ram 0`: its KV snapshots overflow an
 8 GB card), extra flags in `NERD_LLAMA_ARGS`. The agent's own variables
 (`NERD_THINKING`, `NERD_VERIFY_N`, `NERD_SPEC_CHECK`, `NERD_BASH_TIMEOUT`,
-`NERD_PLAN_STEP`, `NERD_PLAN_ANSWER`, `NERD_LOOP_GUARD_N`, `NERD_FETCH_GUARD`, `NERD_LINT`, `NERD_DONE_GATE`, `NERD_RALPH`, `NERD_BASH_MAX_CHARS`, `NERD_QUIET`, `NERD_ANCHORS`, `NERD_RULES_FILE`, `NERD_SUMMARY_GOAL`, `NERD_VCC_RECALL`, `NERD_WEB_NOTES`, `NERD_PI_VCC`, `NERD_WEB`) are described in
+`NERD_PLAN_STEP`, `NERD_PLAN_ANSWER`, `NERD_PLAN_LINT`, `NERD_PLAN_MAX_TOKENS`, `NERD_REPEAT_GUARD`, `NERD_LOOP_GUARD_N`, `NERD_FETCH_GUARD`, `NERD_LINT`, `NERD_DONE_GATE`, `NERD_RALPH`, `NERD_BASH_MAX_CHARS`, `NERD_QUIET`, `NERD_ANCHORS`, `NERD_RULES_FILE`, `NERD_SUMMARY_GOAL`, `NERD_VCC_RECALL`, `NERD_WEB_NOTES`, `NERD_PI_VCC`, `NERD_WEB`) are described in
 [`agent/src/run.ts`](agent/src/run.ts). `HF_TOKEN` is sent to Hugging Face if
 set. Header comments of [`Dockerfile`](Dockerfile) and
 [`container/entrypoint.sh`](container/entrypoint.sh) list the rest.
