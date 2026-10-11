@@ -5,7 +5,9 @@
 // is compacted (pi-vcc, with the task as its goal) and the round's message
 // carries the operator's words, the failures and what changed in the checks.
 // It stops when everything passes, when the same failures come back twice in a
-// row (no progress), or at the budget of rounds and minutes. NERD_RALPH=1 turns
+// row (no progress), or at the budget of rounds and minutes; once per task, when
+// only Done when checks keep failing while the tests and the gate pass, a round
+// lets the model correct those checks' commands instead (amendMessage). NERD_RALPH=1 turns
 // it on (off by default until measured). The TUI drives it by events; the
 // headless run (run.ts) calls runRalphHeadless after its first prompt.
 
@@ -38,15 +40,23 @@ export interface RalphState {
 	lastKey?: string;
 	/** Hash of a failing check's own files, by command, at the time it failed. */
 	failedHash: Map<string, string>;
+	/** The claims whose command the model may correct in the current round (the amend round). */
+	amendable?: Set<string>;
+	/** Whether the one amend round of the task has been given. */
+	amendUsed?: boolean;
+	/** Commands corrected in the amend round, by claim: they replace the frozen ones from then on. */
+	amended: Map<string, { from: string; to: string }>;
 }
 
 export function newState(now = Date.now()): RalphState {
-	return { round: 0, started: now, failedHash: new Map() };
+	return { round: 0, started: now, failedHash: new Map(), amended: new Map() };
 }
 
 export interface RoundCheck {
 	/** One line per failure: the gate's, then the DONE WHEN items'. */
 	failures: string[];
+	/** The gate's failures alone (the project's tests and the done gate). */
+	gate?: string[];
 	items: ItemResult[];
 	/** For the operator: edits of the checks, checks that passed after their files changed. */
 	notes: string[];
@@ -66,9 +76,11 @@ export function checkedReport(c: RoundCheck): string {
 	const rows = c.items.map((i) =>
 		i.ok
 			? `  ✓ ${i.claim} — \`${i.cmd}\` exit 0`
-			: i.cmd
+			: i.cmd && !i.unusable
 				? `  ✗ ${i.claim} — \`${i.cmd}\` exit ${i.rc ?? "timeout"}: not demonstrated`
-				: `  ✗ ${i.claim} — not demonstrated (${firstLine(i.why)})`,
+				: i.cmd
+					? `  ✗ ${i.claim} — \`${i.cmd}\` not run: not demonstrated (${firstLine(i.why)})`
+					: `  ✗ ${i.claim} — not demonstrated (${firstLine(i.why)})`,
 	);
 	return rows.length ? `\nChecked by the harness in a clean clone${at}:\n${rows.join("\n")}` : "";
 }
@@ -77,12 +89,27 @@ const firstLine = (s: string) => s.split("\n")[0];
 
 /** Runs the round's checks in a clean clone; updates the tamper record in `state`. */
 export async function checkRound(cwd: string, state: RalphState, run = runDoneWhen): Promise<RoundCheck> {
-	const frozen = parseDoneWhen((await frozenPlan(cwd)) ?? "");
+	let frozen = parseDoneWhen((await frozenPlan(cwd)) ?? "");
 	let current: DoneItem[] = [];
 	try {
 		current = parseDoneWhen(readFileSync(join(cwd, PLAN_FILE), "utf8"));
 	} catch {}
 	const notes: string[] = [];
+	// The amend round (decide): a command the model corrected in PLAN.md for one of
+	// the claims it was offered, the claim's words kept, replaces the frozen one for good.
+	if (state.amendable) {
+		for (const f of frozen) {
+			if (!f.cmd || !state.amendable.has(f.claim)) continue;
+			const to = current.find((c) => c.claim === f.claim && c.cmd && c.cmd !== f.cmd)?.cmd;
+			if (to) state.amended.set(f.claim, { from: f.cmd, to });
+		}
+		state.amendable = undefined;
+	}
+	frozen = frozen.map((f) => {
+		const a = state.amended.get(f.claim);
+		return a ? { ...f, cmd: a.to } : f;
+	});
+	for (const [claim, a] of state.amended) notes.push(`"${claim}": its check was corrected by the model after the tests passed — was \`${a.from}\`, now \`${a.to}\`.`);
 	const edited = changedItems(frozen, current);
 	if (frozen.length && edited.length) {
 		notes.push(`PLAN.md's Done when differs from the plan as committed; the committed items were run. Changed or added: ${edited.map((i) => `"${i.claim}"`).join("; ")}`);
@@ -110,7 +137,17 @@ export async function checkRound(cwd: string, state: RalphState, run = runDoneWh
 	if (unusable.length) notes.push(`Not demonstrated, the check itself is unusable (not a reason for another round): ${unusable.map((r) => `"${r.claim}" — ${firstLine(r.why)}`).join("; ")}`);
 	const failures = [...gate, ...items.filter((r) => !r.ok && !r.unusable).map((r) => `Done when "${r.claim}"${r.cmd ? ` — \`${r.cmd}\`` : ""}: ${r.why}`)];
 	const head = (await sh("git", ["rev-parse", "HEAD"], cwd, 30_000)).out.trim() || undefined;
-	return { failures, items, notes, planned: frozen.length > 0, head };
+	return { failures, gate, items, notes, planned: frozen.length > 0, head };
+}
+
+export function amendMessage(task: string, round: number, max: number, check: RoundCheck): string {
+	return `[ralph round ${round}/${max}] The project's tests and the gate pass, but these Done when checks failed twice in a row:
+${check.failures.map((f) => `- ${f}`).join("\n")}
+The task in the operator's words: ${task}
+A check can be wrong about the code rather than the code wrong: the module's path or the shape of its export, a value compared the wrong way (=== between arrays or objects is always false), words a test runner does not print (node --test prints "# pass", not "passing"), an expectation the task does not ask for or contradicts (the task outranks the check). Run each check and read its output. Then, for each:
+- if its claim is false, fix the code;
+- if the check is wrong, correct its command in ${PLAN_FILE}: keep the claim's words exactly and change only the command, so that it passes on correct code and still fails when the claim is false. This is allowed once, in this round only; the old and the new command go to the operator.
+Commit, and say in one line per corrected check why it was wrong.`;
 }
 
 export type Decision = { kind: "done" | "stop"; report: string } | { kind: "next"; message: string };
@@ -120,7 +157,8 @@ export function roundMessage(task: string, remark: string | undefined, round: nu
 The task in the operator's words: ${task}${remark ? `\nThe operator's latest message: ${remark}` : ""}
 The harness ran the checks in a clean clone of the last commit. These failed:
 ${check.failures.map((f) => `- ${f}`).join("\n")}${check.notes.length ? `\nAbout the checks: ${check.notes.join(" ")}` : ""}
-Fix the project so that these pass, commit, and say done. A check is fixed by making its claim true, not by weakening the check: a changed check is reported to the operator.`;
+Fix the project so that these pass, commit, and say done. A check is fixed by making its claim true, not by weakening the check: a changed check is reported to the operator.
+The task outranks the checks: where a check expects what the task contradicts, the check is wrong, not the task. Keep the code to the task and say which check is wrong and why; never change the code against the task to make a check pass.`;
 }
 
 export function decide(state: RalphState, check: RoundCheck, task: string, remark: string | undefined, opts: RalphOptions, now = Date.now()): Decision {
@@ -136,6 +174,19 @@ export function decide(state: RalphState, check: RoundCheck, task: string, remar
 	}
 	const key = check.failures.map(firstLine).sort().join("\n");
 	const left = `\n${check.failures.map((f) => `- ${firstLine(f)}`).join("\n")}${notes}`;
+	// The fourth A/B of ticket 060 (2026-10-10): 5 of 6 "no progress" stops were
+	// checks wrong about the code (export shape, === on arrays, runner wording)
+	// while the task passed. So once per task, when the tests and the gate pass and
+	// only Done when checks keep failing, the model may correct those commands
+	// (decision 0014, addendum of 2026-10-11); the change goes to the operator.
+	const wrong = check.items.filter((i) => !i.ok && !i.unusable && i.cmd);
+	const inBudget = state.round < opts.maxRounds && !(opts.maxMs && now - state.started > opts.maxMs);
+	if (key === state.lastKey && !state.amendUsed && check.gate?.length === 0 && wrong.length && inBudget) {
+		state.amendUsed = true;
+		state.amendable = new Set(wrong.map((i) => i.claim));
+		state.round += 1;
+		return { kind: "next", message: amendMessage(task, state.round, opts.maxRounds, check) };
+	}
 	if (key === state.lastKey) return { kind: "stop", report: `[ralph] Stopped after round ${state.round}: the same checks failed twice in a row (no progress).${left}${checkedReport(check)}` };
 	if (state.round >= opts.maxRounds) return { kind: "stop", report: `[ralph] Stopped: ${opts.maxRounds} round(s) used.${left}${checkedReport(check)}` };
 	if (opts.maxMs && now - state.started > opts.maxMs) return { kind: "stop", report: `[ralph] Stopped: ${Math.round(opts.maxMs / 60_000)} min used.${left}${checkedReport(check)}` };

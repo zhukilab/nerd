@@ -137,6 +137,7 @@ test("decide: a failing round starts the next one with the failures and the task
 		assert.match(d.message, /build x/);
 		assert.match(d.message, /- Done when "x": exited with 1/);
 		assert.match(d.message, /not by weakening the check/);
+		assert.match(d.message, /The task outranks the checks/);
 	}
 });
 
@@ -157,6 +158,51 @@ test("decide: the budget of rounds and of minutes", () => {
 	const t = decide(newState(0), fail(["a"]), "t", undefined, { maxRounds: 9, maxMs: 60_000 }, 61_000);
 	assert.equal(t.kind, "stop");
 	if (t.kind === "stop") assert.match(t.report, /1 min used/);
+});
+
+test("decide: tests pass but the same checks fail twice — one amend round, then the stop", () => {
+	const opts = { maxRounds: 3, maxMs: 0 };
+	const items = [{ claim: "sorted", cmd: "node s.js", ok: false, why: "exited with 1", rc: 1 }];
+	const c = (): RoundCheck => ({ failures: ['Done when "sorted" — `node s.js`: exited with 1'], gate: [], items, notes: [], planned: true });
+	const st = newState(0);
+	assert.equal(decide(st, c(), "t", undefined, opts, 1).kind, "next");
+	const a = decide(st, c(), "sort it", undefined, opts, 2);
+	assert.equal(a.kind, "next");
+	if (a.kind === "next") {
+		assert.match(a.message, /tests and the gate pass/);
+		assert.match(a.message, /keep the claim's words exactly and change only the command/);
+		assert.match(a.message, /sort it/);
+	}
+	assert.deepEqual([...(st.amendable ?? [])], ["sorted"]);
+	assert.equal(decide(st, c(), "t", undefined, opts, 3).kind, "stop", "once per task");
+	// the gate failing, or no round left: no amend round
+	const g = newState(0);
+	const cg = (): RoundCheck => ({ ...c(), gate: ["npm test failed"], failures: ["npm test failed", ...c().failures] });
+	decide(g, cg(), "t", undefined, opts, 1);
+	assert.equal(decide(g, cg(), "t", undefined, opts, 2).kind, "stop");
+	const b = newState(0);
+	decide(b, c(), "t", undefined, { maxRounds: 1, maxMs: 0 }, 1);
+	assert.equal(decide(b, c(), "t", undefined, { maxRounds: 1, maxMs: 0 }, 2).kind, "stop");
+});
+
+test("checkRound: a command corrected in the amend round replaces the frozen one; others stay frozen", async () => {
+	const plan = "## Done when\n- tests pass — check: `grep -q passing out.txt`\n- the file exists — check: `test -f out.txt`\n";
+	const d = repo({ "PLAN.md": plan }, "Plan");
+	commit(d, { "out.txt": "# pass 3\n" }, "work");
+	const st = newState();
+	assert.ok((await checkRound(d, st)).failures.some((f) => f.includes("grep -q passing")));
+	st.amendable = new Set(["tests pass"]);
+	const fixed = plan.replace("grep -q passing out.txt", "grep -q '# pass' out.txt").replace("test -f out.txt", "true");
+	commit(d, { "PLAN.md": fixed }, "amend check");
+	const c = await checkRound(d, st);
+	assert.deepEqual(c.failures, []);
+	assert.equal(c.items[0].cmd, "grep -q '# pass' out.txt");
+	assert.equal(c.items[1].cmd, "test -f out.txt", "a claim not offered keeps its frozen command");
+	assert.ok(c.notes.some((n) => /corrected by the model .*was `grep -q passing out.txt`, now `grep -q '# pass' out.txt`/.test(n)));
+	assert.ok(c.notes.some((n) => /differs from the plan as committed.*the file exists/.test(n)));
+	// the offer was for that round only: a later edit is not taken
+	commit(d, { "PLAN.md": fixed.replace("grep -q '# pass' out.txt", "true") }, "again");
+	assert.equal((await checkRound(d, st)).items[0].cmd, "grep -q '# pass' out.txt");
 });
 
 test("decide: all checks pass", () => {
@@ -259,8 +305,12 @@ test("checkedReport: built from the harness's runs, not the model's words", asyn
 			{ claim: "tests pass", cmd: "npm test", ok: true, why: "", rc: 0 },
 			{ claim: "hard bot wins", cmd: "node sim.js", ok: false, why: "exited with 1", rc: 1 },
 			{ claim: "it is pretty", ok: false, why: "no check: the plan gives no command for this item" },
+			{ claim: "it says hi", cmd: "node hi.js; echo $?", ok: false, unusable: true, why: "the check cannot fail: it ends in an echo" },
 		],
 	});
+	// an unusable check is not run: no exit code to show, and not a timeout
+	assert.match(s, /✗ it says hi — `node hi.js; echo \$\?` not run: not demonstrated \(the check cannot fail/);
+	assert.doesNotMatch(s, /timeout/);
 	assert.match(s, /on commit 0123456/);
 	assert.match(s, /✓ tests pass — `npm test` exit 0/);
 	assert.match(s, /✗ hard bot wins — `node sim.js` exit 1: not demonstrated/);
