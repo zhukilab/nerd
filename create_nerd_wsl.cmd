@@ -29,10 +29,15 @@ set "NAME=nerd"
 set "REPO=https://github.com/zhukilab/nerd.git"
 set "BRANCH=main"
 set "LOCATION="
+rem %0 moves with shift: the file itself, taken before the arguments.
+set "SELF=%~f0"
+set "SELFNAME=%~nx0"
+set "SELFDIR=%~dp0"
 set "SETUP="
 rem Started by a double click: keep the window open at the end to be read.
 set "PAUSE="
-echo %cmdcmdline% | findstr /i /c:"%~nx0" >nul && set "PAUSE=1"
+set "CL=%cmdcmdline:"=%"
+if /i not "%CL: /c =%"=="%CL%" set "PAUSE=1"
 
 :args
 if "%~1"=="" goto args_done
@@ -66,9 +71,9 @@ wsl --version >nul 2>&1 || (
 rem The setup steps are the shell script at the end of this file.
 set "SETUP=nerd-wsl-setup-%RANDOM%.sh"
 set "START="
-for /f "delims=:" %%a in ('findstr /n /b /c:":__NERD_SETUP__" "%~f0"') do set "START=%%a"
-if not defined START ( echo The setup script is missing from %~nx0. & goto fail )
-more +%START% "%~f0" > "%TEMP%\%SETUP%"
+for /f "delims=:" %%a in ('findstr /n /b /c:":__NERD_SETUP__" "%SELF%"') do set "START=%%a"
+if not defined START ( echo The setup script is missing from %SELFNAME%. & goto fail )
+more +%START% "%SELF%" > "%TEMP%\%SETUP%"
 
 echo == 1. Debian as the WSL distribution "%NAME%"
 wsl -d %NAME% --exec true >nul 2>&1
@@ -109,8 +114,8 @@ call :step nerd up || goto fail
 
 echo.
 rem run_nerd.cmd next to this file, from the clone (as committed, CRLF).
-if not exist "%~dp0run_nerd.cmd" wsl -d %NAME% -u nerd --exec bash -c "cat ~/nerd/run_nerd.cmd" > "%~dp0run_nerd.cmd"
-echo Done. Start working: "%~dp0run_nerd.cmd" (it starts nerd if needed and opens the agent).
+if not exist "%SELFDIR%run_nerd.cmd" wsl -d %NAME% -u nerd --exec bash -c "cat ~/nerd/run_nerd.cmd" > "%SELFDIR%run_nerd.cmd"
+echo Done. Start working: "%SELFDIR%run_nerd.cmd" (it starts nerd if needed and opens the agent).
 set "RC=0"
 goto out
 
@@ -119,7 +124,7 @@ set "RC=1"
 goto out
 
 :usage
-echo usage: %~nx0 [--location ^<folder^>] [--repo ^<git url^>] [--branch ^<name^>]
+echo usage: %SELFNAME% [--location ^<folder^>] [--repo ^<git url^>] [--branch ^<name^>]
 set "RC=2"
 
 :out
