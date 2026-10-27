@@ -76,8 +76,10 @@ if not defined START ( echo The setup script is missing from %SELFNAME%. & goto 
 more +%START% "%SELF%" > "%TEMP%\%SETUP%"
 
 echo == 1. Debian as the WSL distribution "%NAME%"
-wsl -d %NAME% --exec true >nul 2>&1
-if not errorlevel 1 (
+rem wsl.exe fails with negative codes, which "if errorlevel 1" misses: test with ||.
+set "HAVE=1"
+wsl -d %NAME% --exec true >nul 2>&1 || set "HAVE="
+if defined HAVE (
   echo    already there
 ) else (
   if defined LOCATION (
@@ -85,8 +87,7 @@ if not errorlevel 1 (
   ) else (
     wsl --install Debian --name %NAME% --no-launch
   )
-  wsl -d %NAME% --exec true >nul 2>&1
-  if errorlevel 1 ( echo FAILED: the distribution "%NAME%" was not created. & goto fail )
+  wsl -d %NAME% --exec true >nul 2>&1 || ( echo FAILED: the distribution "%NAME%" was not created. & goto fail )
 )
 
 echo == 2. The system: wsl.conf, user nerd, sudo, git
