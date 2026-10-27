@@ -2,9 +2,12 @@
 rem Create the WSL distribution "nerd" and set nerd up in it, in one run.
 rem A single file: download it alone from the repository and run it.
 rem
-rem   create_nerd_wsl.cmd [--location <folder>] [--repo <git url>] [--branch <name>]
+rem   create_nerd_wsl.cmd [--location <folder>] [--name <distribution>] [--no-up]
+rem                       [--repo <git url>] [--branch <name>]
 rem
 rem   --location  where the distribution's disk goes (default: WSL's own place)
+rem   --name      the distribution's name (default nerd; run_nerd.cmd --name too)
+rem   --no-up     everything but ./UP (no build, no model download yet)
 rem   --repo, --branch  what to clone (default: the public nerd, main)
 rem
 rem Needs: Windows 10/11 with WSL2 (wsl --install --no-distribution, as
@@ -29,6 +32,7 @@ set "NAME=nerd"
 set "REPO=https://github.com/zhukilab/nerd.git"
 set "BRANCH=main"
 set "LOCATION="
+set "UP=1"
 rem %0 moves with shift: the file itself, taken before the arguments.
 set "SELF=%~f0"
 set "SELFNAME=%~nx0"
@@ -45,6 +49,15 @@ if /i "%~1"=="--location" (
   if "%~2"=="" goto usage
   set "LOCATION=%~f2"
   shift & shift & goto args
+)
+if /i "%~1"=="--name" (
+  if "%~2"=="" goto usage
+  set "NAME=%~2"
+  shift & shift & goto args
+)
+if /i "%~1"=="--no-up" (
+  set "UP="
+  shift & goto args
 )
 if /i "%~1"=="--repo" (
   if "%~2"=="" goto usage
@@ -111,12 +124,14 @@ call :step nerd check || (
   echo Fix what the table says is MISSING, then run this again.
   goto fail
 )
-call :step nerd up || goto fail
+if defined UP ( call :step nerd up || goto fail ) else ( echo    --no-up: ./UP not run; run_nerd.cmd runs it )
 
 echo.
 rem run_nerd.cmd next to this file, from the clone (as committed, CRLF).
 if not exist "%SELFDIR%run_nerd.cmd" wsl -d %NAME% -u nerd --exec bash -c "cat ~/nerd/run_nerd.cmd" > "%SELFDIR%run_nerd.cmd"
-echo Done. Start working: "%SELFDIR%run_nerd.cmd" (it starts nerd if needed and opens the agent).
+set "RUNARGS="
+if /i not "%NAME%"=="nerd" set "RUNARGS= --name %NAME%"
+echo Done. Start working: "%SELFDIR%run_nerd.cmd"%RUNARGS% (it starts nerd if needed and opens the agent).
 set "RC=0"
 goto out
 
@@ -125,7 +140,7 @@ set "RC=1"
 goto out
 
 :usage
-echo usage: %SELFNAME% [--location ^<folder^>] [--repo ^<git url^>] [--branch ^<name^>]
+echo usage: %SELFNAME% [--location ^<folder^>] [--name ^<distribution^>] [--no-up] [--repo ^<git url^>] [--branch ^<name^>]
 set "RC=2"
 
 :out
