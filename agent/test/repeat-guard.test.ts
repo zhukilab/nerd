@@ -59,6 +59,32 @@ test("the extension cuts a looping reply, hands over the steer, at most twice pe
 	assert.equal(aborts, 3, "a new operator message starts a fresh budget");
 });
 
+test("a loop inside a tool call's streamed arguments is cut too, with a higher bar than the text", () => {
+	// Process ticket 057, slug-tk2-1: 85K characters of "ssss…" in a bash call's argument, 65 minutes.
+	const handlers = new Map<string, (e: unknown, c: unknown) => unknown>();
+	let aborts = 0;
+	const entries: unknown[] = [];
+	const pi = { on: (n: string, h: (e: unknown, c: unknown) => unknown) => handlers.set(n, h), appendEntry: (_t: string, d: unknown) => entries.push(d), sendUserMessage: () => {} };
+	const g = repeatGuard(pi as unknown as Parameters<typeof repeatGuard>[0], { operator: false });
+	const ctx = { abort: () => aborts++ };
+	const stream = (args: string) => {
+		handlers.get("message_start")?.({}, ctx);
+		for (let k = 100; k <= args.length; k += 100) {
+			const call = { type: "toolCall", id: "c1", name: "bash", arguments: {}, partialArgs: args.slice(0, k) };
+			handlers.get("message_update")?.({ message: { role: "assistant", content: [{ type: "text", text: "Checking:" }, call] } }, ctx);
+		}
+		handlers.get("message_end")?.({}, ctx);
+	};
+	handlers.get("before_agent_start")?.({ prompt: "build it" }, ctx);
+	// a legitimate long literal: 1000 equal characters in a test — under the bar for arguments
+	stream(`{"command":"node -e \\"assert(f('${"a".repeat(1000)}').length===50)\\""}`);
+	assert.equal(aborts, 0, "a 1000-character literal is not a loop in a call");
+	stream(`{"command":"node -e \\"eq(f('${"ß".repeat(3)}'),'${"s".repeat(20000)}`);
+	assert.equal(aborts, 1, "the runaway is cut");
+	assert.match(g.takeSteer() ?? "", /tool call/);
+	assert.equal((entries[0] as { where?: string }).where, "call");
+});
+
 test("the steer names what was repeated, shortened", () => {
 	const s = repeatSteer(1, "Let me re-check the test ".repeat(20));
 	assert.match(s, /repeat/i);

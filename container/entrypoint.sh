@@ -8,6 +8,8 @@
 # The agent image, against a server at NERD_BASE_URL (required):
 #   docker run ... nerd:agent "<task>"   the agent on the task (or NERD_TASK), headless
 #   docker run ... nerd:agent tui        Pi's interactive TUI in tmux, reached over ssh
+#   docker run ... nerd:agent hold       no Pi: a session manager starts it with
+#                                        docker exec ... nerd-pi tui|run (nerd-pi.sh)
 #
 # tui: sshd as user nerd on NERD_SSH_PORT (2222), key only (NERD_AUTHORIZED_KEYS,
 # or a file mounted at /run/nerd/authorized_keys; host keys on the /ssh volume).
@@ -28,6 +30,7 @@
 #   NERD_MODEL_ALIAS    the model's name on the server (bonsai2-<variant>, or the file's)
 #   NERD_CTX            context tokens (65536)        NERD_KV     KV cache type (q4_0)
 #   NERD_NGL            layers on the GPU (99)        NERD_SLOTS  parallel slots (1)
+#   NERD_CACHE_RAM      prompt cache in host RAM, MiB (4096; 0 turns it off)
 #   NERD_LLAMA_ARGS     extra llama-server arguments, word-split
 #   NERD_LLAMA_PORT     llama-server's port (8080; the older name NERD_PORT works too)
 #   NERD_HOST           llama-server's address (the image sets 0.0.0.0)
@@ -183,6 +186,17 @@ mode=task
 if [ "${1:-}" = tui ]; then
   mode=tui
   start_sshd
+elif [ "${1:-}" = hold ]; then
+  # A session manager (agora) starts Pi itself: `docker exec -it <c> nerd-pi tui`
+  # or `nerd-pi run "<task>"` (container/nerd-pi.sh). Here only what Pi needs
+  # around it, then the container holds until it is stopped. No sshd, no wait
+  # for the server: nerd-pi reports a missing one.
+  start_searxng
+  say "holding; Pi is started with: docker exec -it <container> nerd-pi tui"
+  trap 'exit 143' TERM INT
+  sleep infinity &
+  wait $!
+  exit 0
 else
   task=${*:-${NERD_TASK:-}}
   [ -n "$task" ] || die 'no task: docker run ... nerd:agent "<task>" (or NERD_TASK, or "tui")'

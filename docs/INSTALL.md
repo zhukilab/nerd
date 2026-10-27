@@ -24,7 +24,7 @@ cp env.example .env                     # optional: ports, key, variant, context
 | Windows 11 + WSL2 + NVIDIA | tested (the same laptop) | Docker Engine inside a WSL2 Ubuntu distribution; see below |
 | Linux aarch64, NVIDIA GB10 (DGX Spark and similar) | tested | `CUDA_ARCH=121`, CUDA 13.0.1; GPU through CDI; detected automatically |
 | RTX 40xx (sm_89), RTX 50xx (sm_120) | should work, untested | `./UP` detects the compute capability; sm_100+ builds with CUDA 13.0.1, which needs driver 580+ |
-| macOS on Apple silicon | never run on a Mac | llama-server with Metal or MLX on the Mac, the agent in Docker Desktop: [MACOS.md](MACOS.md) |
+| macOS on Apple silicon | run on one Mac (M1 Pro, 16 GB) | llama-server with Metal or MLX on the Mac, the agent in Docker Desktop: [MACOS.md](MACOS.md) |
 | AMD or Intel GPUs | no | the container build has only PrismML's CUDA kernels |
 | no GPU (CPU only) | no, not tried | `./UP` has no CPU mode; a 27B model on a CPU would be far too slow for an agent anyway |
 
@@ -55,9 +55,12 @@ reports a mismatch.
   Plan for about 22 GB free under docker's data directory for the first build;
   `docker builder prune` frees the cache after.
 - **RAM:** 16 GB recommended, 8 GB minimum (the build, Node, Chromium).
-- **Network:** the build needs Docker Hub, GitHub (the llama.cpp fork),
-  nodejs.org and the npm registry; the first start needs huggingface.co. After
-  that nerd runs offline. `HF_TOKEN` in `.env` is sent to Hugging Face if set.
+- **Network:** the build needs Docker Hub, Ubuntu's package mirrors, GitHub
+  (the llama.cpp fork, SearXNG, the linters), nodejs.org, the npm registry,
+  PyPI (SearXNG's packages) and Playwright's download server (the headless
+  browser); the first start needs huggingface.co. After that nerd runs offline
+  (the agent's web search and the languages `nerd-get` installs need the
+  network). `HF_TOKEN` in `.env` is sent to Hugging Face if set.
 - **An ssh key pair:** you log in to the agent with a public key; the private
   key stays on the machine you connect from.
 
@@ -71,8 +74,10 @@ layer was added); GB10, 20 cores, under 4 minutes.
 derivatives), each step skipped when it is already done:
 
 1. **Docker Engine** from Docker's apt repository, with the buildx plugin (the
-   Dockerfile needs BuildKit). Docker from the distribution (`docker.io`) works
-   too if `docker buildx version` does; the script does not replace it.
+   Dockerfile needs BuildKit) and the compose plugin (`./UP` runs `docker
+   compose`, 2.24 or newer). Docker from the distribution (`docker.io`) works
+   too if `docker buildx version` and `docker compose version` do (Ubuntu's
+   `docker-buildx` and `docker-compose-v2`); the script does not replace it.
 2. **Your user in group `docker`.** Log out and in afterwards. The group is
    root-equivalent; if that is not acceptable on the machine, run `./UP` with
    sudo instead.
@@ -125,7 +130,7 @@ Things that behave differently on WSL2:
 - **The distribution stops when its last client disconnects.** WSL shuts a
   distribution down a few seconds after the last `wsl.exe` session ends, and
   the container with it. Keep one open, e.g. a Windows logon task running
-  `wsl -d <distribution> -- sleep infinity`. `--restart unless-stopped` brings
+  `wsl -d <distribution> -- sleep infinity`. The restart policy (`unless-stopped`) brings
   the container back when the distribution starts again.
 - **GPU memory overflow is silent** (the WDDM driver spills into shared
   system memory instead of failing): see

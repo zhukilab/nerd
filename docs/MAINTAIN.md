@@ -15,6 +15,8 @@ then a rebuild and the checks below. Nothing updates itself.
 | Pi, Pi packages, Playwright, undici | `agent/package.json` (exact) + `agent/package-lock.json` | Pi packages: `@sting8k/pi-vcc`, `@juicesharp/rpiv-web-tools` (`agent/src/packages.ts`) |
 | Chromium for `browse` | follows `playwright-core` | installed by Playwright's own installer |
 | the model | `container/model.sh`: `repo`, file, `size`, `sha` per variant; llama-server's arguments | used by the image and by `tools/llama-host.sh` |
+| ruff, biome (linters) | `Dockerfile`: `RUFF_VERSION`, `BIOME_VERSION`, sha256 per architecture | |
+| `nerd-get` (go, rust, uv in the home) | `container/nerd-get.sh`: `GO_VERSION`, `RUSTUP_VERSION`, `UV_VERSION`, sha256 per architecture | rustup installs Rust's current stable, not a pinned one |
 | SearXNG (web search) | `Dockerfile`: `SEARXNG_REPO`, `SEARXNG_REF` (a commit); its Python requirements are pinned by SearXNG itself | settings: `container/searxng.yml`; runs on the agent image's python3 |
 
 ## Rebuild
@@ -35,7 +37,7 @@ recompiles llama-server (4-8 minutes) and replaces the server's container.
 
 | check | how | needs |
 |---|---|---|
-| agent unit tests | `cd agent && npm ci && npm test` | Node ≥ 22.19 |
+| agent unit tests | `cd agent && npm ci && npm test` | Node ≥ 22.19; tests that need biome, ruff, shellcheck, cargo or fd skip without them |
 | agent types | `cd agent && npm run typecheck` | |
 | acceptance checker | `node --test acceptance/test/*.test.mjs`; `acceptance/selftest.sh <out>` | docker for the self-test |
 | pkill/pgrep guard | `docker run --rm --entrypoint /opt/nerd/test-pkill-guard.sh nerd:agent` | the agent image |
@@ -136,6 +138,16 @@ path, never with `pi install`. Their peer range must include the Pi version
 several compactions. pi-vcc writes its config to `PI_VCC_CONFIG_PATH`, which
 nerd points into Pi's agent directory and rewrites on start.
 
+**Patches** (`agent/patches/`): `npm ci`'s postinstall (`patches/apply.mjs`)
+changes one exact piece of a package's file in `node_modules`, only if the file
+has the sha256 of the pinned version. pi-vcc 0.8.1 is patched: only system
+messages before the last user turn count as no anchor, so a compaction within
+the task's turn cuts to pi-vcc's budget instead of summarizing just the system
+message ([`agent/patches/pi-vcc.mjs`](../agent/patches/pi-vcc.mjs), test
+`agent/test/pi-vcc-patch.test.ts`). A new pi-vcc version fails the install
+until the patch is looked at again: dropped if upstream fixed it, or remade
+with the new file's sha256.
+
 `playwright-core` decides which Chromium the image downloads. After changing
 its version, rebuild and run `test-browse.sh` in the image.
 
@@ -198,7 +210,8 @@ Windows' Task Manager the GPU's "Shared GPU memory" grows; `dmesg` in WSL may
 show `dxgkio_make_resident: Ioctl failed: -12`. Only when shared memory is
 exhausted too does it fail (`cudaMalloc failed`). Fix: a smaller context
 (`NERD_CTX=32768`), close other programs that use the GPU (browsers, a second
-nerd), keep `--cache-ram 0` (the entrypoint's default: llama-server's prompt
-cache keeps KV snapshots in GPU memory, about 1.3 GiB each at 32K).
+nerd). If the overflow comes with the prompt cache (`NERD_CACHE_RAM`, 4096 MiB by
+default; today's build keeps its snapshots in host RAM, an older one put them on
+the card), `NERD_CACHE_RAM=0` turns it off.
 `tools/check-prerequisites.sh` estimates the need for the configured variant
 and context.

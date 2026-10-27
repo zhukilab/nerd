@@ -72,10 +72,12 @@ the line that is there keeps the file readable.
 | `NERD_LLAMA` | `auto` | `container` (Linux), `host` (macOS: llama-server on the machine, MACOS.md) or `mlx` (macOS: mlx-vlm's server, the model in MLX format, MACOS.md) |
 | `NERD_MODEL_VARIANT` | `q1` | `q1` or `q2` |
 | `NERD_MODEL_GGUF` | none | another GGUF: `hf:<owner>/<repo>/<file>.gguf[@rev]` (downloaded, sha256 checked; `NERD_MODEL_SHA256` pins it) or a file already in the models volume; named `NERD_MODEL_ALIAS` |
-| `NERD_MLX_MODEL` | Bonsai 2, MLX 2-bit, pinned | `NERD_LLAMA=mlx`: `<owner>/<repo>[@rev]` or a directory |
+| `NERD_MLX_MODEL` | Bonsai 2, MLX 2-bit, pinned | `NERD_LLAMA=mlx`: `<owner>/<repo>[@rev]` or a directory; `NERD_MLX_APC=0` turns off the server's prefix cache |
+| `NERD_LLAMA_URL` | `http://<name>-llm:<port>/v1` | the server as the agent's container reaches it (`127.0.0.1` with `NERD_NETWORK`, `host.docker.internal` with `host` or `mlx`) |
 | `NERD_LLAMA_HOST`, `NERD_HOST_DIR`, `NERD_MLX_PYTHON` | `127.0.0.1`, `~/.nerd`, found | macOS only: the server's address, its directory, the Python for MLX (MACOS.md) |
 | `NERD_SAMPLING` | none (mlx: the model card's) | sampling fields added to every request, e.g. `temperature=0.7,top_p=0.8,top_k=20` |
 | `NERD_CTX` | `65536` | context in tokens |
+| `NERD_SUDO` | `1` | `0`: the agent's user has no sudo in its container |
 | `NERD_SSH_PORT` | `2222` | ssh into the agent's terminal |
 | `NERD_APP_PORT` | `8000` | where the agent serves what it builds |
 | `NERD_LLAMA_PORT` | `8080` | llama-server's port on `<name>-net` (not published), or on the Mac |
@@ -94,10 +96,10 @@ the line that is there keeps the file readable.
 Anything else for a container goes into `compose.override.yaml` next to
 `compose.yaml` (git-ignored); `./UP` adds it when it exists, and compose
 merges it over the rest. The agent's own variables (`NERD_THINKING`,
-`NERD_VERIFY_N`, `NERD_SPEC_CHECK`, `NERD_BASH_TIMEOUT`, `NERD_PLAN_STEP`, `NERD_PLAN_LINT`, `NERD_PLAN_MAX_TOKENS`, `NERD_REPEAT_GUARD`,
-`NERD_LOOP_GUARD_N`, `NERD_FETCH_GUARD`, `NERD_LINT`, `NERD_DONE_GATE`, `NERD_RALPH`, `NERD_BASH_MAX_CHARS`, `NERD_ANCHORS`, `NERD_WEB_NOTES`, `NERD_RULES_FILE`, `NERD_SUMMARY_GOAL`, `NERD_VCC_RECALL`, `NERD_PI_VCC` ...; the README's "Settings" section and
+`NERD_VERIFY_N`, `NERD_SPEC_CHECK`, `NERD_BASH_TIMEOUT`, `NERD_PLAN_STEP`, `NERD_PLAN_LINT`, `NERD_PLAN_MAX_TOKENS`, `NERD_PLAN_MAX_MINUTES`, `NERD_WORK_MAX_MINUTES`, `NERD_CALC`, `NERD_STEPS`, `NERD_REPEAT_GUARD`,
+`NERD_LOOP_GUARD_N`, `NERD_FETCH_GUARD`, `NERD_LINT`, `NERD_DONE_GATE`, `NERD_RALPH`, `NERD_BASH_MAX_CHARS`, `NERD_ANCHORS`, `NERD_WEB_NOTES`, `NERD_RULES_FILE`, `NERD_SUMMARY_GOAL`, `NERD_THINKING_KEEP`, `NERD_VCC_RECALL`, `NERD_PI_VCC`, `NERD_SCOUT` ...; the README's "Settings" section and
 the header of `agent/src/run.ts`), the server's (`NERD_LLAMA_ARGS`,
-`NERD_KV`), a proxy, one GPU of several:
+`NERD_KV`, `NERD_CACHE_RAM`), a proxy, one GPU of several:
 
 ```yaml
 services:
@@ -152,7 +154,10 @@ ssh -p 2222 nerd@<host>        # attaches to the agent's terminal (Pi in tmux)
 Type the task and press Enter. The first message of a conversation is a new
 task: the agent first lists its assumptions and questions and writes a plan;
 answer the questions, or say "your call". Anything typed while it works is
-queued as a remark and delivered after its current step.
+queued as a remark and delivered after its current step. When the work ends,
+the harness checks the committed project in a clean clone, and runs the
+plan's DONE WHEN check commands there (the Ralph loop, on by default;
+`NERD_RALPH=0` off): a failure goes back to the model as a new round.
 
 **Your rules for every project.** `/remember <text>` keeps a rule ("commit
 messages in English, imperative", "serve on port 8123 by default") in
@@ -212,12 +217,42 @@ docker run --rm --network nerd-net -e NERD_BASE_URL=http://nerd-llm:8080/v1 \
 Without `./UP`, start the server first: README, "Running the containers by
 hand".
 
-The exit code is 0 when the agent finished with a final answer. Questions in
+The exit code is 0 when the agent finished with a final answer, 1 when it did
+not, 2 for bad arguments; SIGTERM (`docker stop`) and SIGINT abort the turn and
+end the run cleanly, 143 and 130. Questions in
 the plan step are answered with `NERD_PLAN_ANSWER` (default «на твоё
 усмотрение», Russian for "your call").
 The event log goes to `/logs` (mount it to keep it).
 [`acceptance/check.sh`](../acceptance/check.sh) checks a result against the
 acceptance criteria of the reference task; see the README.
+
+## Under a session manager: `hold`
+
+A program that runs agents for you (starts and stops sessions, carries
+messages to them) can start Pi itself instead of the container doing it. In
+`hold` mode the agent's container runs only SearXNG, no Pi and no sshd, and
+waits; the manager runs Pi with `docker exec`:
+
+```sh
+docker exec -it <name> nerd-pi tui [--continue]   # Pi's TUI in /workspace, sessions in /logs/sessions
+docker exec <name> nerd-pi run "<task>"           # the headless run, event log /logs/events-<time>.jsonl
+```
+
+Exit codes are the headless run's (above). Stop a `run` with SIGTERM to its
+process inside the container (`docker exec <name> kill -TERM <pid>`), not to
+the `docker exec` client; stop the TUI as a person would, with `/quit` (Escape
+first if it is busy, then Ctrl-C to clear the editor).
+
+`NERD_AGORA_CHANNEL=<socket path in the container>` connects Pi to the
+manager's channel, a unix socket in a directory the manager mounts: Pi reports
+its session's events (start, each prompt and tool call, end of a turn,
+compaction, context used, end), takes the manager's letters as messages, and
+gets a `send_letter` tool to write back. The manager keeps any account or
+token itself; nothing of it enters the container. Without the variable none of
+this loads ([`agent/src/agora-channel.ts`](../agent/src/agora-channel.ts)).
+A letter reaches the model as a message from its operator, so whoever the
+manager lets write to the agent can direct it as you can, with everything the
+container gives it: decide that in the manager, not in the container.
 
 ## Logs
 
@@ -228,6 +263,8 @@ acceptance criteria of the reference task; see the README.
 | `docker logs <name>` | the agent's entrypoint: host key fingerprint, waiting for the server |
 | `/logs/sessions/` | conversations (Pi's session files) |
 | `/logs/sshd.log` | logins |
+| `/logs/searxng.log` | the web search behind `web_search` |
+| `/logs/events-*.jsonl` | a headless run's event log |
 | `/logs/verifier-*.jsonl` | the verifier's decisions, when `NERD_VERIFY_N` > 1 |
 
 `docker exec <name> ls /logs`, or log in and look. Problems:

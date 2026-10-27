@@ -7,19 +7,27 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { bashDescription, timeoutMessage } from "../src/bash-tool.ts";
-import { operatorPrompt, SYSTEM_PROMPT, systemPrompt, WEB_PROMPT } from "../src/local.ts";
+import { CALC_PROMPT, calcOn, operatorPrompt, SYSTEM_PROMPT, systemPrompt, WEB_PROMPT } from "../src/local.ts";
 import { stripProviderParam, webToolsConfig } from "../src/packages.ts";
 import { saveWebNote, webNoteName, webNotes, webNotesOn } from "../src/web-notes.ts";
 import { tempDir } from "./tmp.ts";
 
 test("prompts: the web lines are in the system prompt when the web tools are on, and only then", () => {
-	assert.equal(systemPrompt(false), SYSTEM_PROMPT);
-	const p = systemPrompt(true);
+	assert.equal(systemPrompt(false, false), SYSTEM_PROMPT);
+	const p = systemPrompt(true, false);
 	assert.ok(p.startsWith(SYSTEM_PROMPT) && p.endsWith(WEB_PROMPT));
 	assert.match(p, /web_search, then web_fetch/);
 	assert.match(p, /show to the user \(in the README or on the page\) as the source states them, with its URL/);
 	assert.doesNotMatch(SYSTEM_PROMPT, /Tools: read, bash, edit, write/, "no tools line that is wrong in the plan turn");
 	assert.deepEqual(webToolsConfig(), { provider: "searxng" }, "no guidance lines Pi would drop anyway");
+});
+
+test("prompts: NERD_CALC=1 adds the rule that every calculation is a program run", () => {
+	assert.equal(systemPrompt(false, false), SYSTEM_PROMPT);
+	assert.ok(systemPrompt(true, true).endsWith(CALC_PROMPT));
+	assert.match(CALC_PROMPT, /even 1\+2, is done by a program you write and run/);
+	assert.equal(calcOn({}), false);
+	assert.equal(calcOn({ NERD_CALC: "1" }), true);
 });
 
 test("prompts: the port line says to listen on process.env.PORT", () => {

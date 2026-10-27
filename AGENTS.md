@@ -8,11 +8,14 @@ https://github.com/zhukilab/nerd.
 
 ```
 UP DOWN STATUS          deploy: bash, settings from .env (template env.example)
+compose*.yaml           the two containers for docker compose, and the overlays UP adds
 tools/                  check-prerequisites.sh, install-prerequisites.sh, lib.sh (shared),
-                        llama-host.sh, mlx-host.sh (the server on a Mac)
-Dockerfile              two targets: server (llama.cpp fork build, CUDA) and agent (Node, Pi, Chromium, sshd)
+                        llama-host.sh, mlx-host.sh (the server on a Mac), report.sh (an archive to send)
+Dockerfile              two targets: server (llama.cpp fork build, CUDA) and agent (Node, Pi, Chromium,
+                        sshd, SearXNG, linters)
 container/              entrypoint.sh (both images' modes), model.sh (model pins, server arguments),
-                        sshd/tmux config, pkill guard, browse wrapper, in-image tests
+                        sshd/tmux config, pkill guard, browse wrapper, nerd-get, nerd-rs-eval,
+                        SearXNG settings, in-image tests
 agent/                  the agent: TypeScript run directly by Node (no build step)
   src/                  see docs/ARCHITECTURE.md for each file
   test/                 node:test unit tests
@@ -57,7 +60,7 @@ start.
 3. **Stock llama.cpp is never a substitute** for the fork: with this model it
    fails or, worse, silently produces garbage.
 4. **The agent's container is the sandbox.** The agent runs as uid 1000, not
-   root; do not add capabilities, host mounts beyond the volumes, or
+   root (with `sudo` inside the container; `NERD_SUDO=0` drops it); do not add capabilities, host mounts beyond the volumes, or
    `--privileged`. The server stays in its own container (or on the Mac): the
    agent reaches it only over HTTP; do not move it back in.
 5. **Mechanism over prompt.** When the model keeps failing an instruction, fix

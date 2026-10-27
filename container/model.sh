@@ -78,10 +78,13 @@ nerd_hf_meta() {
 # before --host/--port): context, KV cache type, all layers on the GPU, flash
 # attention, one slot, the chat template from the GGUF. Call after
 # nerd_model_select (the alias).
-# --cache-ram 0: llama-server's prompt cache keeps KV snapshots of earlier
-# prompts in device memory (1.3 GiB each at 32K); one of them on top of
-# Bonsai 2 at 32K overflows an 8 GB card, silently on WDDM drivers.
+# --cache-ram (NERD_CACHE_RAM, MiB): llama-server's prompt cache keeps snapshots
+# of earlier prompts in host RAM, so a conversation that comes back after another
+# one used the slot (a subagent, the other half of a pair, a judge) is not
+# processed again. Measured on an 8 GB card under WSL (2026-10-24): a 61K-token
+# context back after a 5K one in 4 s against 4 min, GPU memory unchanged. 0 turns
+# it off (it was off until then: an older build overflowed the card with it).
 nerd_server_args() {
   echo "--alias ${alias:-bonsai2-${NERD_MODEL_VARIANT:-q1}} -c ${NERD_CTX:-65536} -ctk ${NERD_KV:-q4_0} -ctv ${NERD_KV:-q4_0}" \
-    "-ngl ${NERD_NGL:-99} -fa on -np ${NERD_SLOTS:-1} --cache-ram 0 --jinja"
+    "-ngl ${NERD_NGL:-99} -fa on -np ${NERD_SLOTS:-1} --cache-ram ${NERD_CACHE_RAM:-4096} --jinja"
 }

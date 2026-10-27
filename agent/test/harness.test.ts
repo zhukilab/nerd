@@ -5,7 +5,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
@@ -15,7 +15,7 @@ import { type HarnessHooks, harness } from "../src/harness.ts";
 import { headlessSession } from "../src/headless.ts";
 import { modelDefinition, settingsFor } from "../src/local.ts";
 import { LoopGuard, loopGuardN } from "../src/loop-guard.ts";
-import { DEFAULT_PLAN_MAX_CALLS, parsePlanReply, planFileText, planMaxCalls } from "../src/plan-step.ts";
+import { DEFAULT_PLAN_MAX_CALLS, parsePlanReply, planFileText, planMaxCalls, savePlan } from "../src/plan-step.ts";
 import { remember, writeRules } from "../src/rules.ts";
 import { tempDir } from "./tmp.ts";
 
@@ -68,6 +68,29 @@ test("plan file: the task quoted, assumptions, questions with the answer, steps 
 	assert.ok(t.includes("## Done when\n\n- b"));
 });
 
+test("savePlan in a new repository: the given project is committed first, without node_modules and target", () => {
+	const d = tempDir("save-plan-");
+	mkdirSync(join(d, "lib"));
+	mkdirSync(join(d, "node_modules"));
+	writeFileSync(join(d, "lib", "a.js"), "export {};\n");
+	writeFileSync(join(d, "node_modules", "x.js"), "x\n");
+	assert.match(savePlan(d, "# Plan\n"), /committed/);
+	const git = (...a: string[]) => execFileSync("git", a, { cwd: d }).toString().trim();
+	assert.deepEqual(git("log", "--format=%s").split("\n"), ["Plan", "Project as given"]);
+	assert.equal(git("show", "--name-only", "--format=", "HEAD~1"), "lib/a.js");
+	assert.equal(git("status", "--porcelain"), "?? node_modules/");
+});
+
+test("savePlan in an existing repository: only PLAN.md is committed, the rest is left as it was", () => {
+	const d = tempDir("save-plan-");
+	execFileSync("git", ["init", "-q"], { cwd: d });
+	writeFileSync(join(d, "work.js"), "1\n");
+	savePlan(d, "# Plan\n");
+	const git = (...a: string[]) => execFileSync("git", a, { cwd: d }).toString().trim();
+	assert.equal(git("log", "--format=%s"), "Plan");
+	assert.equal(git("status", "--porcelain"), "?? work.js");
+});
+
 test("loop guard: N same calls with the same result among the recent ones", () => {
 	const g = new LoopGuard(3);
 	assert.equal(g.record("bash", { command: "grep -c 19 f" }, "0"), undefined);
@@ -112,7 +135,8 @@ test("plan step budget: NERD_PLAN_MAX_CALLS from the environment, 0 = no budget,
 
 // --- in a headless session against a scripted server ------------------------
 
-type Reply = { text?: string; call?: { name: string; args: Record<string, unknown> }; stream?: string[] };
+/** `think`: reasoning_content streamed before the reply, as llama-server sends a model's thinking. */
+type Reply = { text?: string; call?: { name: string; args: Record<string, unknown> }; stream?: string[]; think?: string };
 interface Seen {
 	tools: string[];
 	lastUser: string;
@@ -120,6 +144,8 @@ interface Seen {
 	/** The system message(s), and every message's text in order. */
 	system: string;
 	all: string;
+	/** reasoning_content of the assistant messages sent back, in order. */
+	reasoning: string[];
 }
 
 /** An OpenAI-compatible streaming server that answers from `script` and records each request. */
@@ -131,7 +157,7 @@ async function scriptedServer(script: (n: number, seen: Seen) => Reply) {
 		req.on("end", () => {
 			const r = JSON.parse(body) as {
 				tools?: { function: { name: string } }[];
-				messages: { role: string; content: unknown }[];
+				messages: { role: string; content: unknown; reasoning_content?: string }[];
 			};
 			const text = (m?: { content: unknown }) =>
 				typeof m?.content === "string"
@@ -145,6 +171,7 @@ async function scriptedServer(script: (n: number, seen: Seen) => Reply) {
 				lastTool: text(r.messages.filter((m) => m.role === "tool").at(-1)),
 				system: r.messages.filter((m) => m.role === "system" || m.role === "developer").map(text).join("\n"),
 				all: r.messages.map(text).join("\n"),
+				reasoning: r.messages.flatMap((m) => (m.role === "assistant" && m.reasoning_content ? [m.reasoning_content] : [])),
 			};
 			seen.push(s);
 			const reply = script(seen.length, s);
@@ -172,6 +199,7 @@ async function scriptedServer(script: (n: number, seen: Seen) => Reply) {
 				next();
 				return;
 			}
+			if (reply.think) chunk({ role: "assistant", reasoning_content: reply.think }, null);
 			if (reply.call) {
 				chunk(
 					{
@@ -250,7 +278,7 @@ test("headless: questions get NERD_PLAN_ANSWER, the final plan is committed, the
 		][n - 1] ?? { text: "extra" },
 	);
 	try {
-		const cwd = await runHeadless(srv.url, "Make hello.txt", { NERD_PLAN_ANSWER: "euros", NERD_DONE_GATE: "0" });
+		const cwd = await runHeadless(srv.url, "Make hello.txt", { NERD_PLAN_ANSWER: "euros", NERD_DONE_GATE: "0", NERD_RALPH: "0" });
 		assert.equal(srv.seen.length, 4);
 		assert.deepEqual(srv.seen[0].tools, READ_ONLY, "plan turn: reading only");
 		assert.match(srv.seen[0].lastUser, /\[harness\] A new task/);
@@ -280,7 +308,7 @@ test("with an operator: questions end the turn; the answer leads to the final pl
 		][n - 1] ?? { text: "extra" },
 	);
 	try {
-		const cwd = await runHeadless(srv.url, "Make a page", {}, true, ["rubles", "make it blue"]);
+		const cwd = await runHeadless(srv.url, "Make a page", { NERD_RALPH: "0" }, true, ["rubles", "make it blue"]);
 		assert.equal(srv.seen.length, 4, "the questions turn ends: no automatic answer");
 		assert.deepEqual(srv.seen[1].tools, READ_ONLY, "the answer's turn: final plan, reading only");
 		assert.match(srv.seen[1].lastUser, /final plan in the same form/);
@@ -298,7 +326,7 @@ test("headless: no questions — the plan is saved and the work starts in the sa
 		[{ text: "QUESTIONS\nnone\nPLAN\n1. say hi\nDONE WHEN\n- said" }, { text: "hi" }][n - 1] ?? { text: "extra" },
 	);
 	try {
-		const cwd = await runHeadless(srv.url, "Say hi", {});
+		const cwd = await runHeadless(srv.url, "Say hi", { NERD_RALPH: "0" });
 		assert.equal(srv.seen.length, 2);
 		assert.deepEqual(srv.seen[0].tools, READ_ONLY);
 		assert.deepEqual(srv.seen[1].tools, WORK);
@@ -315,13 +343,33 @@ test("headless: a plan step that only reads is cut at NERD_PLAN_MAX_CALLS — no
 		s.tools.length ? (s.tools.includes("write") ? { text: "done" } : { call: { name: "ls", args: { path: `.${"/".repeat(n)}` } } }) : { text: "PLAN\n1. write it — check: cat\nDONE WHEN\n- it is there" },
 	);
 	try {
-		const cwd = await runHeadless(srv.url, "Make a page", { NERD_PLAN_MAX_CALLS: "3" });
+		const cwd = await runHeadless(srv.url, "Make a page", { NERD_PLAN_MAX_CALLS: "3", NERD_RALPH: "0" });
 		assert.deepEqual(srv.seen.slice(0, 3).map((s) => s.tools), [READ_ONLY, READ_ONLY, READ_ONLY], "three calls in the plan step");
 		assert.deepEqual(srv.seen[3].tools, [], "after the 3rd call: no tools");
 		assert.match(srv.seen[3].lastTool, /budget is spent and the tools are put away/);
 		assert.deepEqual(srv.seen[4].tools, WORK, "the plan is taken, the work has its tools");
 		assert.equal(srv.seen.length, 5);
 		assert.ok(readFileSync(join(cwd, "PLAN.md"), "utf8").includes("1. write it"));
+	} finally {
+		srv.close();
+	}
+});
+
+test("headless: NERD_PLAN_CALC=1 — calc in the plan step only, its note in the prompt; a check's number not printed by it goes back (094)", async () => {
+	const check = (v: number) => `PLAN\n1. write tax.js — check: \`npm test\`\nDONE WHEN\n- tax over the threshold — check: \`node -e "import('./tax.js').then(m=>process.exit(m.tax(80000)===${v}?0:1))"\``;
+	const srv = await scriptedServer((n) =>
+		[{ call: { name: "calc", args: { program: "print((80000 - 50000) * 0.1)" } } }, { text: check(3001) }, { text: check(3000) }, { text: "done" }][n - 1] ?? { text: "extra" },
+	);
+	try {
+		const env = { NERD_PLAN_CALC: "1", NERD_PLAN_CALC_NOTE: "Compute every number with calc.", NERD_PLAN_CALC_LINT: "1", NERD_RALPH: "1", NERD_DONE_GATE: "0" };
+		const cwd = await runHeadless(srv.url, "Tax is 10% on the part over 50 000.", env);
+		assert.deepEqual(srv.seen[0].tools, [...READ_ONLY, "calc"].sort(), "plan turn: reading and calc");
+		assert.match(srv.seen[0].lastUser, /DONE WHEN[\s\S]*\n\nCompute every number with calc\.$/);
+		assert.match(srv.seen[1].lastTool, /^3000\.0\n?$/, "calc's output comes back");
+		assert.match(srv.seen[2].lastUser, /plan-lint found problems[\s\S]*the number `3001`/);
+		assert.deepEqual(srv.seen[3].tools, WORK, "the work has no calc");
+		assert.equal(srv.seen.length, 4);
+		assert.match(readFileSync(join(cwd, "PLAN.md"), "utf8"), /===3000\?/);
 	} finally {
 		srv.close();
 	}
@@ -383,6 +431,23 @@ test("headless: NERD_PLAN_STEP=0 goes straight to work; the loop guard notes the
 	} finally {
 		srv.close();
 	}
+});
+
+test("thinking keep: the server gets back the last N replies' thinking, none by default, all of it with 'all'", async () => {
+	const script = (n: number): Reply =>
+		n <= 4 ? { think: `thought ${n}`, call: { name: "bash", args: { command: `echo ${n}` } } } : { think: "last", text: "done" };
+	const sentBack = async (env: NodeJS.ProcessEnv) => {
+		const srv = await scriptedServer(script);
+		try {
+			await runHeadless(srv.url, "Echo four numbers", { NERD_PLAN_STEP: "0", ...env });
+			return srv.seen[4].reasoning;
+		} finally {
+			srv.close();
+		}
+	};
+	assert.deepEqual(await sentBack({ NERD_THINKING_KEEP: "all" }), ["thought 1", "thought 2", "thought 3", "thought 4"], "Pi sends all of it back");
+	assert.deepEqual(await sentBack({ NERD_THINKING_KEEP: "2" }), ["thought 3", "thought 4"]);
+	assert.deepEqual(await sentBack({}), [], "the default: none");
 });
 
 test("pi-vcc (default): compaction asks no model; the summary's goal is the task; no vcc_recall offered or named", async () => {
@@ -519,6 +584,64 @@ test("repeat guard (process ticket 071): a looping reply is cut, and its steer g
 		);
 		assert.equal(srv.seen.length, 2, "the loop was cut, the steer was one more request");
 		assert.match(srv.seen[1].lastUser, /repeated the same text/);
+	} finally {
+		srv.close();
+	}
+});
+
+// The scout (scout.ts, process ticket 042): a helper session of the same model with reading tools
+// only and its own system prompt; its findings go to notes/scout/NNN.md, the caller gets the path.
+const SCOUTING = /You are a scout/;
+
+test("scout (NERD_SCOUT=1): the helper reads in its own session, the findings go to a file, the caller gets the path", async () => {
+	const srv = await scriptedServer((_n, s) => {
+		if (SCOUTING.test(s.system)) {
+			return s.lastTool ? { text: "a.txt greets the world (a.txt:1)." } : { call: { name: "read", args: { path: "a.txt" } } };
+		}
+		return s.lastTool ? { text: "Done." } : { call: { name: "scout", args: { question: "What does a.txt say?" } } };
+	});
+	try {
+		const cwd = await runHeadless(srv.url, "Tell me about a.txt", { NERD_SCOUT: "1", NERD_PLAN_STEP: "0", NERD_RALPH: "0", NERD_DONE_GATE: "0" }, false, [], undefined, (d) =>
+			writeFileSync(join(d, "a.txt"), "hello world\n"),
+		);
+		assert.equal(srv.seen.length, 4);
+		assert.ok(srv.seen[0].tools.includes("scout"), "the work has the scout");
+		assert.match(srv.seen[1].system, SCOUTING);
+		assert.deepEqual(srv.seen[1].tools, ["find", "grep", "ls", "read"], "the helper only reads");
+		assert.equal(srv.seen[1].lastUser, "What does a.txt say?");
+		assert.doesNotMatch(srv.seen[1].all, /Tell me about a\.txt/, "the helper does not see the caller's context");
+		assert.match(srv.seen[2].lastTool, /hello world/);
+		assert.match(srv.seen[3].lastTool, /^Findings in notes\/scout\/001\.md \(1 tool calls\):\n\na\.txt greets the world/);
+		assert.doesNotMatch(srv.seen[3].all, /hello world/, "what the helper read stays out of the caller's context");
+		assert.equal(readFileSync(join(cwd, "notes/scout/001.md"), "utf8"), "# What does a.txt say?\n\na.txt greets the world (a.txt:1).\n");
+	} finally {
+		srv.close();
+	}
+});
+
+test("scout: past NERD_SCOUT_MAX_CALLS the helper's tools go away and it is told to write its findings", async () => {
+	const srv = await scriptedServer((_n, s) => {
+		if (SCOUTING.test(s.system)) return s.tools.length ? { call: { name: "ls", args: {} } } : { text: "Only a.txt is there." };
+		return s.lastTool ? { text: "Done." } : { call: { name: "scout", args: { question: "What is here?" } } };
+	});
+	try {
+		await runHeadless(srv.url, "Look around", { NERD_SCOUT: "1", NERD_SCOUT_MAX_CALLS: "2", NERD_PLAN_STEP: "0", NERD_RALPH: "0", NERD_DONE_GATE: "0" });
+		const helper = srv.seen.filter((s) => SCOUTING.test(s.system));
+		assert.equal(helper.length, 3, "two calls, then the findings");
+		assert.deepEqual(helper[2].tools, [], "no tools after the budget");
+		assert.match(helper[2].all, /budget for reading is used up/);
+		assert.match(srv.seen.at(-1)!.lastTool, /2 tool calls; stopped by its call budget/);
+	} finally {
+		srv.close();
+	}
+});
+
+test("scout: not offered without NERD_SCOUT=1, nor with an operator (TUI)", async () => {
+	const srv = await scriptedServer(() => ({ text: "hi" }));
+	try {
+		await runHeadless(srv.url, "Say hi", { NERD_PLAN_STEP: "0", NERD_RALPH: "0", NERD_DONE_GATE: "0" });
+		await runHeadless(srv.url, "Say hi", { NERD_SCOUT: "1", NERD_PLAN_STEP: "0", NERD_RALPH: "0", NERD_DONE_GATE: "0" }, true);
+		assert.ok(srv.seen.every((s) => !s.tools.includes("scout")));
 	} finally {
 		srv.close();
 	}

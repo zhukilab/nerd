@@ -41,9 +41,20 @@ When the task is done and verified, reply with a short summary and stop.`;
 export const WEB_PROMPT = `Facts from outside your knowledge (rules of a game, a format, a library's API): web_search, then web_fetch a result and work from what the page says; a long page is cut, the rest is in the file named at its end.
 Rules you took from the web, show to the user (in the README or on the page) as the source states them, with its URL.`;
 
-/** The system prompt: SYSTEM_PROMPT, and WEB_PROMPT when the web tools are on. */
-export function systemPrompt(web: boolean): string {
-	return web ? `${SYSTEM_PROMPT}\n${WEB_PROMPT}` : SYSTEM_PROMPT;
+// Process ticket 090, stage 3 (operator, 2026-10-17): 11-32% of Bonsai's thinking in the tax
+// runs was arithmetic done by hand — 20-30 minutes of long multiplication in one reply, with the
+// shell at hand — and its hand-made expected values were wrong more than once. NERD_CALC=1:
+// this rule, and the guard that cuts a reply computing by hand (calc-guard.ts).
+export const CALC_PROMPT =
+	"Every calculation, even 1+2, is done by a program you write and run (python3, or the project's language: `node -e`, `nerd-rs-eval`), never in your head or in your reasoning. Expected values for checks are computed by a program written from the task's text, not from your code.";
+
+export function calcOn(env: Record<string, string | undefined> = process.env): boolean {
+	return env.NERD_CALC === "1";
+}
+
+/** The system prompt: SYSTEM_PROMPT, WEB_PROMPT when the web tools are on, CALC_PROMPT with NERD_CALC=1. */
+export function systemPrompt(web: boolean, calc = calcOn()): string {
+	return [SYSTEM_PROMPT, web ? WEB_PROMPT : "", calc ? CALC_PROMPT : ""].filter(Boolean).join("\n");
 }
 
 /** Appended in the interactive mode, where a person is on the other end. */
@@ -131,15 +142,34 @@ export async function localModel(): Promise<LocalModel> {
 	};
 }
 
+/**
+ * The planner of the ping-pong pair (pair.ts), from NERD_PLAN_BASE_URL and
+ * NERD_PLAN_MODEL; undefined without it. A llama-server: its window from /props.
+ */
+export async function plannerModel(env: Record<string, string | undefined> = process.env): Promise<LocalModel | undefined> {
+	const baseUrl = env.NERD_PLAN_BASE_URL;
+	if (!baseUrl) return undefined;
+	return {
+		baseUrl,
+		ctx: Number((await servedContext(baseUrl)) || 16384),
+		thinking: (env.NERD_THINKING ?? "off") as Thinking,
+		id: env.NERD_PLAN_MODEL || (await servedModelId(baseUrl)),
+		verifyN: 1,
+		server: "llama",
+	};
+}
+
 /** Pi's model definition of the local server (models.json entry or registerProvider model). */
 export function modelDefinition(m: LocalModel) {
 	return {
 		id: m.id,
 		name: m.id,
 		contextWindow: m.ctx,
-		// Also bounds the summary (settingsFor): at least 0.8 * reserveTokens
-		// (a quarter of the window), so it is never the tighter of the two caps.
-		maxTokens: Math.max(8192, Math.min(16384, Math.floor(m.ctx / 4))),
+		// The whole window, as Pi's own llama.cpp extension declares it: Pi clamps
+		// each request to what is left of the window (clampMaxTokensToContext).
+		// A fixed 16K would cut thinking replies (ticket 077). The summary stays
+		// bounded by 0.8 * reserveTokens (settingsFor), now always the tighter cap.
+		maxTokens: m.ctx,
 		// Always declared: Pi sends chat_template_kwargs.enable_thinking only
 		// for a reasoning model with a thinking format, and Bonsai 2's template
 		// thinks by default. Without this, "off" still thought on every step

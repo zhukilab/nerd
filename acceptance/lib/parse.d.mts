@@ -2,6 +2,7 @@
 // parse.mjs: the checker and the gate share one rule for the start command.
 export const START_HEADING: RegExp;
 export function readmeCommands(md: string, headingRe: RegExp): string[];
+export function readmeSections(md: string): { heading: string; level: number; code: string[]; text: string }[];
 export function startCommand(
 	pkg: { scripts?: Record<string, string> } | null | undefined,
 	readme: string | null,

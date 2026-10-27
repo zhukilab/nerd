@@ -15,19 +15,25 @@
 //   .html .htm  each inline <script> without src, the same way
 //   .py       ruff: syntax errors and undefined names (E9, F63, F7, F82x)
 //   .sh .bash, or a #!...sh first line  shellcheck -S error
-// A linter missing from PATH is skipped (the image has all three).
+//   .rs       cargo check of its crate, errors only (lintRust; after an edit only)
+// A linter missing from PATH is skipped (the image has the first three; cargo comes with
+// nerd-get rust).
 // NERD_LINT=0 turns it off.
 
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, mkdtempSync, openSync, readFileSync, readSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, extname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { cargoErrors, crateRoot } from "./cargo.ts";
 
 const BIOME_CONFIG = join(dirname(fileURLToPath(import.meta.url)), "lint");
 const MAX_LINES = 15;
 const TIMEOUT_MS = 20_000;
+/** The name in biome noUndeclaredVariables, ruff F821. */
+const UNDECLARED_NAME = /The (\S+) variable is undeclared|Undefined name `([^`]+)`/;
+const HEAD_BYTES = 1 << 20;
 const BIOME_EXT = [".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".mts", ".cts", ".json", ".jsonc", ".css"];
 
 export function lintOn(env = process.env): boolean {
@@ -131,10 +137,86 @@ export function lintFile(path: string): Problem[] {
 	return [];
 }
 
-export function lintNote(path: string, ps: Problem[]): string {
-	const lines = ps.slice(0, MAX_LINES).map((p) => `  line ${p.line}: ${p.text}`);
+const CARGO_CHECK_MS = 180_000;
+
+/** rustc's short error line: `<file>:<line>:<col>: error[E0308]: <message>`. */
+export function parseRustc(errors: string[], crate: string, file: string): Problem[] {
+	const own: Problem[] = [];
+	let other = 0;
+	for (const e of errors) {
+		const m = /^([^:\s][^:]*):(\d+):\d+: (error.*)$/.exec(e);
+		if (m && resolve(crate, m[1]) === resolve(file)) own.push({ line: Number(m[2]), text: m[3] });
+		else other += 1;
+	}
+	if (other) own.push({ line: 0, text: `and ${other} error${other === 1 ? "" : "s"} elsewhere in the crate (\`cargo check\` shows them)` });
+	return own;
+}
+
+/**
+ * A .rs file just written (process ticket 090): `cargo check` of its crate, errors only —
+ * rustc's warnings are style here. The crate's own target/, as the model's cargo uses it.
+ * Errors in other files of the crate come as one count line: they are often a file not
+ * written yet. Only after an edit (lintCheck): the gate runs clippy on the whole crate.
+ */
+export function lintRust(path: string): Problem[] {
+	if (extname(path).toLowerCase() !== ".rs" || !have("cargo")) return [];
+	const crate = crateRoot(path);
+	if (!crate) return [];
+	const r = spawnSync("cargo", ["check", "--all-targets", "--message-format=short", "-q"], {
+		cwd: crate,
+		encoding: "utf8",
+		timeout: CARGO_CHECK_MS,
+		env: { ...process.env, CARGO_TERM_COLOR: "never", CARGO_TERM_PROGRESS_WHEN: "never" },
+	});
+	if (r.status === 0) return [];
+	return parseRustc(cargoErrors(`${r.stdout ?? ""}${r.stderr ?? ""}`), crate, path);
+}
+
+/**
+ * Undeclared names the file never assigns: they must come from elsewhere (an import,
+ * a loaded script) or be defined with a real value. 0006g: told `io` was undeclared
+ * (the page never loaded the socket.io client), the model wrote `var io = null`. A name
+ * the file does assign is its own state with a forgotten declaration — 0006r2's
+ * `myElement`, set to null on a reset — and `let x = null` is the right fix: no hint.
+ */
+export function foreignNames(ps: Problem[], text: string): string[] {
+	const names = new Set<string>();
+	for (const p of ps) {
+		const m = UNDECLARED_NAME.exec(p.text);
+		const name = m?.[1] ?? m?.[2];
+		if (name && !assigns(text, name)) names.add(name);
+	}
+	return [...names];
+}
+
+function assigns(text: string, name: string): boolean {
+	const n = name.replace(/[$]/g, "\\$");
+	return new RegExp(`(?<![\\w$.])${n}\\s*(=(?![=>])|[-+*/%|&^]=|\\+\\+|--)|(\\+\\+|--)${n}\\b`).test(text);
+}
+
+/** At most the first MiB of a file, read in one bounded window; null if larger. */
+function head(path: string): string | null {
+	const buf = Buffer.alloc(HEAD_BYTES + 1);
+	let fd: number | undefined;
+	try {
+		fd = openSync(path, "r");
+		const n = readSync(fd, buf, 0, buf.length, 0);
+		return n > HEAD_BYTES ? null : buf.toString("utf8", 0, n);
+	} catch {
+		return null;
+	} finally {
+		if (fd !== undefined) closeSync(fd);
+	}
+}
+
+export function lintNote(path: string, ps: Problem[], text: string | null = null): string {
+	const lines = ps.slice(0, MAX_LINES).map((p) => (p.line ? `  line ${p.line}: ${p.text}` : `  ${p.text}`));
 	if (ps.length > MAX_LINES) lines.push(`  ... ${ps.length - MAX_LINES} more`);
-	return `[lint] ${path}: ${ps.length} error${ps.length === 1 ? "" : "s"}:\n${lines.join("\n")}\nFix these before running or reporting anything that depends on this file.`;
+	const foreign = text === null ? [] : foreignNames(ps, text);
+	const hint = foreign.length
+		? `\n${foreign.map((n) => `\`${n}\``).join(", ")} ${foreign.length === 1 ? "is" : "are"} never assigned in this file: import, load the script that defines it, or define it with its real value. An empty declaration (\`let x = null\`) only hides the error.`
+		: "";
+	return `[lint] ${path}: ${ps.length} error${ps.length === 1 ? "" : "s"}:\n${lines.join("\n")}\nFix these before running or reporting anything that depends on this file.${hint}`;
 }
 
 /** The check as a Pi extension: after every successful write or edit. */
@@ -143,10 +225,11 @@ export function lintCheck(pi: ExtensionAPI) {
 		if (event.isError || (event.toolName !== "write" && event.toolName !== "edit")) return;
 		const raw = (event.input as { path?: unknown })?.path;
 		if (typeof raw !== "string" || !raw) return;
-		const ps = lintFile(resolve(ctx.cwd || process.cwd(), raw));
+		const abs = resolve(ctx.cwd || process.cwd(), raw);
+		const ps = extname(abs).toLowerCase() === ".rs" ? lintRust(abs) : lintFile(abs);
 		if (!ps.length) return;
 		return {
-			content: [...event.content, { type: "text" as const, text: `\n\n${lintNote(raw, ps)}` }],
+			content: [...event.content, { type: "text" as const, text: `\n\n${lintNote(raw, ps, head(abs))}` }],
 			structuredContent: event.structuredContent,
 		};
 	});

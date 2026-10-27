@@ -22,12 +22,18 @@
 // NERD_PLAN_MAX_CALLS-th call (default 40; 0 = no budget) a note asks for the
 // plan now and the tools are taken away, so the next reply is text and the
 // step ends with whatever plan it holds.
+//
+// NERD_PLAN_CALC=1 adds a calculator to the step's tools (plan-calc.ts, process ticket 094): it
+// runs a Python program and changes nothing in the project.
 
 import { execFileSync } from "node:child_process";
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { lintPlan, lintRetryMessage, lintSection, planLintOn } from "./plan-lint.ts";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { pairOn, pairSwitch, type Role } from "./pair.ts";
+import { CALC_TOOL, outputNumbers, planCalcLintOn, planCalcNote } from "./plan-calc.ts";
+import { lintPlan, lintRetryMessage, lintSection, ownInputOn, planLintOn } from "./plan-lint.ts";
+import { isCargoProject } from "./cargo.ts";
 
 /** Tools of the questions-and-plan turn: reading only. */
 export const PLAN_TOOLS = ["read", "ls", "grep", "find"];
@@ -50,7 +56,21 @@ export function planBudgetNote(calls: number): string {
 	);
 }
 
-export function planStepPrompt(checks = process.env.NERD_RALPH === "1"): string {
+/** A Rust task: a Cargo project here, or the task names Rust or cargo (process ticket 090). */
+export function rustTask(cwd: string, task: string): boolean {
+	return isCargoProject(cwd) || /\b(rust|cargo)\b/i.test(task);
+}
+
+const RUST_CHECKS =
+	"\nIn Rust, a library's behaviour is checked with `nerd-rs-eval '<Rust statements>'` — it runs them with the crate's items in scope and fails when an assert! fails, e.g. `nerd-rs-eval 'assert_eq!(f(\"in\"), \"out\");'` (the program in single quotes) — and a binary's with `cargo run -q -- <args> | grep -qx <output>`; `cargo test` alone runs only the tests the work writes itself.";
+
+/** `note`: the calculator's stimulus (plan-calc.ts, NERD_PLAN_CALC_NOTE), after the form. */
+/** The plan form asks for check commands when the Ralph loop runs them: ralphOn (ralph.ts imports this file). */
+export function checksOn(env: Record<string, string | undefined> = process.env): boolean {
+	return env.NERD_RALPH !== "0";
+}
+
+export function planStepPrompt(checks = checksOn(), rust = false, note = ""): string {
 	// The first version asked for QUESTIONS straight away, and the model
 	// answered "none" to an open request (run 1 of ticket 043). Listing the
 	// choices it would otherwise guess comes first now; the questions are
@@ -60,6 +80,7 @@ export function planStepPrompt(checks = process.env.NERD_RALPH === "1"): string 
 		? `- <what the operator can do and see when it is finished> — check: \`<a shell command, run from the project root in a clean clone, that exits 0 only if this is true>\`
 (one item per requirement of the request, its command on that one line; only the exit code counts, so a command that prints must also fail when the output is wrong — \`| grep -q "<text>"\`, \`process.exit(ok ? 0 : 1)\`, \`assert\`; a claim of quality — harder, faster, correct rules, fits a phone — gets a command that measures it, e.g. plays many games between neighbouring levels, or \`browse <url> | grep -q "<text on the page>"\`; a fact from the web goes into the README as \`> "<the page's exact words>" — notes/web/<file>.md\`, and the harness checks the words against that saved page)`
 		: "- <what the operator can do and see when it is finished>";
+	const rs = checks && rust ? RUST_CHECKS : "";
 	return `[harness] A new task. This turn is for questions and a plan only: you can read files, not change them.
 Reply in exactly this form:
 ASSUMPTIONS
@@ -69,7 +90,7 @@ QUESTIONS
 PLAN
 1. <step> — check: <how you will check it>
 DONE WHEN
-${done}`;
+${done}${rs}${note ? `\n\n${note}` : ""}`;
 }
 
 export function finalPlanPrompt(answer?: string): string {
@@ -115,14 +136,53 @@ const TOOL_TEXT_NOTES = 2;
 // twice; the longest plan of 184 earlier ones is about 3 thousand tokens. So the
 // step's requests carry their own max_tokens, and a reply cut there gives its last
 // complete draft. (Aborting the stream instead ends Pi's whole run.)
+// With thinking on there is no such default (ticket 077): the thinking counts
+// into the same max_tokens, and Bonsai 2 at "medium" spent all 6144 before the
+// plan, 3-4 replies cut in a row in every run, 22-30 min of 48-81 lost.
 export const DEFAULT_PLAN_MAX_TOKENS = 6144;
+// Process ticket 089: with no cap at all under thinking, one reply of the step ran 63 min
+// (93 thousand characters of thinking), another 91 min; three in a row were cut only by the
+// end of the context window, with no text, and a plan without steps or checks got frozen.
+// Three runs of 21 never left the step in 5 h. So thinking gets a cap too, wide enough for the
+// plans that did come — the thinking of the 35 replies there that gave a plan: median 7.5,
+// p90 31, max 66 thousand characters (~17 thousand tokens); the cap is ~98 thousand — and a
+// reply cut without a draft is answered by one more request with thinking off.
+export const DEFAULT_PLAN_MAX_TOKENS_THINKING = 24576;
 const DRAFT_NOTES = 2;
 
 export function planMaxTokens(env = process.env): number {
 	const raw = env.NERD_PLAN_MAX_TOKENS;
-	if (raw === undefined || raw.trim() === "") return DEFAULT_PLAN_MAX_TOKENS;
+	const thinking = (env.NERD_THINKING ?? "off") !== "off";
+	const dflt = thinking ? DEFAULT_PLAN_MAX_TOKENS_THINKING : DEFAULT_PLAN_MAX_TOKENS;
+	if (raw === undefined || raw.trim() === "") return dflt;
 	const v = Number(raw);
-	return Number.isInteger(v) && v >= 0 ? v : DEFAULT_PLAN_MAX_TOKENS;
+	return Number.isInteger(v) && v >= 0 ? v : dflt;
+}
+
+// The step's wall-clock budget (process ticket 089: 160-280 min in the step in five runs).
+// Past it the tools are put away as at the call budget, and requests go with thinking off,
+// so the next reply is the plan. 0: no budget.
+export const DEFAULT_PLAN_MAX_MINUTES = 45;
+
+export function planMaxMinutes(env = process.env): number {
+	const raw = env.NERD_PLAN_MAX_MINUTES;
+	if (raw === undefined || raw.trim() === "") return DEFAULT_PLAN_MAX_MINUTES;
+	const v = Number(raw);
+	return Number.isFinite(v) && v >= 0 ? v : DEFAULT_PLAN_MAX_MINUTES;
+}
+
+export function planTimeNote(minutes: number): string {
+	return (
+		`[harness] This questions-and-plan turn has run ${minutes} minutes, its time budget: the tools are put away. ` +
+		"Reply now, without tools and without further deliberation, with the plan in the form asked for, from what you already know; " +
+		"what you could not find out goes under ASSUMPTIONS. The work, with all tools, starts after the plan."
+	);
+}
+
+/** Thinking off for one request: the chat-template switch (llama.cpp) and the top-level one (mlx). */
+export function withoutThinking(p: Record<string, unknown>): Record<string, unknown> {
+	const kw = typeof p.chat_template_kwargs === "object" && p.chat_template_kwargs ? (p.chat_template_kwargs as Record<string, unknown>) : {};
+	return { ...p, chat_template_kwargs: { ...kw, enable_thinking: false }, enable_thinking: false };
 }
 
 /** The last draft in a reply that has a PLAN and a DONE WHEN with items, up to its last item; undefined: none. */
@@ -143,8 +203,10 @@ export function lastDraft(text: string): string | undefined {
 }
 
 export function draftNote(maxTokens: number): string {
+	// "(0 tokens)" was what it said with no cap (process ticket 089): the reply had filled the window.
+	const limit = maxTokens > 0 ? `the plan step's length budget (${maxTokens} tokens)` : "the length limit";
 	return (
-		`[harness] Your reply reached the plan step's length budget (${maxTokens} tokens) while it was still re-drafting the plan. ` +
+		`[harness] Your reply reached ${limit} before it held a complete plan. ` +
 		"Give the final plan now, once, in the form asked for (PLAN, then DONE WHEN), with short items and no deliberation before it."
 	);
 }
@@ -208,7 +270,16 @@ export function savePlan(cwd: string, text: string): string {
 	writeFileSync(join(cwd, PLAN_FILE), text);
 	const git = (...args: string[]) => execFileSync("git", args, { cwd, stdio: "pipe" });
 	try {
-		if (!existsSync(join(cwd, ".git"))) git("init", "-q");
+		// A repository made here starts with the project as it was given, so the work's diff
+		// is the work's and the done gate does not report the given files as uncommitted.
+		// Process ticket 089: the first Ralph round of a run that began this way was always
+		// "Uncommitted changes: lib/, package.json, test/" — once at the 263rd minute.
+		// A repository that was already there is not ours to commit in.
+		if (!existsSync(join(cwd, ".git"))) {
+			git("init", "-q");
+			git("add", "-A", "--", ".", `:!${PLAN_FILE}`, ":!node_modules", ":!target");
+			if (git("diff", "--cached", "--name-only").toString().trim()) git("commit", "-q", "-m", "Project as given");
+		}
 		git("add", PLAN_FILE);
 		git("commit", "-q", "-m", "Plan", "--", PLAN_FILE);
 		return `Your plan is saved in ${PLAN_FILE} and committed.`;
@@ -248,10 +319,20 @@ export interface PlanStepOptions {
 	maxCalls: number;
 	/** plan-lint (plan-lint.ts) on the final plan: one retry on errors. */
 	lint: boolean;
+	/** NERD_PLAN_LINT_OWN_INPUT=1: a behavior check on an input not in the task (plan-lint.ts). */
+	ownInput?: boolean;
 	/** The plan form asks for check commands (the Ralph loop). */
 	checks: boolean;
 	/** max_tokens of the step's requests (0: as the model's). */
 	maxTokens: number;
+	/** The step's wall-clock budget in minutes (0: none). */
+	maxMinutes: number;
+	/** The ping-pong pair (pair.ts): the planner's model writes the plan, the session's the work. */
+	pair: boolean;
+	/** NERD_PLAN_CALC_NOTE: the calculator's stimulus in the step's prompt (plan-calc.ts). */
+	calcNote?: string;
+	/** NERD_PLAN_CALC_LINT=1: plan-lint wants the checks' numbers printed by calc (plan-calc.ts). */
+	calcLint?: boolean;
 }
 
 export function planStepOptions(
@@ -268,8 +349,13 @@ export function planStepOptions(
 		maxCalls: planMaxCalls(env),
 		answer: env.NERD_PLAN_ANSWER || DEFAULT_PLAN_ANSWER,
 		lint: planLintOn(env),
-		checks: env.NERD_RALPH === "1",
+		ownInput: ownInputOn(env),
+		checks: checksOn(env),
 		maxTokens: planMaxTokens(env),
+		maxMinutes: planMaxMinutes(env),
+		pair: pairOn(env),
+		calcNote: planCalcNote(env),
+		calcLint: planCalcLintOn(env),
 	};
 }
 
@@ -288,7 +374,18 @@ export function planStep(pi: ExtensionAPI, opts: PlanStepOptions) {
 	let linted = false;
 	let toolNotes = 0;
 	let draftNotes = 0;
+	let startedAt = 0;
+	let timeNoted = false;
+	let rust = false;
+	// What the step's calc calls printed, for plan-lint's mechanism M (plan-calc.ts).
+	let calcOutputs: string[] = [];
+	// The next requests go with thinking off: a reply was cut with no plan in it, or the time is up.
+	let quick = false;
+	const overTime = (now = Date.now()) => opts.maxMinutes > 0 && startedAt > 0 && now - startedAt >= opts.maxMinutes * 60_000;
 
+	// With the pair a handler waits for the model switch; without it, it stays synchronous.
+	const role = opts.pair ? pairSwitch(pi) : undefined;
+	const as = <T>(r: Role, ctx: ExtensionContext, result: T): T | Promise<T> => (role ? role(r, ctx).then(() => result) : result);
 	const toWork = () => {
 		phase = "work";
 		pi.setActiveTools(opts.workTools);
@@ -326,8 +423,13 @@ export function planStep(pi: ExtensionAPI, opts: PlanStepOptions) {
 			linted = false;
 			toolNotes = 0;
 			draftNotes = 0;
+			startedAt = Date.now();
+			timeNoted = false;
+			quick = false;
+			calcOutputs = [];
+			rust = rustTask(ctx.cwd || process.cwd(), task);
 			pi.setActiveTools(opts.planTools);
-			return { message: { customType: "nerd-plan", content: planStepPrompt(), display: true } };
+			return as("planner", ctx, { message: { customType: "nerd-plan", content: planStepPrompt(opts.checks, rust, opts.calcNote), display: true } });
 		}
 		if (phase === "plan") {
 			// The operator's answer to the questions (or any reply to them).
@@ -339,21 +441,32 @@ export function planStep(pi: ExtensionAPI, opts: PlanStepOptions) {
 	});
 
 	pi.on("before_provider_request", (event) => {
-		if (phase === "work" || opts.maxTokens <= 0) return;
-		const p = event.payload as Record<string, unknown> | undefined;
+		if (phase === "work") return;
+		let p = event.payload as Record<string, unknown> | undefined;
 		if (!p || typeof p !== "object") return;
+		if (overTime()) quick = true;
+		if (quick) p = withoutThinking(p);
+		if (opts.maxTokens <= 0) return quick ? p : undefined;
 		const now = typeof p.max_tokens === "number" ? p.max_tokens : Infinity;
 		return now > opts.maxTokens ? { ...p, max_tokens: opts.maxTokens } : p;
 	});
 
-	// The budget: counted over the whole step (both plan turns), not per turn.
+	// The budgets: calls counted over the whole step (both plan turns), not per turn; time from its start.
 	pi.on("tool_result", (event) => {
-		if (phase === "work" || opts.maxCalls <= 0) return;
+		if (phase === "work") return;
 		calls += 1;
-		if (calls !== opts.maxCalls) return;
+		if (event.toolName === CALC_TOOL && !event.isError) {
+			calcOutputs.push(event.content.map((c) => (c.type === "text" ? c.text : "")).join("\n"));
+		}
+		let note: string | undefined;
+		if (opts.maxCalls > 0 && calls === opts.maxCalls) note = planBudgetNote(calls);
+		else if (!timeNoted && overTime()) note = planTimeNote(opts.maxMinutes);
+		if (!note) return;
+		timeNoted = true;
+		quick ||= overTime();
 		pi.setActiveTools([]);
 		return {
-			content: [...event.content, { type: "text" as const, text: `\n\n${planBudgetNote(calls)}` }],
+			content: [...event.content, { type: "text" as const, text: `\n\n${note}` }],
 			structuredContent: event.structuredContent,
 		};
 	});
@@ -368,10 +481,14 @@ export function planStep(pi: ExtensionAPI, opts: PlanStepOptions) {
 		const cut = lastStopReason(messages) === "length";
 		const drafts = [...said.text.matchAll(new RegExp(heading("PLAN").source, "gim"))].length;
 		let draft: string | undefined;
-		if (cut || drafts > 1) {
+		// An empty reply is no plan either (process ticket 089: three cut replies in a row had
+		// no text at all, and the third was frozen as a plan without steps or checks).
+		const empty = !said.text.trim() && !said.calls.length;
+		if (cut || drafts > 1 || empty) {
 			draft = lastDraft(said.text);
-			if (!draft && cut && draftNotes < DRAFT_NOTES) {
+			if (!draft && (cut || empty) && draftNotes < DRAFT_NOTES) {
 				draftNotes += 1;
+				quick = true; // the next reply without thinking: thinking is what filled the cut one
 				return {
 					entries: [{ type: "custom_message" as const, customType: "nerd-plan", content: draftNote(opts.maxTokens), display: true }],
 					continue: true,
@@ -403,7 +520,8 @@ export function planStep(pi: ExtensionAPI, opts: PlanStepOptions) {
 		let text = planFileText(task, kept, questions.length ? { questions, answer } : undefined);
 		if (opts.lint) {
 			// plan-lint (ticket 065): errors go back once, before the plan is frozen.
-			const findings = lintPlan(text, { checks: opts.checks });
+			const calcPrinted = opts.calcLint ? outputNumbers(calcOutputs) : undefined;
+			const findings = lintPlan(text, { checks: opts.checks, ownInput: opts.ownInput, rust, calcPrinted });
 			const errors = findings.filter((f) => f.severity === "error");
 			if (errors.length && !linted) {
 				linted = true;
@@ -418,9 +536,9 @@ export function planStep(pi: ExtensionAPI, opts: PlanStepOptions) {
 		}
 		const saved = savePlan(ctx.cwd, text);
 		toWork();
-		return {
+		return as("worker", ctx, {
 			entries: [{ type: "custom_message" as const, customType: "nerd-plan", content: workPrompt(saved), display: true }],
 			continue: true,
-		};
+		});
 	});
 }

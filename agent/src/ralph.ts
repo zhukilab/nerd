@@ -7,31 +7,44 @@
 // It stops when everything passes, when the same failures come back twice in a
 // row (no progress), or at the budget of rounds and minutes; once per task, when
 // only Done when checks keep failing while the tests and the gate pass, a round
-// lets the model correct those checks' commands instead (amendMessage). NERD_RALPH=1 turns
-// it on (off by default until measured). The TUI drives it by events; the
-// headless run (run.ts) calls runRalphHeadless after its first prompt.
+// lets the model correct those checks' commands instead (amendMessage); a correction the model
+// made on its own right after a check failed is taken at the next check on the same terms
+// (checkRound) and uses that one amend. On by default since the acceptance run 0006r2
+// (process ticket 060, 2026-10-20: the rules shown on the page by canon for the first time, every
+// remark under 2 h; the first delivery twice as long); NERD_RALPH=0 turns it off. The TUI drives it
+// by events; the headless run (run.ts) calls runRalphHeadless after its first prompt.
 
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { changedSince, checkProject, fingerprint, sh } from "./done-gate.ts";
+import { pairOn, pairSwitch, type Role } from "./pair.ts";
+import { changedSince, checkProject, fingerprint, sh, taskBase } from "./done-gate.ts";
 import { changedItems, type DoneItem, filesOf, frozenPlan, hashFiles, type ItemResult, parseDoneWhen, runDoneWhen } from "./done-when.ts";
 import { PLAN_FILE } from "./plan-step.ts";
 
 export function ralphOn(env = process.env): boolean {
-	return env.NERD_RALPH === "1";
+	return env.NERD_RALPH !== "0";
 }
 
 export interface RalphOptions {
 	maxRounds: number;
 	/** Wall-clock budget of the whole loop; 0: none. */
 	maxMs: number;
+	/** NERD_RALPH_AMEND_GUARD=1: a corrected check is taken only if it also passes on the code of the first "done". */
+	amendGuard?: boolean;
+	/** NERD_RALPH_FRESH=1 (headless): each round in a new session instead of the compacted one. */
+	fresh?: boolean;
 }
 
 export function ralphOptions(env = process.env): RalphOptions {
 	const n = Number(env.NERD_RALPH_ROUNDS ?? 3);
 	const m = Number(env.NERD_RALPH_MINUTES ?? 0);
-	return { maxRounds: Number.isFinite(n) && n >= 0 ? n : 3, maxMs: Number.isFinite(m) && m > 0 ? m * 60_000 : 0 };
+	return {
+		maxRounds: Number.isFinite(n) && n >= 0 ? n : 3,
+		maxMs: Number.isFinite(m) && m > 0 ? m * 60_000 : 0,
+		amendGuard: env.NERD_RALPH_AMEND_GUARD === "1",
+		fresh: env.NERD_RALPH_FRESH === "1",
+	};
 }
 
 export interface RalphState {
@@ -46,10 +59,14 @@ export interface RalphState {
 	amendUsed?: boolean;
 	/** Commands corrected in the amend round, by claim: they replace the frozen ones from then on. */
 	amended: Map<string, { from: string; to: string }>;
+	/** The commit of the first check, the work's first "done", before any round changed the code. */
+	entryHead?: string;
+	/** See RalphOptions.amendGuard. */
+	amendGuard?: boolean;
 }
 
-export function newState(now = Date.now()): RalphState {
-	return { round: 0, started: now, failedHash: new Map(), amended: new Map() };
+export function newState(now = Date.now(), opts?: Pick<RalphOptions, "amendGuard">): RalphState {
+	return { round: 0, started: now, failedHash: new Map(), amended: new Map(), amendGuard: opts?.amendGuard };
 }
 
 export interface RoundCheck {
@@ -101,7 +118,19 @@ export async function checkRound(cwd: string, state: RalphState, run = runDoneWh
 		for (const f of frozen) {
 			if (!f.cmd || !state.amendable.has(f.claim)) continue;
 			const to = current.find((c) => c.claim === f.claim && c.cmd && c.cmd !== f.cmd)?.cmd;
-			if (to) state.amended.set(f.claim, { from: f.cmd, to });
+			if (!to) continue;
+			// Ticket 083 of the process: in one run a wrong check made the coder break
+			// code that passed the external check, and the planner's correction then
+			// fitted the broken code. A correction is about a check that was wrong about
+			// the code, so it must also pass on the code before the rounds changed it.
+			if (state.amendGuard && state.entryHead) {
+				const [r] = await run(cwd, [{ ...f, cmd: to }], undefined, state.entryHead);
+				if (!r?.ok) {
+					notes.push(`"${f.claim}": the corrected check was not taken — \`${to}\` fails on the code of the first "done" (${state.entryHead.slice(0, 7)}), so it fits code changed during the rounds rather than the task; the committed check stays.`);
+					continue;
+				}
+			}
+			state.amended.set(f.claim, { from: f.cmd, to });
 		}
 		state.amendable = undefined;
 	}
@@ -116,6 +145,7 @@ export async function checkRound(cwd: string, state: RalphState, run = runDoneWh
 	}
 	const top = (await sh("git", ["rev-parse", "--show-toplevel"], cwd, 30_000)).out.trim() || cwd;
 	const items = await run(cwd, frozen);
+	const failedBefore = new Set(state.failedHash.keys());
 	for (const r of items) {
 		if (!r.cmd) continue;
 		const files = filesOf(r.cmd, top);
@@ -127,7 +157,36 @@ export async function checkRound(cwd: string, state: RalphState, run = runDoneWh
 			notes.push(`"${r.claim}" passes now, after its check's own files changed since it failed (${files.join(", ")}): look at that change.`);
 		}
 	}
-	const gate = (await checkProject(cwd, await changedSince(cwd, undefined))).failures;
+	const gate = (await checkProject(cwd, await changedSince(cwd, undefined), await taskBase(cwd))).failures;
+	// A correction made before the amend round is taken at once (process ticket 089): the model
+	// fixed a wrong check in PLAN.md right after it failed, the edit was only reported, the round
+	// went on against the old command, and the amend round — given only after a second identical
+	// failure — quoted the old command while the file held the new one; two runs spent their last
+	// 2.5 h there. Taken on the amend round's own terms: the tests and the gate pass, the committed
+	// command failed in an earlier check, the claim's words are kept, the new command passes on
+	// this commit (and, with the guard, on the code of the first "done"). It uses the task's one amend.
+	if (!state.amendUsed && gate.length === 0) {
+		for (let k = 0; k < items.length; k++) {
+			const r = items[k];
+			if (r.ok || r.unusable || !r.cmd || !failedBefore.has(r.cmd)) continue;
+			const to = current.find((c) => c.claim === r.claim && c.cmd && c.cmd !== r.cmd)?.cmd;
+			const f = frozen.find((x) => x.claim === r.claim);
+			if (!to || !f) continue;
+			const [now] = await run(cwd, [{ ...f, cmd: to }]);
+			if (!now?.ok) continue;
+			if (state.amendGuard && state.entryHead) {
+				const [then] = await run(cwd, [{ ...f, cmd: to }], undefined, state.entryHead);
+				if (!then?.ok) {
+					notes.push(`"${r.claim}": the corrected check was not taken — \`${to}\` fails on the code of the first "done" (${state.entryHead.slice(0, 7)}), so it fits code changed during the rounds rather than the task; the committed check stays.`);
+					continue;
+				}
+			}
+			state.amended.set(r.claim, { from: r.cmd, to });
+			notes.push(`"${r.claim}": its check was corrected by the model after the tests passed — was \`${r.cmd}\`, now \`${to}\`.`);
+			items[k] = now;
+			state.amendUsed = true;
+		}
+	}
 	// A check that is unusable itself (no command, cannot fail, does not parse)
 	// is not a reason for a round: the plan is frozen, so the model cannot fix it,
 	// and on the stand of ticket 060 (2026-10-09) every "no progress" stop was such
@@ -137,6 +196,7 @@ export async function checkRound(cwd: string, state: RalphState, run = runDoneWh
 	if (unusable.length) notes.push(`Not demonstrated, the check itself is unusable (not a reason for another round): ${unusable.map((r) => `"${r.claim}" — ${firstLine(r.why)}`).join("; ")}`);
 	const failures = [...gate, ...items.filter((r) => !r.ok && !r.unusable).map((r) => `Done when "${r.claim}"${r.cmd ? ` — \`${r.cmd}\`` : ""}: ${r.why}`)];
 	const head = (await sh("git", ["rev-parse", "HEAD"], cwd, 30_000)).out.trim() || undefined;
+	state.entryHead ??= head;
 	return { failures, gate, items, notes, planned: frozen.length > 0, head };
 }
 
@@ -152,8 +212,11 @@ Commit, and say in one line per corrected check why it was wrong.`;
 
 export type Decision = { kind: "done" | "stop"; report: string } | { kind: "next"; message: string };
 
-export function roundMessage(task: string, remark: string | undefined, round: number, max: number, check: RoundCheck): string {
-	return `[ralph round ${round}/${max}] A new round of the same task. The conversation before it was compacted; what counts is in the files: the code, ${PLAN_FILE} (its Done when items are the checks), notes/, git log.
+export function roundMessage(task: string, remark: string | undefined, round: number, max: number, check: RoundCheck, fresh = false): string {
+	const before = fresh
+		? "This is a new session: nothing of the earlier conversation is here, and nothing in it is to be trusted over the files. Read them first"
+		: "The conversation before it was compacted";
+	return `[ralph round ${round}/${max}] A new round of the same task. ${before}; what counts is in the files: the code, ${PLAN_FILE} (its Done when items are the checks), notes/, git log.
 The task in the operator's words: ${task}${remark ? `\nThe operator's latest message: ${remark}` : ""}
 The harness ran the checks in a clean clone of the last commit. These failed:
 ${check.failures.map((f) => `- ${f}`).join("\n")}${check.notes.length ? `\nAbout the checks: ${check.notes.join(" ")}` : ""}
@@ -192,27 +255,43 @@ export function decide(state: RalphState, check: RoundCheck, task: string, remar
 	if (opts.maxMs && now - state.started > opts.maxMs) return { kind: "stop", report: `[ralph] Stopped: ${Math.round(opts.maxMs / 60_000)} min used.${left}${checkedReport(check)}` };
 	state.round += 1;
 	state.lastKey = key;
-	return { kind: "next", message: roundMessage(task, remark, state.round, opts.maxRounds, check) };
+	return { kind: "next", message: roundMessage(task, remark, state.round, opts.maxRounds, check, opts.fresh) };
 }
 
-/** Headless (run.ts): rounds after the first prompt has settled. */
+/**
+ * Headless (run.ts): rounds after the first prompt has settled. With the
+ * ping-pong pair (pair.ts) `role` gives the amend round to the checks' author,
+ * the planner, and everything else to the worker. With opts.fresh and
+ * `fresh` each round starts in a new session (ticket 085 of the process: the
+ * old conversation is where the model already convinced itself it was done).
+ */
 export async function runRalphHeadless(
-	session: { compact(i?: string): Promise<unknown>; prompt(text: string): Promise<void> },
+	session: { compact(i?: string): Promise<unknown>; prompt(text: string): Promise<void>; role?(r: Role): Promise<void>; fresh?(): Promise<void> },
 	cwd: string,
 	task: string,
 	opts: RalphOptions,
 	log: (r: { round: number; kind: string; failures: string[]; notes: string[] }) => void = () => {},
 	check = checkRound,
 ): Promise<Decision> {
-	const state = newState();
+	const state = newState(Date.now(), opts);
+	const fresh = opts.fresh && session.fresh ? session.fresh.bind(session) : undefined;
+	const d0 = { ...opts, fresh: !!fresh };
 	for (;;) {
 		const c = await check(cwd, state);
-		const d = decide(state, c, task, undefined, opts);
+		const d = decide(state, c, task, undefined, d0);
 		log({ round: state.round, kind: d.kind, failures: c.failures.map(firstLine), notes: c.notes });
-		if (d.kind !== "next") return d;
-		try {
-			await session.compact();
-		} catch {}
+		if (d.kind !== "next") {
+			await session.role?.("worker");
+			return d;
+		}
+		// A new session starts on the worker's model, so the role comes after it.
+		if (fresh) await fresh();
+		else {
+			try {
+				await session.compact();
+			} catch {}
+		}
+		await session.role?.(state.amendable ? "planner" : "worker");
 		await session.prompt(d.message);
 	}
 }
@@ -221,12 +300,13 @@ export async function runRalphHeadless(
 export function ralph(pi: ExtensionAPI, opts: RalphOptions, check = checkRound) {
 	let task = "";
 	let remark: string | undefined;
-	let state = newState();
+	let state = newState(Date.now(), opts);
 	let ownTurn = false;
 	let wrote = false;
 	let ranBash = false;
 	let startFp = "";
 	let busy = false;
+	const role = pairOn() ? pairSwitch(pi) : undefined;
 
 	pi.on("before_agent_start", async (event, ctx) => {
 		const cwd = ctx.cwd || process.cwd();
@@ -240,7 +320,7 @@ export function ralph(pi: ExtensionAPI, opts: RalphOptions, check = checkRound) 
 				task = event.prompt;
 				remark = undefined;
 			} else remark = event.prompt;
-			state = newState();
+			state = newState(Date.now(), opts);
 		}
 		startFp = await fingerprint(cwd);
 		wrote = false;
@@ -259,7 +339,9 @@ export function ralph(pi: ExtensionAPI, opts: RalphOptions, check = checkRound) 
 		if (!wrote && !(ranBash && (await fingerprint(cwd)) !== startFp)) return;
 		busy = true;
 		try {
-			const d = decide(state, await check(cwd, state), task, remark, opts);
+			// The TUI keeps its one session: rounds compact it (NERD_RALPH_FRESH is headless only).
+			const d = decide(state, await check(cwd, state), task, remark, { ...opts, fresh: false });
+			await role?.(d.kind === "next" && state.amendable ? "planner" : "worker", ctx);
 			if (d.kind !== "next") {
 				pi.sendMessage({ customType: "nerd-ralph", content: d.report, display: true });
 				return;

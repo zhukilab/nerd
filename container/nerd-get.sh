@@ -8,7 +8,7 @@
 #
 # Where things go (the image's environment points the tools there):
 #   go    ~/.local/go, GOPATH ~/go, module cache ~/.cache/go-mod
-#   rust  rustup in ~/.rustup, cargo and its bin in ~/.cargo (minimal profile)
+#   rust  rustup in ~/.rustup, cargo and its bin in ~/.cargo (minimal profile and clippy)
 #   uv    ~/.local/bin/uv and uvx; its cache ~/.cache/uv
 set -euo pipefail
 
@@ -47,11 +47,15 @@ case "${1:-}" in
     tar -xzf "$tmp/go.tgz" -C "$tmp" && mv "$tmp/go" "$HOME/.local/go"
     "$HOME/.local/go/bin/go" version ;;
   rust)
-    if have cargo; then echo "rust is there: $(cargo --version)"; exit 0; fi
+    # clippy too: the done gate reports its errors (deny-level lints) in Rust projects.
+    if have cargo; then
+      cargo clippy --version >/dev/null 2>&1 || rustup component add clippy >/dev/null
+      echo "rust is there: $(cargo --version), $(cargo clippy --version)"; exit 0
+    fi
     fetch "https://static.rust-lang.org/rustup/archive/$RUSTUP_VERSION/$triple/rustup-init" "$(sha RUSTUP)" "$tmp/rustup-init"
     chmod +x "$tmp/rustup-init"
-    "$tmp/rustup-init" -y --no-modify-path --profile minimal >/dev/null
-    "$HOME/.cargo/bin/cargo" --version ;;
+    "$tmp/rustup-init" -y --no-modify-path --profile minimal --component clippy >/dev/null
+    "$HOME/.cargo/bin/cargo" --version && "$HOME/.cargo/bin/cargo" clippy --version ;;
   uv)
     if [ -x "$HOME/.local/bin/uv" ]; then echo "uv is there: $("$HOME/.local/bin/uv" --version)"; exit 0; fi
     fetch "https://github.com/astral-sh/uv/releases/download/$UV_VERSION/uv-$triple.tar.gz" "$(sha UV)" "$tmp/uv.tgz"

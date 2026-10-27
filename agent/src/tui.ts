@@ -50,6 +50,9 @@ writeFileSync(
 			enabledModels: [`local/${local.id}`],
 			quietStartup: true,
 			collapseChangelog: true,
+			// Escape twice on an empty editor would open /tree; a session manager that sends
+			// Escape before /quit (agora) would type into the selector instead.
+			doubleEscapeAction: "none",
 			// Pi 1.0 runs fullscreen by default; regular keeps tmux's scrollback,
 			// which the operator and the TUI drivers (capture-pane) read.
 			tuiMode: "regular",

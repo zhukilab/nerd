@@ -24,6 +24,12 @@
 //      the clean clone too (readmeChecks; none is not a failure)
 //   6. no linter errors (lint-check.ts) in the files changed since the
 //      operator's message
+//   7. a Cargo project (Cargo.toml; process ticket 090): `cargo test` builds and
+//      passes, clippy reports no errors (deny-level lints), the README's check
+//      commands (cargo run, nerd-rs-eval, ./target/...) pass; a binary is a CLI,
+//      no server is looked for (checkCargo)
+//   8. no tests weakened since the task began: none deleted, renamed away from the
+//      runner or newly skipped (testWeakening; process ticket 067)
 // Anything failing goes back to the model as one message listing what to fix,
 // and the turn continues; at most NERD_DONE_GATE_ROUNDS (2) times per operator
 // message, then the turn ends as it would have. A passing check adds nothing:
@@ -36,7 +42,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { readmeCommands, startCommand } from "../../acceptance/lib/parse.mjs";
+import { readmeCommands, readmeSections, startCommand } from "../../acceptance/lib/parse.mjs";
+import { cargoEnv, cargoErrors, haveCargo, haveClippy, isCargoProject } from "./cargo.ts";
 import { lintFile } from "./lint-check.ts";
 
 export function doneGateOn(env = process.env): boolean {
@@ -112,7 +119,8 @@ function tail(text: string, n = TAIL_LINES): string {
 	return lines.slice(-n).map((l) => `    ${l}`).join("\n");
 }
 
-const FAIL_LINE = /^\s*(not ok\b|✖|×)|Error\b|ECONNREFUSED|EADDRINUSE|\bexpected\b|\bactual\b/i;
+// node:test and the like, then cargo test's ("panicked at", "left:/right:", "test result: FAILED").
+const FAIL_LINE = /^\s*(not ok\b|✖|×)|Error\b|ECONNREFUSED|EADDRINUSE|\bexpected\b|\bactual\b|panicked at|^\s*(left|right):|test result: FAILED/i;
 
 /** What failed first (the runner's failure lines), then the end of the output. */
 export function testExcerpt(out: string): string {
@@ -212,6 +220,125 @@ export function readmeChecks(readme: string, start: string | null): string[] {
 		.slice(0, MAX_README_CHECKS);
 }
 
+/** A README check command of a Rust project: cargo, a built binary, or nerd-rs-eval. */
+const RUST_SHELL_LINE = /^\s*(?:\$\s+)?((?:[A-Z_][A-Z0-9_]*=\S+\s+)*(?:echo\b.*\|\s*)?(?:cargo|nerd-rs-eval|\.\/target\/)\S*.*)$/;
+const RUST_SETUP = /^cargo\s+(build|test|fetch|check|clippy|fmt)\b(?!.*--\s)/;
+
+/** The check-section commands of a Rust project's README (`cargo test` and builds left out, as `npm test` is). */
+export function readmeCargoChecks(readme: string): string[] {
+	const found: string[] = [];
+	for (const s of readmeSections(readme)) {
+		if (!CHECK_HEADING.test(s.heading)) continue;
+		for (const line of s.code) {
+			const m = line.match(RUST_SHELL_LINE);
+			if (!m) continue;
+			const cmd = m[1].replace(/\s+#.*$/, "").trim();
+			if (!RUST_SETUP.test(cmd) && !found.includes(cmd)) found.push(cmd);
+		}
+	}
+	return found.slice(0, MAX_README_CHECKS);
+}
+
+/**
+ * A Cargo project, as the gate checks it (process ticket 090): its tests build and pass in the
+ * clean clone, clippy reports no errors (its deny-level lints are likely bugs; warnings, style,
+ * are left alone), and the README's check commands pass. A binary is a CLI here: no server is
+ * looked for. Builds share the project's target dir in the cache (cargo.ts).
+ */
+async function checkCargo(app: string, root: string, blocked: number[]): Promise<string[]> {
+	const env = cargoEnv(app, root, isolatedEnv(blocked, { CI: "1" }));
+	if (!haveCargo(env)) return ["The project is a Cargo project, but cargo is not installed: run `nerd-get rust`."];
+	const failures: string[] = [];
+	const build = await sh("cargo", ["test", "--no-run", "--message-format=short"], app, INSTALL_MS, env);
+	if (build.code !== 0) {
+		const errs = cargoErrors(build.out);
+		failures.push(`\`cargo test\` in a clean clone does not build:\n${errs.length ? errs.slice(0, 10).map((e) => `    ${e}`).join("\n") : tail(build.out)}`);
+		return failures; // clippy and the README's checks would only say the same
+	}
+	const t = await sh("cargo", ["test"], app, TEST_MS, env);
+	if (t.code !== 0) failures.push(`\`cargo test\` in a clean clone exited with ${t.code ?? "a timeout"}:\n${testExcerpt(t.out)}`);
+	if (haveClippy(env)) {
+		const c = await sh("cargo", ["clippy", "--all-targets", "--message-format=short"], app, INSTALL_MS, env);
+		const errs = cargoErrors(c.out);
+		if (errs.length) failures.push(`clippy reports errors (lints that are denied by default: likely bugs, not style):\n${errs.slice(0, 10).map((e) => `    ${e}`).join("\n")}`);
+	}
+	const readmeName = ["README.md", "readme.md", "Readme.md", "README.MD", "README"].find((n) => existsSync(join(app, n)));
+	if (readmeName) {
+		for (const c of readmeCargoChecks(readFileSync(join(app, readmeName), "utf8"))) {
+			// Without the operator's terminal: a command that reads stdin gets an empty one, not a hang.
+			const r = await sh("sh", ["-c", `{ ${c}\n} < /dev/null`], app, TEST_MS, env);
+			if (r.code !== 0) failures.push(`The README's check \`${c}\` in a clean clone exited with ${r.code ?? "a timeout"}:\n${testExcerpt(r.out)}`);
+		}
+	}
+	return failures;
+}
+
+// Weakened tests (process ticket 067; the idea of goalCompletionGuard in @alexeiled/pi-plan-exec):
+// a test that fails can be made to pass by deleting it, renaming it out of the runner's sight or
+// marking it skipped — and the gate and Ralph would then see green. Since the task began (the
+// parent of its "Plan" commit: the project as given, its tests included) a deleted test file, a
+// test file renamed to a name no runner finds, or more skip/only/todo markers in test files than
+// there were, is a failure of the gate.
+
+/** Someone else's or built code: a dependency's tests there are not the project's (a run committed node_modules). */
+const NOT_OURS = /(^|\/)(node_modules|vendor|target|dist|build|\.venv|venv)\//;
+
+/** A test file of the project by its path, as the usual runners find them (node:test, jest/vitest/mocha, pytest, cargo). */
+export function isTestFile(path: string): boolean {
+	if (NOT_OURS.test(path)) return false;
+	return (
+		/(^|\/)(test|tests|__tests__|spec)\/.+\.([cm]?[jt]sx?|py|rs)$/.test(path) ||
+		/\.(test|spec)\.[cm]?[jt]sx?$/.test(path) ||
+		/(^|\/)(test_[^/]+|[^/]+_test)\.py$/.test(path)
+	);
+}
+
+/** A line that skips, narrows or postpones tests. */
+export const SKIP_MARKER =
+	/\b(?:describe|it|test|context|suite)\.(?:skip|only|todo)\s*\(|\b(?:xit|xdescribe|xtest|fit|fdescribe)\s*\(|\b(?:skip|only|todo)\s*:\s*(?:true|['"`])|\bt\.(?:skip|todo)\s*\(|#\[ignore\b|@pytest\.mark\.(?:skip|xfail)|\bpytest\.skip\s*\(/;
+
+/** The task's start: the parent of the latest "Plan" commit of PLAN.md (plan-step.ts savePlan); undefined without one. */
+export async function taskBase(cwd: string): Promise<string | undefined> {
+	const log = await git(cwd, "log", "-1", "--format=%H", "--grep=^Plan$", "--", "PLAN.md");
+	const plan = log.code === 0 ? log.out.trim() : "";
+	if (!plan) return undefined;
+	const parent = await git(cwd, "rev-parse", "-q", "--verify", `${plan}^`);
+	return parent.code === 0 ? parent.out.trim() : plan;
+}
+
+/** How the tests were weakened between `base` and HEAD: one line each; [] when they were not. */
+export async function testWeakening(cwd: string, base: string): Promise<string[]> {
+	const out: string[] = [];
+	const status = await git(cwd, "diff", "--name-status", "-M", "--relative", base, "HEAD");
+	for (const line of status.out.split("\n").filter(Boolean)) {
+		const [st, a, b] = line.split("\t");
+		if (st === "D" && isTestFile(a)) out.push(`${a} was deleted`);
+		else if (st.startsWith("R") && isTestFile(a) && !isTestFile(b)) out.push(`${a} was renamed to ${b}, which no test runner finds`);
+	}
+	const diff = await git(cwd, "diff", "-U0", "-M", "--relative", base, "HEAD");
+	let file = "";
+	const added = new Map<string, string[]>();
+	const removed = new Map<string, number>();
+	for (const line of diff.out.split("\n")) {
+		if (line.startsWith("+++ ")) {
+			// A deleted file's is "+++ /dev/null": its lines are no one's (the deletion is reported above).
+			file = /^\+\+\+ b\/(.*)$/.exec(line)?.[1] ?? "";
+			continue;
+		}
+		if (!isTestFile(file) || line.startsWith("+++") || line.startsWith("---") || !SKIP_MARKER.test(line)) continue;
+		if (line.startsWith("+")) added.set(file, [...(added.get(file) ?? []), line.slice(1).trim()]);
+		else if (line.startsWith("-")) removed.set(file, (removed.get(file) ?? 0) + 1);
+	}
+	for (const [f, lines] of added) {
+		if (lines.length > (removed.get(f) ?? 0)) out.push(`${f} gained a skip/only/todo marker: \`${lines[0].slice(0, 120)}\``);
+	}
+	return out;
+}
+
+export function weakeningNote(found: string[]): string {
+	return `Tests were weakened since the task began:\n${found.map((f) => `    ${f}`).join("\n")}\n  A test that is deleted, renamed away or skipped no longer checks anything, so this does not count as done. Restore it and make the code pass it; if a test contradicts the task, keep it and say so in your reply, quoting the task.`;
+}
+
 export interface GateResult {
 	/** Not a git repository, or nothing to say: the gate stays silent. */
 	failures: string[];
@@ -219,9 +346,10 @@ export interface GateResult {
 
 /**
  * Check the committed project in `cwd` as the operator's checker will.
- * `changed`: files (relative to cwd) to lint; undefined lints nothing.
+ * `changed`: files (relative to cwd) to lint; undefined lints nothing. `base`: the task's start, for
+ * the weakened-tests check (testWeakening); none, no such check.
  */
-export async function checkProject(cwd: string, changed: string[] = []): Promise<GateResult> {
+export async function checkProject(cwd: string, changed: string[] = [], base?: string): Promise<GateResult> {
 	const top = await git(cwd, "rev-parse", "--show-toplevel");
 	if (top.code !== 0) return { failures: [] };
 	const root = top.out.trim();
@@ -231,11 +359,16 @@ export async function checkProject(cwd: string, changed: string[] = []): Promise
 	if ((await git(cwd, "rev-parse", "--verify", "-q", "HEAD")).code !== 0) {
 		return { failures: ["Nothing is committed yet. Commit the work: the operator checks the committed state, not the working tree."] };
 	}
-	const dirty = (await git(root, "status", "--porcelain")).out.trim();
+	// trimEnd: the first line's status may start with a space (" M lib/tax.js").
+	const dirty = (await git(root, "status", "--porcelain")).out.trimEnd();
 	if (dirty) {
 		const files = dirty.split("\n").map((l) => l.slice(3));
 		const more = files.length > 10 ? ` and ${files.length - 10} more` : "";
-		failures.push(`Uncommitted changes: ${files.slice(0, 10).join(", ")}${more}. The checks below ran on the last commit; commit what belongs to the project (and .gitignore what does not, e.g. node_modules).`);
+		failures.push(`Uncommitted changes: ${files.slice(0, 10).join(", ")}${more}. The checks below ran on the last commit; commit what belongs to the project (and .gitignore what does not, e.g. node_modules, or target/ in Rust).`);
+	}
+	if (base) {
+		const weak = await testWeakening(cwd, base);
+		if (weak.length) failures.push(weakeningNote(weak));
 	}
 
 	// Taken before anything of the project runs: the agent's own servers and the like.
@@ -290,6 +423,8 @@ export async function checkProject(cwd: string, changed: string[] = []): Promise
 				}
 			}
 		}
+
+		if (isCargoProject(app)) failures.push(...(await checkCargo(app, root, blocked)));
 
 		const lint: string[] = [];
 		for (const f of changed) {
@@ -359,7 +494,7 @@ export function doneGate(pi: ExtensionAPI, opts: { maxRounds: number; log?: (r: 
 		const cwd = ctx.cwd || process.cwd();
 		const fp = await fingerprint(cwd);
 		if (!wrote && !(ranBash && fp !== startFp)) return;
-		const { failures } = await checkProject(cwd, await changedSince(cwd, base));
+		const { failures } = await checkProject(cwd, await changedSince(cwd, base), (await taskBase(cwd)) ?? base);
 		wrote = false;
 		ranBash = false;
 		startFp = fp;

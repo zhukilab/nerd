@@ -8,6 +8,8 @@
 //   - the verifier, when NERD_VERIFY_N > 1: the provider's stream function is
 //     best-of-N around the plain OpenAI-completions stream. Candidates are drawn
 //     whole, so the TUI shows a step only once the verifier picked it;
+//   - provider "planner", when NERD_PLAN_BASE_URL is set: the ping-pong pair's
+//     planner (pair.ts), which writes the plan and its checks;
 //   - bash with a default timeout, NERD_BASH_TIMEOUT (600 s; bash-tool.ts);
 //   - the harness (harness.ts, ticket 043): a questions-and-plan turn without
 //     write tools at the start of a task (the first message, or /task <text>),
@@ -21,8 +23,11 @@ import type { StreamFn } from "@earendil-works/pi-agent-core";
 import type { AssistantMessageEventStream, Model, Api } from "@earendil-works/pi-ai";
 import { getApiProvider } from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { agoraChannel, agoraChannelPath } from "./agora-channel.ts";
 import { nerdBashTool } from "./bash-tool.ts";
-import { localModel, modelDefinition, withVerifier } from "./local.ts";
+import { localModel, modelDefinition, plannerModel, withVerifier } from "./local.ts";
+import { PLANNER } from "./pair.ts";
+import { calcTool, planCalcOn } from "./plan-calc.ts";
 import { harness } from "./harness.ts";
 import { parseVerdict, specCheckPrompt } from "./spec-check.ts";
 
@@ -52,8 +57,13 @@ export default async function nerd(pi: ExtensionAPI) {
 
 	// bash with a default timeout (bash-tool.ts), in place of the built-in one.
 	pi.registerTool(nerdBashTool(process.cwd()));
+	// The plan step's calculator (plan-calc.ts), switched on by the step only.
+	if (planCalcOn()) pi.registerTool(calcTool());
 	// An operator answers the plan step's questions here.
 	await harness(true)(pi);
+	// A session manager's channel (agora-channel.ts), only with NERD_AGORA_CHANNEL.
+	const agora = agoraChannelPath();
+	if (agora) await agoraChannel("tui", agora)(pi);
 
 	pi.registerProvider("local", {
 		name: "nerd local llama-server",
@@ -66,6 +76,17 @@ export default async function nerd(pi: ExtensionAPI) {
 			? { streamSimple: (m, c, o) => verified(m, c, o) as unknown as AssistantMessageEventStream }
 			: {}),
 	});
+	// The ping-pong pair (pair.ts): the planner's server, switched to by the plan step and the amend round.
+	const planner = await plannerModel();
+	if (planner) {
+		pi.registerProvider(PLANNER, {
+			name: "nerd planner llama-server",
+			baseUrl: planner.baseUrl,
+			apiKey: "none",
+			api: "openai-completions",
+			models: [modelDefinition(planner)],
+		});
+	}
 
 	const maxRounds = Number(process.env.NERD_SPEC_CHECK_ROUNDS ?? 3);
 	let check: { task: string; round: number } | undefined;

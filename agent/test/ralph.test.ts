@@ -7,8 +7,8 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { changedItems, frozenPlan, parseDoneWhen, runDoneWhen } from "../src/done-when.ts";
-import { planStepPrompt } from "../src/plan-step.ts";
-import { checkRound, decide, newState, type RoundCheck, ralphOptions, runRalphHeadless } from "../src/ralph.ts";
+import { checksOn, planStepPrompt, rustTask } from "../src/plan-step.ts";
+import { checkRound, decide, newState, type RoundCheck, ralphOn, ralphOptions, runRalphHeadless } from "../src/ralph.ts";
 import { tempDir } from "./tmp.ts";
 
 function repo(files: Record<string, string>, message = "work"): string {
@@ -58,6 +58,20 @@ test("parseDoneWhen: claims with and without a check command", () => {
 test("the plan form asks for check commands only with the Ralph loop", () => {
 	assert.match(planStepPrompt(true), /check: `<a shell command/);
 	assert.doesNotMatch(planStepPrompt(false), /check: `/);
+	// Process ticket 090: a Rust task gets the Rust way to check behaviour.
+	assert.match(planStepPrompt(true, true), /nerd-rs-eval 'assert_eq!\(f\("in"\), "out"\);'/);
+	assert.doesNotMatch(planStepPrompt(true, false), /nerd-rs-eval/);
+	assert.doesNotMatch(planStepPrompt(false, true), /nerd-rs-eval/);
+	assert.equal(rustTask("/nonexistent", "Write a Rust crate that…"), true);
+	assert.equal(rustTask("/nonexistent", "Write a node library"), false);
+});
+
+test("the Ralph loop and its plan form are on by default; NERD_RALPH=0 turns both off (process ticket 060)", () => {
+	assert.equal(ralphOn({}), true);
+	assert.equal(checksOn({}), true);
+	assert.equal(ralphOn({ NERD_RALPH: "1" }), true);
+	assert.equal(ralphOn({ NERD_RALPH: "0" }), false);
+	assert.equal(checksOn({ NERD_RALPH: "0" }), false);
 });
 
 test("runDoneWhen: a passing, a failing and an item without a command", async () => {
@@ -69,6 +83,33 @@ test("runDoneWhen: a passing, a failing and an item without a command", async ()
 	);
 	assert.match(r[1].why, /exited with 1/);
 	assert.match(r[2].why, /^no check/);
+});
+
+// Process ticket 090: a Rust binary's checks in the clean clone; one that reads stdin does not hang.
+test("runDoneWhen, Rust: cargo run with arguments, and a binary reading stdin gets an empty one", { skip: spawnSync("sh", ["-c", "command -v cargo"]).status !== 0 && "cargo not on PATH" }, async () => {
+	process.env.XDG_CACHE_HOME = tempDir("nerd-ralph-cache-");
+	const d = repo({
+		"Cargo.toml": '[package]\nname = "echo2"\nversion = "0.1.0"\nedition = "2021"\n',
+		".gitignore": "/target\n",
+		"src/main.rs":
+			'use std::io::Read;\nfn main() { let a: Vec<String> = std::env::args().skip(1).collect(); if a.is_empty() { let mut s = String::new(); std::io::stdin().read_to_string(&mut s).unwrap(); print!("[{}]", s.trim()); } else { println!("{}", a.join("+")); } }\n',
+	});
+	const r = await runDoneWhen(
+		d,
+		[
+			{ claim: "args", cmd: "cargo run -q -- 1 2 | grep -qx '1+2'" },
+			{ claim: "stdin", cmd: "cargo run -q | grep -qx '\\[\\]'" },
+			{ claim: "wrong", cmd: "cargo run -q -- 3 | grep -qx 4" },
+			// Process ticket 093: rs-stats-2's form; with CARGO_TARGET_DIR the binary was not there (127).
+			{ claim: "built binary", cmd: "cargo build -q && target/debug/echo2 5 6 | grep -qx '5+6'" },
+		],
+		60_000,
+	);
+	assert.deepEqual(
+		r.map((x) => x.ok),
+		[true, true, false, true],
+		r.map((x) => x.why).join("\n"),
+	);
 });
 
 test("the checks are the plan as committed; a later edit is reported, not run", async () => {
@@ -205,6 +246,57 @@ test("checkRound: a command corrected in the amend round replaces the frozen one
 	assert.equal((await checkRound(d, st)).items[0].cmd, "grep -q '# pass' out.txt");
 });
 
+// Ticket 089 of the process: the model fixed a wrong check right after it failed; the edit was
+// only reported, and the amend round came a round later quoting the old command.
+test("checkRound: a check corrected after it failed is taken at once, on the amend round's terms", async () => {
+	const plan = "## Done when\n- tests pass — check: `grep -q passing out.txt`\n";
+	const d = repo({ "PLAN.md": plan, "out.txt": "# pass 3\n" }, "work");
+	const st = newState(0);
+	assert.equal((await checkRound(d, st)).failures.length, 1);
+	commit(d, { "PLAN.md": plan.replace("grep -q passing out.txt", "grep -q '# pass' out.txt") }, "fix the check");
+	const c = await checkRound(d, st);
+	assert.deepEqual(c.failures, []);
+	assert.ok(c.items[0].ok);
+	assert.ok(c.notes.some((n) => /corrected by the model .*now `grep -q '# pass' out.txt`/.test(n)));
+	assert.equal(st.amendUsed, true, "it is the task's one amend");
+	// later checks run the corrected command
+	assert.equal((await checkRound(d, st)).items[0].cmd, "grep -q '# pass' out.txt");
+});
+
+test("checkRound: an early correction is not taken if the check never failed, if it fails itself, or after the amend", async () => {
+	const plan = "## Done when\n- tests pass — check: `grep -q passing out.txt`\n";
+	// edited before the first check: the committed command has not failed yet
+	const d1 = repo({ "PLAN.md": plan, "out.txt": "# pass 3\n" }, "work");
+	commit(d1, { "PLAN.md": plan.replace("grep -q passing out.txt", "grep -q '# pass' out.txt") }, "edit early");
+	assert.equal((await checkRound(d1, newState(0))).failures.length, 1);
+	// the new command fails on this code too
+	const d2 = repo({ "PLAN.md": plan, "out.txt": "# pass 3\n" }, "work");
+	const st2 = newState(0);
+	await checkRound(d2, st2);
+	commit(d2, { "PLAN.md": plan.replace("grep -q passing out.txt", "grep -q nothing out.txt") }, "bad fix");
+	assert.equal((await checkRound(d2, st2)).failures.length, 1);
+	assert.notEqual(st2.amendUsed, true);
+	// the amend was used already
+	const d3 = repo({ "PLAN.md": plan, "out.txt": "# pass 3\n" }, "work");
+	const st3 = newState(0);
+	await checkRound(d3, st3);
+	st3.amendUsed = true;
+	commit(d3, { "PLAN.md": plan.replace("grep -q passing out.txt", "grep -q '# pass' out.txt") }, "fix");
+	assert.equal((await checkRound(d3, st3)).failures.length, 1);
+});
+
+test("checkRound with the amend guard: an early correction must pass on the first 'done' too", async () => {
+	const plan = "## Done when\n- has four — check: `grep -q seven out.txt`\n";
+	const d = repo({ "PLAN.md": plan, "out.txt": "one two\n" }, "work");
+	const st = newState(0, { amendGuard: true });
+	await checkRound(d, st);
+	commit(d, { "out.txt": "one two four\n" }, "fit");
+	commit(d, { "PLAN.md": plan.replace("grep -q seven out.txt", "grep -q four out.txt") }, "fix check");
+	const c = await checkRound(d, st);
+	assert.equal(c.failures.length, 1);
+	assert.ok(c.notes.some((n) => /corrected check was not taken/.test(n)));
+});
+
 test("decide: all checks pass", () => {
 	const d = decide(newState(0), { failures: [], items: [{ claim: "x", cmd: "true", ok: true, why: "" }], notes: [], planned: true }, "t", undefined, { maxRounds: 3, maxMs: 0 });
 	assert.equal(d.kind, "done");
@@ -230,9 +322,69 @@ test("runRalphHeadless: a failing round is compacted, then prompted with its fai
 	assert.deepEqual(rounds, ["next", "done"]);
 });
 
+test("runRalphHeadless with the pair: the amend round goes to the planner, the rest to the worker", async () => {
+	const roles: string[] = [];
+	const session = { compact: async () => {}, prompt: async () => {}, role: async (r: string) => void roles.push(r) };
+	const items = [{ claim: "sorted", cmd: "node s.js", ok: false, why: "exited with 1", rc: 1 }];
+	const same = (): RoundCheck => ({ failures: ['Done when "sorted" — `node s.js`: exited with 1'], gate: [], items, notes: [], planned: true });
+	let n = 0;
+	// Like checkRound, a check consumes the amend round's permission.
+	const check = async (_cwd: string, st: ReturnType<typeof newState>): Promise<RoundCheck> => {
+		st.amendable = undefined;
+		return n++ < 2 ? same() : fail([]);
+	};
+	const d = await runRalphHeadless(session, "/nowhere", "t", { maxRounds: 3, maxMs: 0 }, () => {}, check);
+	assert.equal(d.kind, "done");
+	assert.deepEqual(roles, ["worker", "planner", "worker"]);
+});
+
 test("ralphOptions: defaults and settings", () => {
-	assert.deepEqual(ralphOptions({}), { maxRounds: 3, maxMs: 0 });
-	assert.deepEqual(ralphOptions({ NERD_RALPH_ROUNDS: "5", NERD_RALPH_MINUTES: "90" }), { maxRounds: 5, maxMs: 5_400_000 });
+	assert.deepEqual(ralphOptions({}), { maxRounds: 3, maxMs: 0, amendGuard: false, fresh: false });
+	assert.deepEqual(ralphOptions({ NERD_RALPH_ROUNDS: "5", NERD_RALPH_MINUTES: "90" }), { maxRounds: 5, maxMs: 5_400_000, amendGuard: false, fresh: false });
+	assert.deepEqual(ralphOptions({ NERD_RALPH_AMEND_GUARD: "1", NERD_RALPH_FRESH: "1" }), { maxRounds: 3, maxMs: 0, amendGuard: true, fresh: true });
+});
+
+// Ticket 083: a wrong check made the coder break right code, and the planner's
+// correction then fitted the broken code (075 slug-pair-3).
+test("checkRound with the amend guard: a correction that fails on the first 'done' is not taken", async () => {
+	const plan = "## Done when\n- cut at the last hyphen — check: `grep -q four out.txt`\n- has a word — check: `grep -q one out.txt`\n";
+	const d = repo({ "PLAN.md": plan, "out.txt": "one two\n" }, "work");
+	const st = newState(0, { amendGuard: true });
+	const c0 = await checkRound(d, st);
+	assert.equal(c0.failures.length, 1);
+	assert.ok(st.entryHead);
+	// a round breaks the code to suit the wrong check
+	commit(d, { "out.txt": "one two four\n" }, "fit the check");
+	st.amendable = new Set(["cut at the last hyphen", "has a word"]);
+	const fixed = plan.replace("grep -q four out.txt", "grep -q 'two four' out.txt").replace("grep -q one out.txt", "grep -q two out.txt");
+	commit(d, { "PLAN.md": fixed }, "amend checks");
+	const c = await checkRound(d, st);
+	assert.equal(c.items[0].cmd, "grep -q four out.txt", "fails on the first done: the frozen command stays");
+	assert.equal(c.items[1].cmd, "grep -q two out.txt", "passes on the first done too: taken");
+	assert.ok(c.notes.some((n) => /corrected check was not taken .*grep -q 'two four' out.txt/.test(n)));
+	// without the guard both are taken
+	const st2 = newState(0);
+	await checkRound(d, st2);
+	st2.amendable = new Set(["cut at the last hyphen"]);
+	commit(d, { "PLAN.md": fixed.replace("grep -q two out.txt", "grep -q one out.txt") }, "again");
+	assert.equal((await checkRound(d, st2)).items[0].cmd, "grep -q 'two four' out.txt");
+});
+
+test("runRalphHeadless with fresh: a new session instead of compaction, and the round says so", async () => {
+	const calls: string[] = [];
+	const session = {
+		compact: async () => void calls.push("compact"),
+		fresh: async () => void calls.push("fresh"),
+		prompt: async (text: string) => void calls.push(text.includes("This is a new session") ? "prompt:new" : "prompt:compacted"),
+	};
+	let n = 0;
+	const check = async (): Promise<RoundCheck> => (n++ === 0 ? fail(["gate: npm test failed"]) : fail([]));
+	await runRalphHeadless(session, "/nowhere", "t", { maxRounds: 3, maxMs: 0, fresh: true }, () => {}, check);
+	assert.deepEqual(calls, ["fresh", "prompt:new"]);
+	calls.length = 0;
+	n = 0;
+	await runRalphHeadless(session, "/nowhere", "t", { maxRounds: 3, maxMs: 0 }, () => {}, check);
+	assert.deepEqual(calls, ["compact", "prompt:compacted"]);
 });
 
 test("the TUI loop: settled after work → compaction → a new turn with the failures; then the report", async () => {

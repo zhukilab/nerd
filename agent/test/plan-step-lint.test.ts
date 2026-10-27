@@ -109,6 +109,17 @@ test("plan step: max_tokens is capped while planning, not during the work", () =
 	assert.equal(capped.request({ max_tokens: 16384 }), undefined);
 });
 
+// Ticket 077: the thinking counts into max_tokens; 6144 cut it before the plan. Ticket 089:
+// with no cap, replies of 63-91 min and three cut only by the window, so a wide one.
+test("plan step: with thinking on the cap is a wide one of its own, unless asked for", () => {
+	const thinking = session(repo(), { NERD_RALPH: "1", NERD_THINKING: "medium" });
+	assert.deepEqual(thinking.request({ max_tokens: 65536 }), { max_tokens: 24576 });
+	const asked = session(repo(), { NERD_THINKING: "medium", NERD_PLAN_MAX_TOKENS: "20000" });
+	assert.deepEqual(asked.request({ max_tokens: 65536 }), { max_tokens: 20000 });
+	const off = session(repo(), { NERD_THINKING: "off" });
+	assert.deepEqual(off.request({ max_tokens: 65536 }), { max_tokens: 6144 });
+});
+
 test("plan step: a reply cut at the cap gives its last complete draft", () => {
 	const d = repo();
 	const reply = session(d, { NERD_RALPH: "1" });
@@ -139,6 +150,50 @@ test("plan step: a reply cut at the cap with no complete draft gets a note, at m
 	assert.match(reply(cut, "length").entries[0].content, /re-?draft|final plan/i);
 	assert.match(reply(cut, "length").entries[0].content, /re-?draft|final plan/i);
 	assert.doesNotMatch(reply(cut, "length").entries[0].content, /length budget/);
+});
+
+// Ticket 089 of the process: three cut replies in a row with no text; the third was frozen.
+test("plan step: a cut or empty reply with no plan — the next request goes with thinking off", () => {
+	const reply = session(repo(), { NERD_RALPH: "1", NERD_THINKING: "medium" });
+	assert.equal((reply.request({ model: "m" }) as Record<string, unknown>).enable_thinking, undefined);
+	const note = reply("", "length").entries[0].content;
+	assert.match(note, /final plan/);
+	assert.doesNotMatch(note, /0 tokens/);
+	const p = reply.request({ model: "m", chat_template_kwargs: { foo: 1 } }) as Record<string, unknown>;
+	assert.deepEqual(p.chat_template_kwargs, { foo: 1, enable_thinking: false });
+	assert.equal(p.enable_thinking, false);
+	const empty = session(repo(), { NERD_RALPH: "1" });
+	assert.match(empty("").entries[0].content, /final plan/);
+});
+
+test("plan step: the note with no cap names no token count", () => {
+	const reply = session(repo(), { NERD_PLAN_MAX_TOKENS: "0" });
+	const note = reply("PLAN\n1. hmm", "length").entries[0].content;
+	assert.match(note, /length limit/);
+	assert.doesNotMatch(note, /\(0 tokens\)/);
+});
+
+test("plan step: past the time budget the tools go away with a note and thinking is off", () => {
+	const d = repo();
+	const { pi, handlers } = fakePi();
+	let active: string[] = [];
+	(pi as unknown as { setActiveTools: (t: string[]) => void }).setActiveTools = (t) => {
+		active = t;
+	};
+	const opts = planStepOptions(false, ["read", "write"], { NERD_PLAN_MAX_MINUTES: "0.0001" }, PLAN_TOOLS);
+	assert.ok(opts);
+	planStep(pi, opts);
+	const ctx = { cwd: d, sessionManager: { getBranch: () => [] } };
+	handlers.get("before_agent_start")?.({ prompt: "t" }, ctx);
+	assert.deepEqual(active, PLAN_TOOLS);
+	const start = Date.now();
+	while (Date.now() - start < 20) {} // past 0.0001 min = 6 ms
+	const r = handlers.get("tool_result")?.({ content: [{ type: "text", text: "file" }] }, ctx) as { content: { text: string }[] };
+	assert.match(r.content[1].text, /time budget/);
+	assert.deepEqual(active, []);
+	const p = handlers.get("before_provider_request")?.({ payload: { model: "m" } }, ctx) as Record<string, unknown>;
+	assert.equal(p.enable_thinking, false);
+	assert.equal(handlers.get("tool_result")?.({ content: [] }, ctx), undefined); // noted once
 });
 
 test("plan-lint: NERD_PLAN_LINT=0 saves the plan as it is", () => {

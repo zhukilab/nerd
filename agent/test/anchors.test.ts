@@ -45,6 +45,31 @@ test("anchors: task, latest remark, PLAN.md, notes/ index and changed files", ()
 	assert.match(t, /Files changed since the task began:\nPLAN\.md\nnotes\/wuxing\.md\nserver\.js/);
 });
 
+test("anchors: the project as given is not among the changed files", () => {
+	// Process ticket 067: plan-step.ts commits the given project after the first message,
+	// so --since listed every given file, test/ too, and the model went to check that it
+	// had not touched the tests it may not touch.
+	const d = tempDir("nerd-anchors-given-");
+	const g = (...a: string[]) => spawnSync("git", ["-C", d, ...a], { encoding: "utf8" });
+	g("init", "-q");
+	g("config", "user.name", "t");
+	g("config", "user.email", "t@t");
+	mkdirSync(join(d, "lib"));
+	mkdirSync(join(d, "test"));
+	writeFileSync(join(d, "lib", "slug.js"), "// given\n");
+	writeFileSync(join(d, "test", "slug.test.js"), "// given\n");
+	writeFileSync(join(d, "package.json"), "{}\n");
+	g("add", ".");
+	g("commit", "-qm", "Project as given");
+	writeFileSync(join(d, "PLAN.md"), "# Plan\n");
+	g("add", "PLAN.md");
+	g("commit", "-qm", "Plan");
+	writeFileSync(join(d, "lib", "slug.js"), "// fixed\n");
+	g("commit", "-qam", "Fix slug");
+	writeFileSync(join(d, "README.md"), "# slug\n");
+	assert.deepEqual(changedFiles(d, "2000-01-01T00:00:00Z"), ["PLAN.md", "README.md", "lib/slug.js"]);
+});
+
 test("anchors: everything is cut to the budget; nothing to say gives nothing", () => {
 	const d = repo();
 	writeFileSync(join(d, "PLAN.md"), `# Plan\n${"step — check: run it\n".repeat(500)}`);
@@ -78,6 +103,33 @@ test("anchors: after a compaction one message goes to the model, steered while i
 	assert.doesNotMatch(sent[0].message.content, /latest message/, "one operator message: no separate latest");
 	assert.equal(sent[0].options.deliverAs, "steer");
 	assert.equal(sent[1].options.deliverAs, "nextTurn");
+});
+
+// Ticket 089 of the process: after a compaction in the work the model believed it was still read-only.
+test("anchors: the phase is named from the active tools — the work, or the plan step", () => {
+	const d = repo();
+	const work = anchorText({ cwd: d, task: "t", max: 4000, tools: ["read", "write", "bash"] });
+	assert.match(work ?? "", /^\[harness\][^\n]*\n\nNow: the work\. Your tools are `read`, `write`, `bash`/);
+	const plan = anchorText({ cwd: d, task: "t", max: 4000, tools: ["read", "ls"] });
+	assert.match(plan ?? "", /Now: the questions-and-plan step\. You can read files, not change them/);
+	assert.doesNotMatch(anchorText({ cwd: d, task: "t", max: 4000 }) ?? "", /Now:/);
+	// Process ticket 092: the work clock put the tools away, and the anchors said "the plan step".
+	const none = anchorText({ cwd: d, task: "t", max: 4000, tools: [] });
+	assert.match(none ?? "", /Now: no tools — the time budget put them away\. Reply in text only/);
+	assert.doesNotMatch(none ?? "", /questions-and-plan/);
+	const handlers: Record<string, (e: unknown, ctx: unknown) => void> = {};
+	const sent: string[] = [];
+	const pi = {
+		on: (name: string, h: (e: unknown, ctx: unknown) => void) => {
+			handlers[name] = h;
+		},
+		getActiveTools: () => ["read", "edit"],
+		sendMessage: (m: { content: string }) => sent.push(m.content),
+	};
+	anchors(pi as never, {});
+	const branch = [{ type: "message", message: { role: "user", content: "the task" } }];
+	handlers.session_compact({}, { cwd: d, isIdle: () => false, sessionManager: { getBranch: () => branch } });
+	assert.match(sent[0], /Now: the work\. Your tools are `read`, `edit`/);
 });
 
 test("anchors: PLAN.md as the plan step writes it gives questions with answers, steps and done-when; no task quote, no assumptions", () => {

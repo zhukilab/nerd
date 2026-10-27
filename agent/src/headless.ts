@@ -15,8 +15,13 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { nerdBashTool } from "./bash-tool.ts";
 import { allTools } from "./harness.ts";
-import { type settingsFor, systemPrompt, type Thinking } from "./local.ts";
+import { calcOn, type settingsFor, systemPrompt, type Thinking } from "./local.ts";
 import { configurePackages, packagePaths } from "./packages.ts";
+import { loopGuard } from "./loop-guard.ts";
+import { outputCap } from "./output-cap.ts";
+import { calcTool, planCalcOn } from "./plan-calc.ts";
+import { PLAN_TOOLS } from "./plan-step.ts";
+import { SCOUT_SYSTEM, type ScoutSession, scoutOn, scoutTool } from "./scout.ts";
 
 export interface HeadlessOptions {
 	cwd: string;
@@ -29,6 +34,50 @@ export interface HeadlessOptions {
 	/** Where the session file goes; without it the session is in memory only. */
 	sessionDir?: string;
 	env?: NodeJS.ProcessEnv;
+}
+
+/**
+ * The scout's helper (scout.ts): a new session of the same model in the same project, with
+ * the plan step's reading tools only, the loop guard and the output cap, its own system prompt,
+ * in memory. No packages, no harness: no plan step, no scout of its own.
+ */
+export async function scoutSession(o: HeadlessOptions): Promise<ScoutSession> {
+	const env = o.env ?? process.env;
+	const settingsManager = SettingsManager.inMemory(o.settings);
+	const guards: ExtensionFactory = (pi) => {
+		pi.on("session_start", () => pi.setActiveTools(PLAN_TOOLS));
+		loopGuard(pi);
+		outputCap(pi, env);
+	};
+	const resourceLoader = new DefaultResourceLoader({
+		cwd: o.cwd,
+		agentDir: o.agentDir,
+		settingsManager,
+		extensionFactories: [{ name: "nerd-scout", factory: guards }],
+		noExtensions: true,
+		noSkills: true,
+		noPromptTemplates: true,
+		noThemes: true,
+		noContextFiles: true,
+		systemPrompt: SCOUT_SYSTEM,
+	});
+	await resourceLoader.reload();
+	const { session } = await createAgentSession({
+		cwd: o.cwd,
+		agentDir: o.agentDir,
+		model: o.model,
+		thinkingLevel: o.thinking,
+		modelRuntime: o.modelRuntime,
+		resourceLoader,
+		tools: PLAN_TOOLS,
+		sessionManager: SessionManager.inMemory(o.cwd),
+		settingsManager,
+	});
+	await session.bindExtensions({
+		mode: "print",
+		onError: (err) => console.error(`Extension error (${err.extensionPath}): ${err.error}`),
+	});
+	return session;
 }
 
 export async function headlessSession(o: HeadlessOptions) {
@@ -47,7 +96,7 @@ export async function headlessSession(o: HeadlessOptions) {
 		noPromptTemplates: true,
 		noThemes: true,
 		noContextFiles: true,
-		systemPrompt: systemPrompt(allTools(env).includes("web_fetch")),
+		systemPrompt: systemPrompt(allTools(env, true).includes("web_fetch"), calcOn(env)),
 	});
 	await resourceLoader.reload();
 	const { session } = await createAgentSession({
@@ -59,9 +108,14 @@ export async function headlessSession(o: HeadlessOptions) {
 		resourceLoader,
 		// The plan step's read-only tools must be registered to be switched on;
 		// the harness starts every session with TOOLS active.
-		tools: allTools(env),
+		tools: allTools(env, true),
 		// Replaces the built-in bash by name: the same tool with a default timeout.
-		customTools: [nerdBashTool(o.cwd)],
+		// And the plan step's calculator (plan-calc.ts, NERD_PLAN_CALC=1), the scout (scout.ts, NERD_SCOUT=1).
+		customTools: [
+			nerdBashTool(o.cwd),
+			...(planCalcOn(env) ? [calcTool()] : []),
+			...(scoutOn(env) ? [scoutTool(o.cwd, () => scoutSession(o), env)] : []),
+		],
 		// A session file is what pi-vcc's vcc_recall searches.
 		sessionManager: o.sessionDir ? SessionManager.create(o.cwd, o.sessionDir) : SessionManager.inMemory(o.cwd),
 		settingsManager,

@@ -52,7 +52,7 @@ check it works and what to look at when it does not:
 |---|---|
 | [docs/INSTALL.md](docs/INSTALL.md) | platforms (x86_64 + NVIDIA, WSL2, aarch64 GB10), VRAM/disk/RAM per model variant, prerequisites |
 | [docs/MACOS.md](docs/MACOS.md) | macOS on Apple silicon: the model on the Mac (llama-server with Metal, or MLX), the agent in its container — so far run on one Mac; what to send back (`tools/report.sh`) |
-| [docs/OPERATE.md](docs/OPERATE.md) | `./UP` `./DOWN` `./STATUS`, `.env`, connecting, keys, ports, the operator address, PuTTY, headless runs |
+| [docs/OPERATE.md](docs/OPERATE.md) | `./UP` `./DOWN` `./STATUS`, `.env`, connecting, keys, ports, the operator address, PuTTY, headless runs, `hold` under a session manager |
 | [docs/MAINTAIN.md](docs/MAINTAIN.md) | updating the model, Pi, the llama.cpp fork, Node; rebuilding; troubleshooting |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | what runs where and why |
 | [AGENTS.md](AGENTS.md) | for an agent (or a person) maintaining this repository |
@@ -100,13 +100,15 @@ inside its container. It runs as uid 1000, so a bind-mounted workspace (or
 `/logs`) must be writable by that uid, or pass `--user "$(id -u):$(id -g)"`.
 Named volumes need nothing. The agent's event log goes to `/logs` (mount it to
 keep it). The exit code is the agent's: 0 when it finished with a final
-answer, 1 otherwise.
+answer, 1 otherwise, 2 for bad arguments; `docker stop` (SIGTERM) or Ctrl-C
+aborts the turn and ends the run cleanly with 143 or 130.
 
 Server modes: `serve` (the default) downloads the model if needed and runs
 llama-server in the foreground, on `0.0.0.0:8080` of its network (publish
 `-p 127.0.0.1:8080:8080` to reach it from the host); `fetch` only downloads and
 checks the model. Agent modes: `"<task>"` headless, `tui` the conversation,
-below. Build times, image sizes and measured speeds are in
+below, and `hold` for a session manager that starts Pi itself
+([docs/OPERATE.md](docs/OPERATE.md#under-a-session-manager-hold)). Build times, image sizes and measured speeds are in
 [docs/INSTALL.md](docs/INSTALL.md).
 
 ### Talking to the agent: `tui`
@@ -184,7 +186,8 @@ operator about those (or "none"), a numbered plan with a check per step, and
 what "done" will look like. With questions, the TUI turn ends and
 the operator answers; headless, `NERD_PLAN_ANSWER` answers (default «на твоё
 усмотрение»). Then the harness writes the plan to `PLAN.md`, commits it
-(`git init` first if needed), switches the work tools back on and the run
+(in a directory that is not yet a repository, `git init` and a first commit
+"Project as given" before it), switches the work tools back on and the run
 continues. A new task is the first message of a conversation, or one sent with
 `/task <text>`; anything else is a remark within the task. `NERD_PLAN_STEP=0`
 skips the step. The loop guard ([`agent/src/loop-guard.ts`](agent/src/loop-guard.ts))
@@ -197,7 +200,8 @@ model guessed it) gets a note to search instead of guessing again, and
 npmjs.com's 403 a pointer to the registry (`NERD_FETCH_GUARD=0` = off).
 After every successful `write` or `edit` the harness runs a linter on the file
 ([`agent/src/lint-check.ts`](agent/src/lint-check.ts)): biome for JS/TS, JSON,
-CSS and a page's inline scripts, ruff for Python, shellcheck for shell. Only
+CSS and a page's inline scripts, ruff for Python, shellcheck for shell,
+`cargo check` of the crate for Rust (with `nerd-get rust`). Only
 what the linter calls an error, never style: a script that does not parse, an
 undeclared name (a missing import). It is appended to the tool's result; a
 clean file adds nothing (`NERD_LINT=0` = off).
@@ -206,11 +210,15 @@ the operator's checker will, in a clean clone of HEAD
 ([`agent/src/done-gate.ts`](agent/src/done-gate.ts)): nothing left
 uncommitted; with a `package.json`, a real `test` script (not `npm init`'s
 placeholder) that passes, and a start command (`scripts.start`, or one
-node/npm command in a README "Run" section) that serves `/` on `$PORT`; no
-linter errors in the files changed. What fails goes back to the model as one
+node/npm command in a README "Run" section) that serves `/` on `$PORT`; the
+commands of a README "Check" section pass; with a `Cargo.toml`, `cargo test`
+passes and clippy reports no errors; no linter errors in the files changed; and
+no tests weakened since the task began (a test file deleted or renamed where no
+runner finds it, or a new skip/only/todo marker), which the Ralph loop's rounds
+check too, always on. What fails goes back to the model as one
 message, at most twice per operator message (`NERD_DONE_GATE_ROUNDS`); a
 passing check adds nothing (`NERD_DONE_GATE=0` = off).
-With `NERD_RALPH=1` (off by default until measured) the plan's DONE WHEN items
+With the Ralph loop (on by default; `NERD_RALPH=0` turns it off) the plan's DONE WHEN items
 each carry a command, and the harness runs them in a clean clone after the
 work ([`agent/src/ralph.ts`](agent/src/ralph.ts), decision 0014 in nerd-doc):
 if any fails, the conversation is compacted and a new round starts from the
@@ -227,11 +235,30 @@ model once with the lines quoted; what is still wrong is written into the plan
 and the work goes on (`NERD_PLAN_LINT=0` = off). A check that is unusable itself
 never starts a round: it is reported as not demonstrated.
 A reply cannot run away: each reply of the plan step is capped
-(`NERD_PLAN_MAX_TOKENS`, 6144 tokens, about twice the longest plan seen), and a
-reply cut there, or one with several drafts, gives its last complete plan. In
+(`NERD_PLAN_MAX_TOKENS`, 6144 tokens, about twice the longest plan seen; with
+thinking on 24576, wider than the thinking of any reply that gave a plan), and a
+reply cut there, or one with several drafts, gives its last complete plan; a
+reply cut, or empty, with no plan in it is asked once more with thinking off.
+The step has a wall clock too (`NERD_PLAN_MAX_MINUTES`, 45; 0 = off): past it the
+tools are put away and the requests go without thinking, so the next reply is
+the plan. Each turn of the work can have one (`NERD_WORK_MAX_MINUTES`, off by
+default), from its first request: at the budget a note asks to commit and sum
+up, 15 minutes later the tools go away, the harness commits the working tree
+itself, and a reply still streaming then is cut and a short summary asked for,
+without tools or thinking. In
 every turn, a reply whose tail is the same piece of text three times and more
-is stopped and the model is told what it repeated, at most twice per task
+is stopped and the model is told what it repeated, at most twice per task; so
+is a tool call whose arguments, as they stream, end in 4000 characters and more
+of one repeated piece (`"ssss…"` in a test, 85K characters in an hour)
 ([`agent/src/repeat-guard.ts`](agent/src/repeat-guard.ts); `NERD_REPEAT_GUARD=0` = off).
+Off by default, until measured: `NERD_CALC=1` makes every calculation a program
+run (a rule in the system prompt, and a reply of the work with ten lines of
+hand arithmetic is cut the same way, [`agent/src/calc-guard.ts`](agent/src/calc-guard.ts));
+`NERD_PLAN_CALC=1` gives the plan step a Python calculator
+([`agent/src/plan-calc.ts`](agent/src/plan-calc.ts)); `NERD_STEPS=1` keeps a
+step log: after each commit of the model's, the `check:` commands of the plan's
+steps not yet done run in a clean clone, and the commit's output says which
+steps are done ([`agent/src/step-log.ts`](agent/src/step-log.ts)).
 A `bash` output longer than `NERD_BASH_MAX_CHARS` (8000 characters; 0 = off)
 reaches the model as its first and last lines, with the place of the whole
 output in between ([`agent/src/output-cap.ts`](agent/src/output-cap.ts)); runs
@@ -242,8 +269,15 @@ quiet defaults: no colour, no progress bars, no npm fund/audit notices, no pager
 (`NERD_QUIET=0` = off). After each compaction of the conversation the harness
 hands the model its anchors in one message: the task in the operator's words,
 the latest remark, `PLAN.md`, the `notes/` index and the files changed since the
-task began, within `NERD_ANCHORS_MAX_CHARS` (4000)
+task began (not the project as given), within `NERD_ANCHORS_MAX_CHARS` (4000)
 ([`agent/src/anchors.ts`](agent/src/anchors.ts); `NERD_ANCHORS=0` = off).
+Pi sends every reply's thinking back to the model, and within one task's turn
+it stays in the context: at a compaction it was about three quarters of it.
+So by default no earlier reply's thinking goes back to the model; the session
+keeps all of it ([`agent/src/thinking-keep.ts`](agent/src/thinking-keep.ts)).
+Measured on Bonsai with the 015 tasks, 12 runs against 12: PASS 11/12 against
+7/12, compactions in the work 0.1 per run against 1.6. `NERD_THINKING_KEEP=N`
+keeps the last N replies' thinking, `all` sends all of it back as Pi does.
 
 **The operator's rules.** What the operator wants in every project goes into
 `RULES.md` in Pi's agent dir (`~/.pi/nerd`, the home volume) through the TUI's
@@ -309,10 +343,11 @@ Server defaults, each overridable in the server's environment (through
 `./UP`: `NERD_CTX`, `NERD_MODEL_VARIANT` in `.env`, the rest in
 `compose.override.yaml`, docs/OPERATE.md): context `NERD_CTX=65536`, KV cache
 `NERD_KV=q4_0`, `NERD_NGL=99` (all layers on the GPU), flash attention on,
-`NERD_SLOTS=1`, prompt cache off (`--cache-ram 0`: its KV snapshots overflow an
-8 GB card), extra flags in `NERD_LLAMA_ARGS`. The agent's own variables
+`NERD_SLOTS=1`, prompt cache in host RAM `NERD_CACHE_RAM=4096` MiB (a context
+that comes back after another one used the slot is not processed again; `0`
+turns it off), extra flags in `NERD_LLAMA_ARGS`. The agent's own variables
 (`NERD_THINKING`, `NERD_VERIFY_N`, `NERD_SPEC_CHECK`, `NERD_BASH_TIMEOUT`,
-`NERD_PLAN_STEP`, `NERD_PLAN_ANSWER`, `NERD_PLAN_LINT`, `NERD_PLAN_MAX_TOKENS`, `NERD_REPEAT_GUARD`, `NERD_LOOP_GUARD_N`, `NERD_FETCH_GUARD`, `NERD_LINT`, `NERD_DONE_GATE`, `NERD_RALPH`, `NERD_BASH_MAX_CHARS`, `NERD_QUIET`, `NERD_ANCHORS`, `NERD_RULES_FILE`, `NERD_SUMMARY_GOAL`, `NERD_VCC_RECALL`, `NERD_WEB_NOTES`, `NERD_PI_VCC`, `NERD_WEB`) are described in
+`NERD_PLAN_STEP`, `NERD_PLAN_ANSWER`, `NERD_PLAN_LINT`, `NERD_PLAN_MAX_TOKENS`, `NERD_PLAN_MAX_MINUTES`, `NERD_WORK_MAX_MINUTES`, `NERD_CALC`, `NERD_PLAN_CALC`, `NERD_STEPS`, `NERD_REPEAT_GUARD`, `NERD_LOOP_GUARD_N`, `NERD_FETCH_GUARD`, `NERD_LINT`, `NERD_DONE_GATE`, `NERD_RALPH`, `NERD_BASH_MAX_CHARS`, `NERD_QUIET`, `NERD_ANCHORS`, `NERD_RULES_FILE`, `NERD_SUMMARY_GOAL`, `NERD_THINKING_KEEP`, `NERD_VCC_RECALL`, `NERD_WEB_NOTES`, `NERD_PI_VCC`, `NERD_WEB`, `NERD_SCOUT`, `NERD_AGORA_CHANNEL`) are described in
 [`agent/src/run.ts`](agent/src/run.ts). `HF_TOKEN` is sent to Hugging Face if
 set. Header comments of [`Dockerfile`](Dockerfile) and
 [`container/entrypoint.sh`](container/entrypoint.sh) list the rest.
@@ -351,7 +386,8 @@ on `127.0.0.1:8888` (`NERD_SEARXNG_PORT`) and asks public engines (DuckDuckGo,
 Brave, Startpage, Mojeek, Wikipedia) without an account or key; nothing else in
 the image goes to the network on its own. `web_fetch` reads a page as text; it
 refuses localhost and private addresses (the agent checks its own app with
-`browse`). Cost: 526 tokens in every request (the tools' schemas and a
+`browse`); each page it read is kept in the project as `notes/web/<host-and-path>.md`
+([`agent/src/web-notes.ts`](agent/src/web-notes.ts); `NERD_WEB_NOTES=0` = off). Cost: 526 tokens in every request (the tools' schemas and a
 shortened guidance). Asked to find the canonical wuxing cycles and cite its
 sources, the agent searched, read three Wikipedia pages and wrote both cycles
 correctly with the URLs. Public engines rate-limit and show CAPTCHAs at times;

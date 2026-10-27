@@ -11,6 +11,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
+import { cargoEnv, isCargoProject } from "./cargo.ts";
 import { INSTALL_MS, isolatedEnv, listeningPorts, sh, TEST_MS, testExcerpt } from "./done-gate.ts";
 import { PLAN_FILE } from "./plan-step.ts";
 
@@ -62,7 +63,8 @@ const CHECK_AFTER = /^(.*?)`([^`]+)`(.*?)\s*(?:—|–|--|-|:)?\s*check:\s*(.*)$
 const CMD_ITEM = /^`([^`]+)`\s+((?:exits?|returns?)\s+(?:with\s+)?(?:code\s+)?0\b.*)$/i;
 // And the command after "check:" with no backticks at all (the plan-only stand of
 // ticket 065: kept so even after the lint's retry), when it starts like a command.
-const COMMAND = /^(?:!\s*)?(?:node|npm|npx|test|\[|grep|git|sh|bash|curl|browse|cd|ls|diff|cmp|python3?|jq)\b/;
+// One leading ^ (BARE takes the rest as its own group); cargo and nerd-rs-eval for Rust (process ticket 090).
+const COMMAND = /^(?:(?:!\s*)?(?:node|npm|npx|test|\[|grep|git|sh|bash|curl|browse|cd|ls|diff|cmp|python3?|jq|cargo|nerd-rs-eval|printf)\b|\.\/target\/)/;
 const BARE = new RegExp(`^(.*?)\\s*(?:—|–|--|-|:)?\\s*check:\\s*(${COMMAND.source.slice(1)}.*)$`, "i");
 // From the stand of ticket 070: the closing backtick forgotten at the end of the
 // line, and "<claim>: `<command>`" with no "check:" at all.
@@ -199,20 +201,62 @@ export function unfailable(cmd: string): string | undefined {
 	if (/&&\s*(echo|printf)\b[^|;]*\|\|\s*(echo|printf)\b/.test(c)) return "both of its outcomes are an echo (`&& echo PASS || echo FAIL`): the result is printed, not returned";
 	if (/\|\|\s*(echo|printf|true|:)\b/.test(c)) return "a failure inside it is swallowed (`|| echo …`, `|| true`)";
 	if (/console\.assert\s*\(/.test(c) && !/process\.exit(Code)?\b|assert\.|throw\b/.test(c)) return "console.assert only logs: a failed assertion still exits 0";
-	if (/\|\s*[^|]*\$\?/.test(c)) return "it reads $? after a pipe, which is the last command's code, not the check's";
+	// A pipe inside a command substitution is not this pipe: `o=$(printf … | bin) && ec=$?` reads
+	// the substitution's code, the binary's (process ticket 093).
+	if (/\|\s*[^|]*\$\?/.test(c.replace(/\$\((?:[^()]|\([^()]*\))*\)/g, "SUB"))) return "it reads $? after a pipe, which is the last command's code, not the check's";
 	if (/(^|[;&|]\s*)git diff\b/.test(c) && !/--exit-code|--quiet/.test(c) && !/git diff[^;&|]*\|/.test(c)) return "`git diff` exits 0 whether or not there are changes (add --exit-code or --quiet)";
 	for (const s of nodeScripts(cmd)) {
 		if ((s.prints || PRINTS.test(s.body)) && !DECIDES.test(s.body) && !/\|\s*grep\b/.test(c)) {
 			return "its node script only prints: the harness reads the exit code, not the output (exit non-zero with process.exit, assert or throw)";
 		}
 	}
+	const rs = rustProgram(cmd);
+	if (rs !== undefined && RS_PRINTS.test(rs) && !RS_DECIDES.test(rs) && !/\|\s*grep\b/.test(c)) {
+		return "its nerd-rs-eval program only prints: the harness reads the exit code, not the output (assert!, assert_eq! or panic! when the result is wrong)";
+	}
 	return undefined;
 }
 
+// nerd-rs-eval (process ticket 090): the program after it, in one pair of quotes.
+const RS_EVAL = /\bnerd-rs-eval\b(?:\s+-C\s+\S+)?\s+(["'])([\s\S]*?)\1/;
+const RS_PRINTS = /\b(e?print(ln)?|dbg)!\s*\(/;
+const RS_DECIDES = /\b(assert(_eq|_ne)?|panic|unreachable|todo|unimplemented)!\s*\(|process::exit|\.unwrap\(|\.expect\(/;
+
+/** The Rust statements a command gives to nerd-rs-eval, or undefined. */
+export function rustProgram(cmd: string): string | undefined {
+	return cmd.match(RS_EVAL)?.[2];
+}
+
 /** Why a check command cannot even start (its own syntax), or undefined. Runs no part of it. */
+/**
+ * A quote inside the node -e program that closes the shell's quoted string, the
+ * program going on right after it: `node -e "… '["a","b"]' …"` reaches node as
+ * `'[a,b]'` — it parses, it runs, and it compares the wrong thing. Process ticket 087:
+ * two checks of one plan failed for this in every round. Undefined when fine.
+ */
+export function splitProgram(cmd: string): string | undefined {
+	for (const m of cmd.matchAll(/(?:\bnode\b[^|;&\n]*?\s(?:-e|--eval|-p|--print)|\bnerd-rs-eval\b(?:\s+-C\s+\S+)?)\s+(["'])/g)) {
+		const q = m[1];
+		let i = (m.index ?? 0) + m[0].length;
+		for (; i < cmd.length; i++) {
+			if (q === '"' && cmd[i] === "\\") i++;
+			else if (cmd[i] === q) break;
+		}
+		const next = cmd[i + 1];
+		if (i < cmd.length && next !== undefined && !/[\s;|&)]/.test(next)) {
+			const who = m[0].includes("nerd-rs-eval") ? "nerd-rs-eval" : "node";
+			const how = who === "node" ? "use the other quote inside or escape it" : "put the program in single quotes (Rust strings use double ones)";
+			return `a ${q} inside the ${who} program closes the shell's ${q === '"' ? "double" : "single"}-quoted string and the program goes on after it, so ${who} gets a different program than written; ${how}${q === '"' && who === "node" ? ' (\\")' : ""}`;
+		}
+	}
+	return undefined;
+}
+
 export function syntaxError(cmd: string): string | undefined {
 	const shell = spawnSync("sh", ["-n", "-c", cmd], { encoding: "utf8", timeout: 10_000 });
 	if (shell.status !== 0) return `the command does not parse in the shell: ${(shell.stderr || "").trim().split("\n")[0]}`;
+	const split = splitProgram(cmd);
+	if (split) return split;
 	for (const s of nodeScripts(cmd)) {
 		const dir = mkdtempSync(join(tmpdir(), "nerd-check-"));
 		try {
@@ -268,9 +312,9 @@ export function hashFiles(files: string[], root: string): string {
 	return h.digest("hex");
 }
 
-/** Runs every item in a clean clone of HEAD (npm ci/install first when there is a
- * package.json), then checks the README's quoted web facts (checkQuotes). */
-export async function runDoneWhen(cwd: string, items: DoneItem[], timeoutMs = TEST_MS): Promise<ItemResult[]> {
+/** Runs every item in a clean clone of HEAD, or of commit `at` (npm ci/install first
+ * when there is a package.json), then checks the README's quoted web facts (checkQuotes). */
+export async function runDoneWhen(cwd: string, items: DoneItem[], timeoutMs = TEST_MS, at?: string): Promise<ItemResult[]> {
 	const top = await git(cwd, "rev-parse", "--show-toplevel");
 	if (top.code !== 0) return items.map((i) => ({ ...i, ok: false, why: "not a git repository" }));
 	const root = top.out.trim();
@@ -280,11 +324,18 @@ export async function runDoneWhen(cwd: string, items: DoneItem[], timeoutMs = TE
 	try {
 		const clone = await sh("git", ["clone", "-q", "--no-hardlinks", root, join(tmp, "app")], tmp, 120_000);
 		if (clone.code !== 0) return items.map((i) => ({ ...i, ok: false, why: "a clean clone failed" }));
+		if (at && (await sh("git", ["checkout", "-q", at], join(tmp, "app"), 60_000)).code !== 0) {
+			return items.map((i) => ({ ...i, ok: false, why: `commit ${at.slice(0, 7)} could not be checked out` }));
+		}
 		const app = join(tmp, "app", sub);
 		if (existsSync(join(app, "package.json"))) {
 			const lock = existsSync(join(app, "package-lock.json"));
 			await sh("npm", [lock ? "ci" : "install", "--no-audit", "--no-fund", "--prefer-offline"], app, INSTALL_MS);
 		}
+		// A Cargo project (process ticket 090): the checks build into the project's shared target
+		// dir, not each from nothing, and a binary that reads stdin gets an empty one, not a hang.
+		const rust = isCargoProject(app);
+		const env = rust ? cargoEnv(app, root, isolatedEnv(blocked, { CI: "1" })) : isolatedEnv(blocked, { CI: "1" });
 		const out: ItemResult[] = [];
 		for (const i of items) {
 			if (!i.cmd) {
@@ -301,7 +352,7 @@ export async function runDoneWhen(cwd: string, items: DoneItem[], timeoutMs = TE
 				out.push({ ...i, ok: false, unusable: true, why: `the check is broken: ${broken}` });
 				continue;
 			}
-			const r = await sh("sh", ["-c", i.cmd], app, timeoutMs, isolatedEnv(blocked, { CI: "1" }));
+			const r = await sh("sh", ["-c", rust ? `{ ${i.cmd}\n} < /dev/null` : i.cmd], app, timeoutMs, env);
 			out.push({ ...i, ok: r.code === 0, rc: r.code, why: r.code === 0 ? "" : `exited with ${r.code ?? "a timeout"}:\n${testExcerpt(r.out)}` });
 		}
 		for (const q of checkQuotes(app)) out.push({ claim: "the web facts the README quotes", ok: false, why: q });

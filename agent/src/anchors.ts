@@ -6,6 +6,7 @@
 // task. So the harness hands the anchors over itself, right after each
 // compaction, as one message:
 //
+//   - the phase, from the active tools: the work, or the read-only plan step;
 //   - the task in the operator's words (the first message), and the latest
 //     operator message if there is a later one (a remark);
 //   - PLAN.md, its head;
@@ -64,11 +65,13 @@ function git(cwd: string, args: string[]): string {
 	return r.status === 0 ? r.stdout : "";
 }
 
-/** Files committed since `sinceIso` and those not committed, without duplicates. */
+/** Files committed since `sinceIso` and those not committed, without duplicates. The commit of the
+ *  project as given (plan-step.ts savePlan, made after the first message) is not the work's. */
 export function changedFiles(cwd: string, sinceIso?: string): string[] {
 	const files = new Set<string>();
 	if (sinceIso) {
-		for (const l of git(cwd, ["log", `--since=${sinceIso}`, "--name-only", "--format="]).split("\n")) if (l.trim()) files.add(l.trim());
+		const log = git(cwd, ["log", `--since=${sinceIso}`, "--invert-grep", "--grep=^Project as given$", "--name-only", "--format="]);
+		for (const l of log.split("\n")) if (l.trim()) files.add(l.trim());
 	}
 	for (const l of git(cwd, ["status", "--porcelain", "--untracked-files=all"]).split("\n")) {
 		const p = l.slice(3).trim();
@@ -131,12 +134,31 @@ export function planAnchor(text: string, max: number): { text: string; answer?: 
 	return { text: cut(parts.join("\n\n"), max), answer };
 }
 
-export type AnchorInput = { cwd: string; task?: string; latest?: string; sinceIso?: string; max: number };
+export type AnchorInput = { cwd: string; task?: string; latest?: string; sinceIso?: string; max: number; tools?: string[] };
+
+const WRITE_TOOLS = ["write", "edit", "bash"];
+
+/**
+ * Which phase the model is in, from the tools it has now. Process ticket 089: after a
+ * compaction in the work the summary still held the plan step's "you can read files, not
+ * change them", and the model spent 80 min believing it had no tools to write with.
+ */
+export function phaseLine(tools: string[] | undefined): string | undefined {
+	if (!tools) return undefined;
+	// No tools at all is neither phase: a time budget (plan step or work) put them away
+	// (process ticket 092: called "the plan step" in the middle of the work).
+	if (!tools.length) return "Now: no tools — the time budget put them away. Reply in text only, as the harness's last note asks; a tool call written as text is not run.";
+	if (tools.some((t) => WRITE_TOOLS.includes(t)))
+		return `Now: the work. Your tools are ${tools.map((t) => `\`${t}\``).join(", ")} — you can change files and run commands; anything in the summary about a turn where files cannot be changed is over.`;
+	return "Now: the questions-and-plan step. You can read files, not change them; reply with the plan in the form asked for.";
+}
 
 /** The anchors message, or undefined when there is nothing to say. */
 export function anchorText(a: AnchorInput): string | undefined {
 	const parts: string[] = [];
 	const budget = a.max;
+	const phase = phaseLine(a.tools);
+	if (phase) parts.push(phase);
 	if (a.task) parts.push(`The task, in the operator's words:\n${cut(a.task, Math.floor(budget * 0.25))}`);
 	let plan: { text: string; answer?: string } | undefined;
 	const planPath = join(a.cwd, "PLAN.md");
@@ -183,6 +205,7 @@ export function anchors(pi: ExtensionAPI, env = process.env) {
 			latest: users.length > 1 ? textOf(users.at(-1)?.message?.content) : undefined,
 			sinceIso: users[0]?.timestamp,
 			max,
+			tools: typeof pi.getActiveTools === "function" ? pi.getActiveTools() : undefined,
 		});
 		if (!text) return;
 		pi.sendMessage({ customType: "nerd-anchors", content: text, display: true }, { deliverAs: ctx.isIdle() ? "nextTurn" : "steer" });

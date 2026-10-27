@@ -144,6 +144,8 @@ FROM node AS agent-build
 ENV PATH=/opt/node/bin:$PATH
 WORKDIR /opt/nerd/agent
 COPY agent/package.json agent/package-lock.json ./
+# patches/: applied to node_modules by npm ci's postinstall (pi-vcc, process ticket 057)
+COPY agent/patches ./patches
 RUN npm ci --omit=dev --no-audit --no-fund
 COPY agent/src ./src
 
@@ -195,11 +197,15 @@ COPY --chmod=755 container/pkill-guard.sh /usr/local/bin/pkill
 COPY --chmod=755 container/pkill-guard.sh /usr/local/bin/pgrep
 COPY --chmod=755 container/test-pkill-guard.sh /opt/nerd/
 COPY --chmod=755 container/browse.sh /usr/local/bin/browse
+# Pi under a session manager, in a container started with `hold` (entrypoint.sh).
+COPY --chmod=755 container/nerd-pi.sh /usr/local/bin/nerd-pi
 COPY --chmod=755 container/test-browse.sh /opt/nerd/
 COPY --from=linters /out/ruff /out/biome /usr/local/bin/
 # Languages and their packages live in the agent's home, a volume (decision
 # 0012): nerd-get installs go, rust, uv there, pinned and checked.
 COPY --chmod=755 container/nerd-get.sh /usr/local/bin/nerd-get
+# A Rust library's behaviour check, as node -e is for JS (process ticket 090).
+COPY --chmod=755 container/nerd-rs-eval.mjs /usr/local/bin/nerd-rs-eval
 # The agent runs whatever the model asks for, so not as root. The mount points
 # exist in the image, owned by nerd, so fresh named volumes inherit that owner.
 # Password "*" instead of useradd's "!": no password can match, but the

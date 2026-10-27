@@ -96,6 +96,14 @@ test("done gate: a server that ignores PORT, a failing test, uncommitted work", 
 	assert.match(r.failures[2], /must listen on the port in the PORT environment variable|exited with code/);
 });
 
+test("done gate: a modified tracked file is named whole (status ' M', process ticket 092: 'ib/tax.js')", async () => {
+	const d = repo({ "lib/tax.js": "// v1\n" });
+	writeFileSync(join(d, "lib/tax.js"), "// v2\n");
+	writeFileSync(join(d, "b.js"), "// new\n");
+	const r = await checkProject(d);
+	assert.match(r.failures[0], /Uncommitted changes: lib\/tax\.js, b\.js\./);
+});
+
 test("done gate: a CLI start command that exits 0 is not a server", async () => {
 	const r = await checkProject(
 		repo({
@@ -118,6 +126,43 @@ test("done gate: linter errors in changed committed files", { skip: !on("biome")
 	const r = await checkProject(repo({ "a.js": "console.log(undeclaredThing);\n" }), ["a.js"]);
 	assert.equal(r.failures.length, 1);
 	assert.match(r.failures[0], /Linter errors in committed files:\n {2}a\.js: line 1/);
+});
+
+const CARGO = on("cargo") ? undefined : "cargo not on PATH";
+// The gate's shared target dirs (cargo.ts, under the cache) go to this file's temp dir, not the user's cache.
+process.env.XDG_CACHE_HOME = tempDir("nerd-gate-cache-");
+const CRATE = {
+	"Cargo.toml": '[package]\nname = "demo"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\n',
+	".gitignore": "/target\n",
+	"src/lib.rs": "pub fn add(a: u32, b: u32) -> u32 { a + b }\n",
+	"tests/add.rs": "#[test]\nfn adds() { assert_eq!(demo::add(2, 3), 5); }\n",
+};
+
+test("done gate, Rust: a crate whose tests pass passes; the README's cargo checks run", { skip: CARGO }, async () => {
+	assert.deepEqual((await checkProject(repo(CRATE), ["src/lib.rs"])).failures, []);
+	const r = await checkProject(
+		repo({
+			...CRATE,
+			"src/main.rs": 'fn main() { let n: u32 = std::env::args().nth(1).unwrap().parse().unwrap(); if n > 3 { std::process::exit(1) } println!("{n}"); }\n',
+			"README.md": "# demo\n\n## Check\n\n```\ncargo test\ncargo run -q -- 2\ncargo run -q -- 7\n```\n",
+		}),
+	);
+	assert.equal(r.failures.length, 1, r.failures.join("\n---\n"));
+	assert.match(r.failures[0], /The README's check `cargo run -q -- 7` in a clean clone exited with 1/);
+});
+
+test("done gate, Rust: a failing test, a build error, a clippy error", { skip: CARGO }, async () => {
+	const failing = await checkProject(repo({ ...CRATE, "src/lib.rs": "pub fn add(a: u32, b: u32) -> u32 { a * b }\n" }));
+	assert.equal(failing.failures.length, 1, failing.failures.join("\n---\n"));
+	assert.match(failing.failures[0], /`cargo test` in a clean clone exited with 101:[\s\S]*left: 6/);
+	const broken = await checkProject(repo({ ...CRATE, "src/lib.rs": 'pub fn add(a: u32, b: u32) -> u32 { "x" }\n' }));
+	assert.equal(broken.failures.length, 1);
+	assert.match(broken.failures[0], /does not build:\n {4}src\/lib\.rs:1:\d+: error\[E0308\]: mismatched types/);
+	const lint = await checkProject(repo({ ...CRATE, "src/lib.rs": `${CRATE["src/lib.rs"]}pub fn same(a: u32) -> bool { a == a }\n` }));
+	if (on("cargo-clippy")) {
+		assert.equal(lint.failures.length, 1, lint.failures.join("\n---\n"));
+		assert.match(lint.failures[0], /clippy reports errors[\s\S]*equal expressions/);
+	}
 });
 
 test("done gate: the note numbers the failures and names the round", () => {

@@ -3,10 +3,10 @@
 // image has all three; elsewhere those tests are skipped).
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { inlineScripts, lintFile, lintNote, lintOn, parseBiome, parseRuff, parseShellcheck } from "../src/lint-check.ts";
+import { foreignNames, inlineScripts, lintFile, lintNote, lintOn, lintRust, parseBiome, parseRuff, parseRustc, parseShellcheck } from "../src/lint-check.ts";
 import { tempDir } from "./tmp.ts";
 
 const on = (cmd: string) => spawnSync("sh", ["-c", `command -v ${cmd}`]).status === 0;
@@ -42,6 +42,16 @@ test("lint: inline scripts with their line, src= and JSON skipped; the note list
 	assert.deepEqual(inlineScripts(html), [["\nlet x.y = 1;\n", true, 4]]);
 	const note = lintNote("public/app.js", [{ line: 2, text: "Expected a semicolon" }]);
 	assert.match(note, /^\[lint\] public\/app\.js: 1 error:\n {2}line 2: Expected a semicolon\nFix these/);
+	assert.doesNotMatch(note, /never assigned/, "no hint without an undeclared name");
+	// 0006g: `io` only called — the socket.io client was never loaded; 0006r2: `myElement` is
+	// the page's own state, assigned on a reset — declaring it is the fix, no hint.
+	const io = [{ line: 9, text: "<script>: The io variable is undeclared. (correctness/noUndeclaredVariables)" }];
+	assert.match(lintNote("public/index.html", io, "const socket = io();\nif (typeof io === 'undefined') x();\n"), /`io` is never assigned in this file: .*only hides the error\.$/);
+	const own = [{ line: 394, text: "<script>: The myElement variable is undeclared. (correctness/noUndeclaredVariables)" }];
+	assert.doesNotMatch(lintNote("public/game.html", own, "case 'match_reset':\n  myElement = null;\n"), /never assigned/);
+	assert.deepEqual(foreignNames([...io, ...own], "myElement++;\nconst f = io => io == 1;\n"), ["io"], "`=>` and `==` are no assignment");
+	assert.match(lintNote("a.py", [{ line: 1, text: "F821 Undefined name `foo`" }], "print(foo)\n"), /`foo` is never assigned/);
+	assert.doesNotMatch(lintNote("public/index.html", io), /never assigned/, "no file text (over a MiB): no hint");
 	assert.equal(lintOn({}), true);
 	assert.equal(lintOn({ NERD_LINT: "0" }), false);
 });
@@ -68,6 +78,28 @@ test("lint: ruff — a syntax error and an undefined name, not style", { skip: !
 	assert.equal(lintFile(file("bad.py", "def f(x):\n    return x\nprint(f(1)\n")).length > 0, true);
 	assert.match(lintFile(file("undef.py", "def f(x):\n    return y + 1\n"))[0]?.text ?? "", /y/);
 	assert.deepEqual(lintFile(file("style.py", "import os, sys\ndef g( a ):\n  return a+1\n")), []);
+});
+
+test("lint: rustc's short lines — the edited file's errors by line, the rest as a count", () => {
+	const ps = parseRustc(["src/lib.rs:3:5: error[E0308]: mismatched types", "src/other.rs:1:1: error: expected item"], "/c", "/c/src/lib.rs");
+	assert.deepEqual(ps, [
+		{ line: 3, text: "error[E0308]: mismatched types" },
+		{ line: 0, text: "and 1 error elsewhere in the crate (`cargo check` shows them)" },
+	]);
+	assert.match(lintNote("src/lib.rs", ps), /line 3: error\[E0308\][^\n]*\n {2}and 1 error elsewhere/);
+});
+
+test("lint: cargo check — a .rs file's errors, not its warnings", { skip: !on("cargo") && "cargo not on PATH" }, () => {
+	const c = tempDir("nerd-lint-crate-");
+	mkdirSync(join(c, "src"));
+	writeFileSync(join(c, "Cargo.toml"), '[package]\nname = "l"\nversion = "0.1.0"\nedition = "2021"\n');
+	writeFileSync(join(c, "src/lib.rs"), "pub fn f() -> u32 {\n    let unused = 1;\n    7\n}\n");
+	assert.deepEqual(lintRust(join(c, "src/lib.rs")), [], "a warning is not reported");
+	writeFileSync(join(c, "src/lib.rs"), 'pub fn f() -> u32 {\n    "seven"\n}\n');
+	const ps = lintRust(join(c, "src/lib.rs"));
+	assert.equal(ps[0]?.line, 2);
+	assert.match(ps[0]?.text ?? "", /error\[E0308\]/);
+	assert.deepEqual(lintRust(join(dir, "loose.rs")), [], "a .rs file outside any crate is left alone");
 });
 
 test("lint: shellcheck — an unparsable script, by extension or #!", { skip: !on("shellcheck") }, () => {

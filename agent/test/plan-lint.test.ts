@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseDoneWhen, syntaxError, unfailable } from "../src/done-when.ts";
-import { lintPlan, lintRetryMessage, planLintOn } from "../src/plan-lint.ts";
+import { callNumbers, exercisesBehavior, hasOwnInput, highestThreshold, lintPlan, lintRetryMessage, planLintOn } from "../src/plan-lint.ts";
 
 const plan = (done: string, steps = "1. write it — check: `npm test`") => `# Plan
 
@@ -136,6 +136,61 @@ test("lint: placeholders in either mode; without Ralph a Done when item needs no
 	assert.deepEqual(errors(plan("- the operator sees the page"), false), []);
 });
 
+// Ticket 080: semver-pair-1's Done when, all four checks pass on a wrong compare().
+test("lint: a Done when with no check of behavior is an error", () => {
+	const semver1 = plan(
+		[
+			"- semver.js exports parse, compare, sort — check: `node -e \"import('./semver.js').then(m=>{if(!m.parse||!m.compare||!m.sort)process.exit(1)})\"`",
+			"- package.json has type module and test script — check: `grep -q '\"type\": \"module\"' package.json`",
+			"- test file exists — check: `test -f test/semver.test.js`",
+			"- npm test exits 0 — check: `npm test`",
+		].join("\n"),
+	);
+	assert.ok(errors(semver1).some((f) => /concrete input/.test(f.message)));
+	assert.ok(errors(plan("- tests pass — check: `npm test`")).some((f) => /concrete input/.test(f.message)));
+	const typeofOnly = "- exports — check: `node -e \"import('./lib/slug.js').then(m=>process.exit(typeof m.slugify==='function'?0:1))\"`";
+	assert.ok(errors(plan(typeofOnly)).some((f) => /concrete input/.test(f.message)));
+});
+
+test("lint: what counts as a behavior check", () => {
+	const ok = [
+		"node -e \"import('./lib/allocate.js').then(m=>process.exit(JSON.stringify(m.allocate(3,[0.3,0.1,0.2]))==='[2,0,1]'?0:1))\"",
+		"node -e 'import(\"./semver.js\").then(m=>{try{m.parse(\"1.2\")}catch{process.exit(0)}process.exit(1)})'",
+		"node --input-type=module -e \"import {slugify} from './lib/slug.js'; process.exit(slugify('Łódź')==='lodz'?0:1)\"",
+		"python3 -c 'import m; assert m.f(2) == 4'",
+		"node scripts/check-slug.mjs",
+		"node - <<'EOF' > /dev/null 2>&1 || echo FAIL",
+		"curl -sf http://localhost:3000/api/health | grep -q ok",
+	];
+	for (const c of ok) assert.ok(exercisesBehavior(c), c);
+	const no = ["npm test", "node --test", "node --check lib/x.js", "test -f a.js", "grep -q x a.js", "node -e \"import('./a.js').then(m=>process.exit(typeof m.f==='function'?0:1))\""];
+	for (const c of no) assert.ok(!exercisesBehavior(c), c);
+});
+
+// Ticket 083: the rule in the plan, the check only on the task's own example.
+test("lint with ownInput: behavior checks only on the task's examples are an error", () => {
+	const task = "# Plan\n\n## Task\n\n> allocate(total, ratios): e.g. allocate(3, [0.3, 0.1, 0.2]) returns [2, 0, 1]; allocate(100, [1, 1, 1]) returns [34, 33, 33].\n\n## Steps\n1. write it — check: `npm test`\n\n## Done when\n";
+	const example = "- example — check: `node -e \"import('./lib/allocate.js').then(m=>process.exit(JSON.stringify(m.allocate(3,[0.3,0.1,0.2]))==='[2,0,1]'?0:1))\"`\n- tests — check: `npm test`\n";
+	const own = `${example}- different decimals — check: \`node -e "import('./lib/allocate.js').then(m=>process.exit(JSON.stringify(m.allocate(10,[3.3,0,1]))==='[8,0,2]'?0:1))"\`\n`;
+	const flagged = (t: string) => lintPlan(t, { checks: true, ownInput: true }).some((f) => /only the task's own examples/.test(f.message));
+	assert.ok(flagged(task + example));
+	assert.ok(!flagged(task + own));
+	assert.ok(!lintPlan(task + example, { checks: true }).some((f) => /own examples/.test(f.message)), "off unless asked");
+	assert.ok(hasOwnInput("node -e \"import('./s.js').then(m=>process.exit(m.slugify('ŁÓDŹ')==='lodz'?0:1))\"", "slugify('Hello World') returns 'hello-world'"));
+	assert.ok(!hasOwnInput("node -e \"import('./s.js').then(m=>process.exit(m.slugify('Hello World')==='hello-world'?0:1))\"", "slugify('Hello World') returns 'hello-world'"));
+});
+
+// Ticket 087: semver-pair-2's two checks, the JSON quotes closing the shell string.
+test("syntaxError: a quote inside the node program that closes the shell string", () => {
+	const split = `node -e "import { sort } from './semver.js'; const s = sort(['1.0.0', '0.9.0']); process.exit(JSON.stringify(s) === '["0.9.0","1.0.0"]' ? 0 : 1)"`;
+	assert.match(syntaxError(split) ?? "", /closes the shell's double-quoted string/);
+	const escaped = `node --input-type=module -e "import { sort } from './semver.js'; process.exit(JSON.stringify(sort(['1.0.0'])) === '[\\"1.0.0\\"]' ? 0 : 1)"`;
+	assert.equal(syntaxError(escaped), undefined);
+	assert.equal(syntaxError(`node -e "process.exit(1+1===2?0:1)" && npm test`), undefined);
+	assert.equal(syntaxError(`(node -e 'process.exit(0)')`), undefined);
+	assert.match(syntaxError(`node -e 'const s='abc'; process.exit(s==="abc"?0:1)'`) ?? "", /single-quoted/);
+});
+
 test("the retry message quotes the lines and asks for the same form", () => {
 	const text = plan("- npm test passes — check: `npm test | tail -1; echo $?`");
 	const m = lintRetryMessage(lintPlan(text, { checks: true }));
@@ -146,4 +201,74 @@ test("the retry message quotes the lines and asks for the same form", () => {
 test("NERD_PLAN_LINT=0 turns it off", () => {
 	assert.equal(planLintOn({}), true);
 	assert.equal(planLintOn({ NERD_PLAN_LINT: "0" }), false);
+});
+
+// Process ticket 089: `npm test | grep -q "2 tests passed"`; the model rewrote scripts.test to echo it.
+test("plan-lint: a check that reads the test runner's printed text is an error", () => {
+	const behave = "- f works — check: `node -e \"import('./x.js').then(m=>process.exit(m.f(1)===2?0:1))\"`";
+	for (const cmd of ['npm test | grep -q "2 tests passed"', "node --test 2>&1 | tail -1 | grep -q 'fail 0'", "npm run test | wc -l", "cargo test 2>&1 | grep -q 'test result: ok'"]) {
+		const e = errors(plan(`- tests pass — check: \`${cmd}\`\n${behave}`));
+		assert.ok(e.some((f) => /text the test runner prints/.test(f.message)), cmd);
+	}
+	for (const cmd of ["npm test", "npm test && node check.js", "node --test test/a.test.js"]) {
+		const e = errors(plan(`- tests pass — check: \`${cmd}\`\n${behave}`));
+		assert.ok(!e.some((f) => /text the test runner prints/.test(f.message)), cmd);
+	}
+});
+
+// Process ticket 089: "5% of taxable + 4% on the part over 1 107 750" read as a band; no check past it.
+test("plan-lint: no behavior check above the task's highest threshold is an error", () => {
+	assert.equal(highestThreshold("4% on the part of taxable over 1 107 750; 20% above 37,700"), 1107750);
+	assert.equal(highestThreshold("a slug of more than 50 characters is cut"), undefined, "counts and lengths are not amounts");
+	assert.deepEqual(callNumbers("node -e \"import('./t.js').then(m=>process.exit(m.f('X', 3_000_000).a===1?0:1))\""), [3000000, 1, 0, 1]);
+	const withTask = (done: string) =>
+		`# Plan\n\n## Task\n\n> incomeTax = 5% of taxable + 4% on the part of taxable over 1 107 750.\n\n## Steps\n1. write it — check: \`npm test\`\n\n## Done when\n${done}\n`;
+	const at = (g: string) => `- tax — check: \`node -e "import('./t.js').then(m=>process.exit(m.tax(${g})===1?0:1))"\``;
+	assert.ok(errors(withTask(at("50000"))).some((f) => /highest threshold \(1107750\)/.test(f.message)));
+	assert.ok(!errors(withTask(`${at("50000")}\n${at("3_000_000")}`)).some((f) => /highest threshold/.test(f.message)));
+	assert.ok(!errors(plan(at("5"))).some((f) => /highest threshold/.test(f.message)), "no threshold in the task: no finding");
+});
+
+// Process ticket 090: Rust. A library's behavior check is nerd-rs-eval (container/nerd-rs-eval.mjs),
+// a binary's is cargo run with arguments or an input; cargo test alone is the work's own tests.
+test("plan-lint, Rust: what counts as a behavior check", () => {
+	const ok = [
+		"nerd-rs-eval 'assert_eq!(to_roman(4), \"IV\");'",
+		"nerd-rs-eval -C . 'let mut inv = Inventory::new(); inv.add(\"a\", 3); assert_eq!(inv.count(\"a\"), 3);'",
+		"cargo run -q -- 1 2 3 | grep -qx 2",
+		"printf '3\\n1\\n2\\n' | cargo run -q --bin stats -- --median | grep -qx 2",
+		"./target/debug/stats --mean < data.txt",
+	];
+	for (const c of ok) assert.ok(exercisesBehavior(c), c);
+	const no = ["cargo test", "cargo build", "cargo test --test visible", "cargo run", "nerd-rs-eval 'let _ = Inventory::new(); std::process::exit(0);'"];
+	for (const c of no) assert.ok(!exercisesBehavior(c), c);
+	assert.deepEqual(callNumbers("nerd-rs-eval 'assert_eq!(tax(\"US-MA\", 2_000_000.0), 135114.0);'"), [2000000]);
+	assert.deepEqual(callNumbers("cargo run -q -- 3000000 7 | grep -qx 5"), [3000000, 7]);
+});
+
+test("plan-lint, Rust: the hint names nerd-rs-eval for a Rust project", () => {
+	const e = lintPlan(plan("- tests pass — check: `cargo test`"), { checks: true, rust: true }).find((f) => /concrete input/.test(f.message));
+	assert.match(e?.message ?? "", /nerd-rs-eval 'assert_eq!/);
+	const js = lintPlan(plan("- tests pass — check: `npm test`"), { checks: true }).find((f) => /concrete input/.test(f.message));
+	assert.doesNotMatch(js?.message ?? "", /nerd-rs-eval/);
+});
+
+test("done when, Rust: a bare cargo command is read; nerd-rs-eval that only prints cannot fail; a split quote", () => {
+	assert.deepEqual(parseDoneWhen("## Done when\n- runs — check: cargo run -q -- 4 | grep -qx IV\n"), [{ claim: "runs", cmd: "cargo run -q -- 4 | grep -qx IV" }]);
+	assert.match(unfailable("nerd-rs-eval 'println!(\"{}\", to_roman(4));'") ?? "", /only prints/);
+	assert.equal(unfailable("nerd-rs-eval 'assert_eq!(to_roman(4), \"IV\");'"), undefined);
+	assert.match(syntaxError(`nerd-rs-eval "assert_eq!(to_roman(4), "IV");"`) ?? "", /closes the shell's double-quoted string/);
+	assert.equal(syntaxError(`nerd-rs-eval 'assert_eq!(to_roman(4), "IV");'`), undefined);
+});
+
+// Process ticket 093: false findings on the Rust plans of the small-task run.
+test("plan-lint, Rust: todo! is not a placeholder; a built binary without ./ is a run; $? of a substitution is fine", () => {
+	const todo = plan("- f — check: `nerd-rs-eval 'assert_eq!(f(1), 2);'`", "1. replace the two `todo!` stubs in src/lib.rs — check: `cargo test`");
+	assert.ok(!errors(todo).some((f) => /placeholder/.test(f.message)), "todo! is Rust's macro");
+	assert.ok(errors(plan("- f — check: `nerd-rs-eval 'assert_eq!(f(1), 2);'`", "1. TODO later — check: `cargo test`")).some((f) => /placeholder/.test(f.message)));
+	assert.ok(exercisesBehavior("cargo build -q && o=$(printf '1\\n2\\n' | target/debug/stats 2>/dev/null) && [ \"$o\" = 'count 2' ]"));
+	assert.equal(unfailable("cargo build -q && o=$(printf '1\\n' | target/debug/stats) && ec=$? && [ $ec -eq 0 ]"), undefined);
+	assert.match(unfailable("printf '1\\n' | cargo run -q | tail -1; [ $? -eq 0 ]") ?? "", /reads \$\? after a pipe/);
+	const runner = lintPlan(plan("- tests — check: `cargo test --quiet 2>&1 | grep -q 'test result: ok'`\n- f — check: `nerd-rs-eval 'assert_eq!(f(1), 2);'`"), { checks: true, rust: true });
+	assert.match(runner.find((f) => /test runner prints/.test(f.message))?.message ?? "", /Use `cargo test` alone/);
 });
