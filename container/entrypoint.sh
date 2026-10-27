@@ -137,7 +137,8 @@ base=${NERD_BASE_URL:-}
 [ -n "$base" ] || die "NERD_BASE_URL is not set: the agent needs a llama-server, e.g. http://nerd-llm:8080/v1 (./UP sets it; README, \"Running by hand\")"
 
 # tui mode: sshd first, so a missing key is reported at once and the operator
-# can log in (to a shell) while the server is still loading.
+# can log in while the server is still loading (the login waits for Pi;
+# Ctrl-C there gives a shell).
 start_sshd() {
   local keys=/run/nerd/authorized_keys
   install -d -m 700 "$HOME/.ssh"
@@ -158,6 +159,8 @@ start_sshd() {
   # -p overrides the config's Port.
   /usr/sbin/sshd -D -e -f /opt/nerd/sshd_config -p "$ssh_port" 2>> /logs/sshd.log &
   sshd_pid=$!
+  # Until Pi's tmux session is there, a login waits for it (ssh-login.sh).
+  date +%s > /tmp/nerd-tui-starting
   sleep 1
   kill -0 "$sshd_pid" 2>/dev/null || { tail -20 /logs/sshd.log >&2; die "sshd did not start"; }
   say "sshd on port $ssh_port (log /logs/sshd.log); user nerd, key only"
@@ -233,6 +236,7 @@ if [ "$mode" = tui ]; then
   tmux -u new-session -d -s nerd -n pi -c /workspace \
     "while :; do node /opt/nerd/agent/src/tui.ts /workspace --continue; echo '[pi exited; restarting in 3 s]'; sleep 3; done" \
     || die "tmux session did not start"
+  rm -f /tmp/nerd-tui-starting
   say "Pi in tmux session 'nerd'; ssh -p $ssh_port nerd@<host> attaches to it"
   # Up while sshd runs. The server going away is not this container's to
   # restart: Pi reports the failed request and retries, and works again when
