@@ -23,6 +23,12 @@ with an NVIDIA GPU of 8 GB or more. A Mac with Apple silicon and 16 GB or
 more has its own short path, so far run on one Mac (M1 Pro, 16 GB):
 [docs/MACOS.md](docs/MACOS.md). Without a GPU nerd does not run.
 
+On Windows there is a shorter way: download
+[`create_nerd_wsl.cmd`](create_nerd_wsl.cmd) alone and run it. It makes a WSL
+distribution `nerd` and does everything below in it; then
+[`run_nerd.cmd`](run_nerd.cmd) opens the agent
+([docs/INSTALL.md](docs/INSTALL.md#windows-wsl2)).
+
 ```sh
 git clone --depth=1 https://github.com/zhukilab/nerd && cd nerd
 tools/check-prerequisites.sh      # one table: what is OK, what is MISSING and how to fix it

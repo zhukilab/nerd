@@ -4,6 +4,7 @@
 # Container Toolkit (NVIDIA's apt repository) with docker's nvidia runtime and
 # a CDI spec. The NVIDIA driver is only checked: installing a driver on someone
 # else's machine by script can leave it without a display; the hint says how.
+# On WSL first /etc/wsl.conf: systemd on, no Windows PATH (lib.sh NERD_WSL_CONF).
 # Other systems: prints what to do. Every step is skipped when already done,
 # so running it twice is safe. Finishes with tools/check-prerequisites.sh.
 #
@@ -11,6 +12,8 @@
 #   tools/install-prerequisites.sh --yes    do it (uses sudo)
 set -uo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=tools/lib.sh
+. "$here/lib.sh"
 
 act=0
 for a in "$@"; do
@@ -68,13 +71,55 @@ else repo=debian codename=${VERSION_CODENAME:-}; fi
 wsl=0; grep -qi microsoft /proc/version 2>/dev/null && wsl=1
 changed_docker=0
 
+# 0. WSL: /etc/wsl.conf as nerd wants it (lib.sh, NERD_WSL_CONF); it is read
+# when the distribution starts, so a change needs a restart from Windows.
+wsl_restart=0
+if [ $wsl = 1 ]; then
+  say "0. WSL settings (/etc/wsl.conf)"
+  conf=$(mktemp)
+  { [ -f /etc/wsl.conf ] && cat /etc/wsl.conf; } > "$conf"
+  changed_conf=0
+  set -- "${NERD_WSL_CONF[@]}"
+  while [ $# -ge 3 ]; do
+    if [ "$(nerd_wsl_conf_get "$conf" "$1" "$2")" = "$3" ]; then echo "   [$1] $2 = $3: already"
+    else
+      echo "   [$1] $2 = $3: to be set (now '$(nerd_wsl_conf_get "$conf" "$1" "$2")')"
+      nerd_wsl_conf_with "$conf" "$1" "$2" "$3" > "$conf.new" && mv "$conf.new" "$conf"
+      changed_conf=1
+    fi
+    shift 3
+  done
+  if [ $changed_conf = 1 ]; then
+    root "[ ! -f /etc/wsl.conf ] || cp -p /etc/wsl.conf /etc/wsl.conf.before-nerd; install -m 0644 '$conf' /etc/wsl.conf"
+    wsl_restart=1
+  fi
+  rm -f "$conf"
+  # Written but not in effect yet: the distribution has not restarted since.
+  [ -d /run/systemd/system ] || wsl_restart=1
+  [ "$(nerd_wsl_windows_path)" = 0 ] || wsl_restart=1
+  [ $wsl_restart = 1 ] && echo "   takes effect after a restart of this distribution, from Windows: wsl --terminate ${WSL_DISTRO_NAME:-<distribution>}"
+  # The Windows driver's nvidia-smi (and libcuda) are in /usr/lib/wsl/lib; that
+  # directory is not always on PATH, with the Windows PATH off in particular.
+  if [ -x /usr/lib/wsl/lib/nvidia-smi ] && ! command -v nvidia-smi >/dev/null 2>&1; then
+    root "ln -sf /usr/lib/wsl/lib/nvidia-smi /usr/local/bin/nvidia-smi"
+  fi
+fi
+desktop=$(nerd_desktop_docker)
+have_docker=0; command -v docker >/dev/null 2>&1 && have_docker=1
+
 # 1. Docker Engine with buildx and compose (./UP runs docker compose, decision 0012).
 say "1. Docker Engine ($repo $codename)"
-if command -v docker >/dev/null 2>&1 && docker buildx version >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+if [ "$desktop" = windows ]; then
+  # Not this distribution's: Docker Engine goes in, and /usr/bin comes before the Windows PATH.
+  echo "   $(command -v docker) is Docker Desktop's on Windows (WSL appends the Windows PATH), not this distribution's"
+  have_docker=0
+fi
+if [ $have_docker = 1 ] && docker buildx version >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
   echo "   already installed: $(docker --version), $(docker compose version --short 2>/dev/null)"
-elif command -v docker >/dev/null 2>&1 && dpkg -s docker-ce >/dev/null 2>&1; then
+  [ "$desktop" = integration ] && echo "   it is Docker Desktop's WSL integration: untested with nerd (docs/INSTALL.md)"
+elif [ $have_docker = 1 ] && dpkg -s docker-ce >/dev/null 2>&1; then
   root "apt-get update && apt-get install -y docker-buildx-plugin docker-compose-plugin"
-elif command -v docker >/dev/null 2>&1; then
+elif [ $have_docker = 1 ]; then
   echo "   docker is installed but not from Docker's repository (docker.io, snap or Docker Desktop)."
   echo "   It needs the buildx and compose plugins: sudo apt-get install docker-buildx docker-compose-v2 (Ubuntu's) or switch to docker-ce:"
   echo "   https://docs.docker.com/engine/install/$repo/ (remove the other packages first). Not changed by this script."
@@ -84,8 +129,14 @@ else
   root "echo \"deb [arch=\$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/$repo $codename stable\" > /etc/apt/sources.list.d/docker.list"
   root "apt-get update && apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin"
   changed_docker=1
+  hash -r
 fi
-if [ -d /run/systemd/system ]; then
+# The daemon is this distribution's service only when a package of it put one in.
+if [ "$desktop" = integration ]; then
+  echo "   the daemon is Docker Desktop's: start Docker Desktop on Windows"
+elif [ $changed_docker = 0 ] && ! dpkg -s docker-ce >/dev/null 2>&1 && ! dpkg -s docker.io >/dev/null 2>&1; then
+  echo "   no docker service in this distribution: not started by this script"
+elif [ -d /run/systemd/system ]; then
   if systemctl is-active --quiet docker 2>/dev/null; then echo "   docker service running"
   else root "systemctl enable --now docker"; fi
 else
@@ -146,6 +197,11 @@ if [ $changed_docker = 1 ]; then
 fi
 
 echo
+if [ $wsl_restart = 1 ]; then
+  echo "WSL: restart this distribution for /etc/wsl.conf to take effect -- in Windows: wsl --terminate ${WSL_DISTRO_NAME:-<distribution>}"
+  echo "(if systemd is still not running after it: wsl --shutdown, which stops every distribution); then run this script again."
+  echo
+fi
 if [ $act = 0 ]; then
   echo "That was the plan. Run with --yes to do it. Current state:"
 else

@@ -100,19 +100,92 @@ Other distributions: the script prints the links for each step and stops.
 The GPU reaches WSL2 through the Windows driver; nothing NVIDIA is installed
 on the Linux side except the container toolkit.
 
+### The easy way: two clicks
+
+For a Windows 10 or 11 PC with an NVIDIA graphics card of 8 GB or more. Nothing
+here touches your other WSL distributions, if you have any. Not yet run end to
+end on a fresh Windows machine: if a step fails, the message says what to do,
+and running the file again goes on from where it stopped.
+
+**Once, to prepare the PC:**
+
+1. **The NVIDIA driver.** Install the current one for your card from
+   <https://www.nvidia.com/Download/index.aspx> (Game Ready or Studio, either
+   works) and reboot if it asks. That is all the CUDA you need: Linux gets the
+   GPU from this driver. Do not install any NVIDIA driver inside Linux.
+2. **WSL.** Open the Start menu, type `cmd`, right-click *Command Prompt*,
+   *Run as administrator*, and type:
+
+   ```bat
+   wsl --install --no-distribution
+   ```
+
+   Reboot when it is done. Already have WSL? Run `wsl --update` instead (the
+   script needs a recent one).
+3. **Disk space.** About 30 GB free on the drive that will hold nerd (the
+   model is 6 GB, the images and Linux the rest).
+
+**Install nerd (one run, 15-40 minutes, mostly downloads and builds):**
+
+4. Download one file:
+   <https://raw.githubusercontent.com/zhukilab/nerd/main/create_nerd_wsl.cmd>
+   (right-click, *Save link as*), into a folder of your choice, e.g. your
+   Downloads.
+5. Double-click `create_nerd_wsl.cmd`. A black window shows each step; leave
+   it until it prints `Done.` It needs no answers. To put nerd's Linux disk on
+   another drive, run it from a Command Prompt instead:
+
+   ```bat
+   create_nerd_wsl.cmd --location D:\wsl\nerd
+   ```
+
+   If it stops with a table where a line says `MISSING`, do what that line
+   says (usually: the NVIDIA driver, or disk space) and double-click the file
+   again.
+
+It makes a Linux of its own, named `nerd` (Debian, with systemd; Windows
+programs and the Windows PATH off inside it; a user `nerd` with sudo without a
+password), restarts only that Linux (`wsl --terminate nerd`; it never runs
+`wsl --shutdown`, which would stop all of them), downloads nerd into it, installs
+Docker and NVIDIA's container toolkit there, checks the machine, builds nerd and
+downloads the model. At the end it puts `run_nerd.cmd` next to itself.
+
+**Work with it, every time:**
+
+6. Double-click `run_nerd.cmd`. It starts nerd if it is not running (a minute
+   or two: the model loads) and opens the agent's screen.
+7. Type your task in plain words and press Enter, e.g. *"Make a small web page
+   with a to-do list, on Node.js"*. The agent first asks its questions and
+   shows a plan: answer them, or say "your call". Then it works on its own; it
+   can take a long time. What it builds for a browser opens at
+   <http://localhost:8000> on this PC.
+8. To leave the agent working and the screen alone: `Ctrl-b`, then `d`. The
+   agent keeps working **while that window stays open**; closing the window
+   stops it a few seconds later. `run_nerd.cmd` again brings you back to it.
+
+`run_nerd.cmd --shell` (from a Command Prompt) opens a Linux shell in nerd's
+folder instead, for `./STATUS`, `./DOWN`, `.env` and the rest of this
+documentation. To remove nerd entirely: `wsl --unregister nerd` (everything in
+it, the work too, is deleted).
+
+### By hand, in a distribution of your own
+
 1. Install the NVIDIA driver on Windows (any recent Game Ready or Studio
    driver supports WSL2). Do not install a Linux driver inside WSL.
-2. `wsl --install -d Ubuntu-24.04` (or a separate distribution just for nerd),
-   then inside it enable systemd in `/etc/wsl.conf` (`[boot]` `systemd=true`)
-   and restart that distribution from Windows: `wsl --terminate <distribution>`
-   (`wsl.conf` is read when the distribution starts; other distributions keep
-   running). If `systemctl is-system-running` inside then says neither
-   `running` nor `degraded`, `wsl --shutdown` (it stops every distribution).
-3. Inside the distribution: clone, `tools/install-prerequisites.sh --yes`;
-   it adds you to group `docker`, which takes effect in a new login (close the
-   terminal, or `wsl --terminate <distribution>`); then
-   `tools/check-prerequisites.sh` and `./UP`. `nvidia-smi` inside WSL should
-   list the GPU.
+2. `wsl --install -d Ubuntu-24.04` (or a separate distribution just for nerd).
+3. Inside the distribution: clone, `tools/install-prerequisites.sh --yes`.
+   It sets two lines of `/etc/wsl.conf` (the old file is kept as
+   `/etc/wsl.conf.before-nerd`): `[boot] systemd = true`, so docker starts
+   with the distribution, and `[interop] appendWindowsPath = false`, so no
+   Windows program stands in for the distribution's own (Docker Desktop's
+   `docker` would: the script installs Docker Engine inside the distribution
+   either way). Windows commands then need their full path under
+   `/mnt/<drive letter>/`. It also adds you to group `docker`. Both
+   take effect after a restart of the distribution, from Windows:
+   `wsl --terminate <distribution>` (other distributions keep running; if
+   systemd still does not run after it, `wsl --shutdown`). Run the script
+   again, then `tools/check-prerequisites.sh` (it checks `wsl.conf` too) and
+   `./UP`. `nvidia-smi` inside WSL should list the GPU.
    The ssh key: `./UP` takes the public key from `~/.ssh` inside WSL. To log
    in from Windows (PowerShell's `ssh`, PuTTY), point it at the Windows one:
    `NERD_AUTHORIZED_KEYS_FILE` in `.env` set to the Windows `.pub` file as WSL
@@ -141,7 +214,8 @@ Things that behave differently on WSL2:
   power mode halved generation speed (13 against about 24 tokens/s).
 - Docker Desktop for Windows (its WSL integration) instead of Docker Engine
   inside the distribution: untested. `tools/install-prerequisites.sh` leaves
-  an existing docker alone.
+  an integration that works alone; Desktop's Windows `docker` on the Windows
+  PATH, without the integration, does not count as installed.
 
 ## Check that it works
 

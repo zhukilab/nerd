@@ -132,6 +132,68 @@ nerd_host_tool() {
   if [ "$NERD_LLAMA" = mlx ]; then echo "$NERD_ROOT/tools/mlx-host.sh"; else echo "$NERD_ROOT/tools/llama-host.sh"; fi
 }
 
+# Docker Desktop's docker as WSL sees it. "windows": the docker on PATH is its
+# Windows CLI (/mnt/<drive>/..., through the Windows PATH that WSL appends;
+# without Desktop's integration for this distribution it only prints a hint),
+# so this distribution has no docker of its own. "integration": Desktop's WSL
+# integration (a link into /mnt/wsl/docker-desktop): Desktop runs the daemon,
+# not this distribution's systemd. Nothing otherwise, and off WSL.
+nerd_desktop_docker() {
+  local d
+  grep -qi microsoft /proc/version 2>/dev/null || return 0
+  d=$(command -v docker 2>/dev/null) || return 0
+  case "$(readlink -m "$d" 2>/dev/null || echo "$d")" in
+    /mnt/wsl/docker-desktop*) echo integration ;;
+    /mnt/*) echo windows ;;
+  esac
+  return 0
+}
+
+# WSL's /etc/wsl.conf, the settings nerd wants in it (read when the
+# distribution starts): systemd, so the docker service starts with the
+# distribution and restarts the containers; no Windows PATH, so a Windows
+# program (Docker Desktop's docker.exe and its shim) cannot stand in for the
+# distribution's own. Section and key match without regard to case, as WSL
+# reads them.
+NERD_WSL_CONF=(boot systemd true interop appendWindowsPath false)
+
+# How many PATH entries are the Windows drives' (/mnt/<letter>/...): what WSL
+# appends unless appendWindowsPath = false.
+nerd_wsl_windows_path() { echo "$PATH" | tr ':' '\n' | grep -c '^/mnt/[a-zA-Z]/'; }
+
+# The value (lowercased) of [<section>] <key> in an ini file, empty if unset.
+nerd_wsl_conf_get() {
+  [ -f "$1" ] || return 0
+  awk -v s="$2" -v k="$3" '
+    /^[[:space:]]*\[/ { h = $0; gsub(/[][[:space:]]/, "", h); insec = (tolower(h) == tolower(s)); next }
+    insec {
+      line = $0; sub(/[#;].*/, "", line); n = index(line, "=")
+      if (!n) next
+      key = substr(line, 1, n - 1); gsub(/[[:space:]]/, "", key)
+      if (tolower(key) != tolower(k)) next
+      val = substr(line, n + 1); gsub(/^[[:space:]]+|[[:space:]]+$/, "", val); last = tolower(val)
+    }
+    END { print last }' "$1"
+}
+
+# The ini file $1 with [<section>] <key> = <value> set: an existing line is
+# replaced, a missing key goes at the end of its section, a missing section at
+# the end of the file. Everything else is kept as it was. Printed, not written.
+nerd_wsl_conf_with() {
+  { [ -f "$1" ] && cat "$1"; } | awk -v s="$2" -v k="$3" -v v="$4" '
+    function put() { if (insec && !done) { print k " = " v; done = 1 } }
+    /^[[:space:]]*\[/ {
+      put(); h = $0; gsub(/[][[:space:]]/, "", h); insec = (tolower(h) == tolower(s)); print; next
+    }
+    insec {
+      line = $0; sub(/[#;].*/, "", line); n = index(line, "=")
+      if (n) { key = substr(line, 1, n - 1); gsub(/[[:space:]]/, "", key)
+        if (tolower(key) == tolower(k)) { if (!done) print k " = " v; done = 1; next } }
+    }
+    { print }
+    END { put(); if (!done) { if (NR) print ""; print "[" s "]"; print k " = " v } }'
+}
+
 # The docker daemon resolves CDI devices (docker info lists spec directories:
 # default from Docker 28.2, "features": {"cdi": true} in daemon.json before).
 nerd_docker_cdi() {

@@ -1,0 +1,3 @@
+# The .cmd files keep their CRLF line ends as committed: cmd.exe misreads
+# labels in a file with LF ends, and the files are downloaded raw, one by one.
+*.cmd -text

@@ -55,6 +55,27 @@ else
   esac
 fi
 
+# --- WSL settings (/etc/wsl.conf, read when the distribution starts) ------------
+if [ $wsl = 1 ]; then
+  restart="restart the distribution, in Windows: wsl --terminate ${WSL_DISTRO_NAME:-<distribution>}"
+  fix="tools/install-prerequisites.sh --yes (sets it in /etc/wsl.conf), then $restart"
+  if [ "$(nerd_wsl_conf_get /etc/wsl.conf boot systemd)" != true ]; then
+    row MISSING wsl-systemd "[boot] systemd is not true: docker does not start with the distribution" "$fix"
+  elif [ ! -d /run/systemd/system ]; then
+    row MISSING wsl-systemd "set in /etc/wsl.conf, not running yet" "$restart (still not: wsl --shutdown)"
+  else
+    row OK wsl-systemd "systemd runs"
+  fi
+  wp=$(nerd_wsl_windows_path)
+  if [ "$(nerd_wsl_conf_get /etc/wsl.conf interop appendWindowsPath)" != false ]; then
+    row MISSING wsl-path "[interop] appendWindowsPath is not false: Windows programs ($wp PATH entries) can stand in for this distribution's, e.g. Docker Desktop's docker" "$fix"
+  elif [ "$wp" != 0 ]; then
+    row MISSING wsl-path "appendWindowsPath = false set, $wp Windows PATH entries still there" "$restart"
+  else
+    row OK wsl-path "no Windows PATH"
+  fi
+fi
+
 # --- tools the scripts use ------------------------------------------------------
 for t in git curl; do
   if command -v "$t" >/dev/null 2>&1; then row OK "$t" "$(command -v "$t")"
@@ -63,8 +84,11 @@ done
 
 # --- docker ---------------------------------------------------------------------
 docker_ok=0
+desktop=$(nerd_desktop_docker)
 if ! command -v docker >/dev/null 2>&1; then
   row MISSING docker "not installed" "tools/install-prerequisites.sh (Docker Engine from docker.com)"
+elif [ "$desktop" = windows ]; then
+  row MISSING docker "only Docker Desktop's on Windows ($(command -v docker)), none in this distribution" "tools/install-prerequisites.sh --yes (Docker Engine inside WSL, docs/INSTALL.md)"
 else
   ver=$(docker version --format '{{.Client.Version}}' 2>/dev/null)
   if out=$(docker info 2>&1 >/dev/null); then
@@ -132,7 +156,8 @@ elif [ "$NERD_LLAMA" = host ]; then
     row OK memory "$NERD_MODEL_VARIANT at context $NERD_CTX needs about $need_mib MiB of about $gpu_mib the GPU may use"
   fi
 elif ! command -v nvidia-smi >/dev/null 2>&1; then
-  if [ $wsl = 1 ]; then hint="install the NVIDIA driver on Windows (it provides the GPU to WSL2); do not install one inside WSL"
+  if [ $wsl = 1 ] && [ -x /usr/lib/wsl/lib/nvidia-smi ]; then hint="the Windows driver's is in /usr/lib/wsl/lib, not on PATH: tools/install-prerequisites.sh --yes links it"
+  elif [ $wsl = 1 ]; then hint="install the NVIDIA driver on Windows (it provides the GPU to WSL2); do not install one inside WSL"
   else hint="install the NVIDIA driver for your GPU: https://www.nvidia.com/Download/index.aspx (Ubuntu: sudo ubuntu-drivers install)"; fi
   row MISSING nvidia-driver "nvidia-smi not found" "$hint"
 elif ! q=$(nvidia-smi --query-gpu=name,driver_version,memory.total,compute_cap --format=csv,noheader,nounits 2>/dev/null) || [ -z "$q" ]; then
