@@ -148,7 +148,7 @@ programs and the Windows PATH off inside it; a user `nerd` with sudo without a
 password), restarts only that Linux (`wsl --terminate nerd`; it never runs
 `wsl --shutdown`, which would stop all of them), downloads nerd into it, installs
 Docker and NVIDIA's container toolkit there, checks the machine, builds nerd and
-downloads the model. At the end it puts `run_nerd.cmd` next to itself.
+downloads the model. At the end it puts `run_nerd.cmd` and `shrink_nerd_wsl.cmd` next to itself.
 
 **Work with it, every time:**
 
@@ -162,6 +162,15 @@ downloads the model. At the end it puts `run_nerd.cmd` next to itself.
 8. To leave the agent working and the screen alone: `Ctrl-b`, then `d`. The
    agent keeps working **while that window stays open**; closing the window
    stops it a few seconds later. `run_nerd.cmd` again brings you back to it.
+
+**Disk space.** After the install nerd's Linux takes about 29 GB on Windows,
+half of it leftovers of the build. Double-click `shrink_nerd_wsl.cmd` (also put
+next to the others) to give that back: it drops what further work does not
+need (docker's build cache, untagged images, the package cache; never the
+model or your work), stops nerd's Linux only and compacts its disk: 28.7 GB
+went down to 14.4 GB on the tested laptop. `run_nerd.cmd` starts nerd again
+as before; only a later rebuild (`./UP --build`) takes longer. An older WSL
+compacts only as administrator; the file says so.
 
 `run_nerd.cmd --shell` (from a Command Prompt) opens a Linux shell in nerd's
 folder instead, for `./STATUS`, `./DOWN`, `.env` and the rest of this

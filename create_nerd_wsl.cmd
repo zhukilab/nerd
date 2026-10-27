@@ -26,7 +26,8 @@ rem  4. as nerd: a shallow clone into ~/nerd, an ssh key, then
 rem     tools/install-prerequisites.sh --yes (Docker Engine, NVIDIA Container
 rem     Toolkit), tools/check-prerequisites.sh and ./UP (builds the images,
 rem     downloads the model: the first time takes a while).
-rem Then run_nerd.cmd, which it puts next to itself, opens the agent.
+rem Then run_nerd.cmd, which it puts next to itself, opens the agent;
+rem shrink_nerd_wsl.cmd (put there too) gives disk space back later.
 setlocal EnableExtensions
 set "NAME=nerd"
 set "REPO=https://github.com/zhukilab/nerd.git"
@@ -127,8 +128,8 @@ call :step nerd check || (
 if defined UP ( call :step nerd up || goto fail ) else ( echo    --no-up: ./UP not run; run_nerd.cmd runs it )
 
 echo.
-rem run_nerd.cmd next to this file, from the clone (as committed, CRLF).
-if not exist "%SELFDIR%run_nerd.cmd" wsl -d %NAME% -u nerd --exec bash -c "cat ~/nerd/run_nerd.cmd" > "%SELFDIR%run_nerd.cmd"
+rem run_nerd.cmd and shrink_nerd_wsl.cmd next to this file, from the clone (as committed, CRLF).
+for %%f in (run_nerd.cmd shrink_nerd_wsl.cmd) do if not exist "%SELFDIR%%%f" wsl -d %NAME% -u nerd --exec bash -c "cat ~/nerd/%%f" > "%SELFDIR%%%f"
 set "RUNARGS="
 if /i not "%NAME%"=="nerd" set "RUNARGS= --name %NAME%"
 echo Done. Start working: "%SELFDIR%run_nerd.cmd"%RUNARGS% (it starts nerd if needed and opens the agent).

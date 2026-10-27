@@ -185,7 +185,10 @@ while :; do
       docker logs --tail 30 "$c" 2>&1 | tr '\r' '\n' | tail -30 | sed "s/^/  $c | /"
       die "$c stopped or restarted ($state); see the log above and docs/MAINTAIN.md#troubleshooting"
     fi
-    logs=$(docker logs "$c" 2>&1 | tr '\r' '\n')
+    # Only this start's lines: a container that docker started again (the WSL
+    # distribution or the machine restarted) keeps the old ones, "Pi in tmux" too.
+    since=$(docker inspect -f '{{.State.StartedAt}}' "$c" 2>/dev/null)
+    logs=$(docker logs --since "$since" "$c" 2>&1 | tr '\r' '\n')
     lines=$(grep '^\[nerd ' <<< "$logs" || true)
     n=$(grep -c . <<< "$lines" || true)
     if [ "$n" -gt "${seen[$c]:-0}" ]; then tail -n "$((n - ${seen[$c]:-0}))" <<< "$lines" | sed "s/^/  $c | /"; seen[$c]=$n; fi
@@ -194,7 +197,7 @@ while :; do
       if [ -n "$progress" ]; then echo "  $c | curl: $progress"; fi
     fi
   done
-  docker logs "$NERD_NAME" 2>&1 | grep -q "Pi in tmux session" && break
+  docker logs --since "$(docker inspect -f '{{.State.StartedAt}}' "$NERD_NAME")" "$NERD_NAME" 2>&1 | grep -q "Pi in tmux session" && break
   tick=$((tick + 1))
   sleep 5
 done
