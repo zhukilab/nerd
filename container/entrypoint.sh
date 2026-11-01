@@ -6,7 +6,8 @@
 #                                        llama-server in the foreground (the default)
 #   docker run ... nerd:server fetch     only download/verify the model
 # The agent image, against a server at NERD_BASE_URL (required):
-#   docker run ... nerd:agent "<task>"   the agent on the task (or NERD_TASK), headless
+#   docker run ... nerd:agent "<task>"   the agent on the task (or NERD_PROBLEM_FILE, NERD_TASK), headless;
+#                                        NERD_MODE plan | solve | ralph (agent/src/run.ts)
 #   docker run ... nerd:agent tui        Pi's interactive TUI in tmux, reached over ssh
 #   docker run ... nerd:agent hold       no Pi: a session manager starts it with
 #                                        docker exec ... nerd-pi tui|run (nerd-pi.sh)
@@ -201,8 +202,10 @@ elif [ "${1:-}" = hold ]; then
   wait $!
   exit 0
 else
-  task=${*:-${NERD_TASK:-}}
-  [ -n "$task" ] || die 'no task: docker run ... nerd:agent "<task>" (or NERD_TASK, or "tui")'
+  # The task: the argument, else NERD_PROBLEM_FILE, else NERD_TASK. With none of them run.ts
+  # decides, the settings file read (NERD_MODE=ralph with a PLAN.md needs no task; else exit 2).
+  task=$*
+  [ -n "$task" ] || [ -n "${NERD_PROBLEM_FILE:-}" ] || task=${NERD_TASK:-}
 fi
 start_searxng
 
@@ -212,18 +215,21 @@ start_searxng
 stamp=$(date +%Y%m%d-%H%M%S)
 t0=$SECONDS
 health=${base%/}; health=${health%/v1}/health
+# Ollama (a model server on another machine, ticket 099) has no /health; its
+# /api/version answers once it is up, and it loads the model on the first request.
+ollama=${health%/health}/api/version
 # tui waits as long as it takes (sshd is up meanwhile; a first start downloads
 # 6-7 GB); a headless task gives up after NERD_HEALTH_TIMEOUT.
 limit=${NERD_HEALTH_TIMEOUT:-}
 [ -z "$limit" ] && { [ "$mode" = tui ] && limit=0 || limit=900; }
-say "llama-server: $base; waiting for $health$([ "$limit" = 0 ] || echo " (up to $limit s)")"
-until curl -sf -m 2 "$health" >/dev/null; do
+say "model server: $base; waiting for $health or $ollama$([ "$limit" = 0 ] || echo " (up to $limit s)")"
+until curl -sf -m 2 "$health" >/dev/null || curl -sf -m 2 "$ollama" >/dev/null; do
   waited=$((SECONDS - t0))
   [ "$limit" != 0 ] && [ "$waited" -ge "$limit" ] && die "no llama-server at $health after $waited s (./STATUS; on macOS: tools/llama-host.sh start)"
   [ $((waited % 60)) -lt 2 ] && [ "$waited" -ge 60 ] && say "still waiting for $health ($waited s)"
   sleep 2
 done
-say "llama-server healthy after $((SECONDS - t0)) s"
+say "model server answers after $((SECONDS - t0)) s"
 export NERD_BASE_URL=$base
 
 if [ "$mode" = tui ]; then
@@ -250,7 +256,7 @@ if [ "$mode" = tui ]; then
 fi
 
 say "agent on /workspace (events /logs/events-$stamp.jsonl)"
-node /opt/nerd/agent/src/run.ts /workspace "$task" --log "/logs/events-$stamp.jsonl"
+node /opt/nerd/agent/src/run.ts /workspace ${task:+"$task"} --log "/logs/events-$stamp.jsonl"
 rc=$?
 say "agent exited $rc"
 exit "$rc"

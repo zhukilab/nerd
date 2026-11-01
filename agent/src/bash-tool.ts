@@ -8,9 +8,13 @@
 // TUI (extension.ts), as a custom tool in the headless run (run.ts). On a
 // timeout Pi kills the command's whole process group, so whatever was started
 // in it without setsid/nohup goes too.
+//
+// With tmux (NERD_RUNS, default on) each command runs in a window of tmux
+// session nerd-runs (tmux-runs.ts): the same result, and a person can watch it.
 
 import { createBashToolDefinition, defineTool } from "@earendil-works/pi-coding-agent";
 import { outputMax } from "./output-cap.ts";
+import { RUNS_SESSION, RUNS_TOOL, runsOfProcess, runsToolOn, tmuxOperations, tmuxRunsOn } from "./tmux-runs.ts";
 
 /**
  * 600 s: long enough for the slow legitimate commands of a small project (a
@@ -25,15 +29,21 @@ export function bashTimeout(env = process.env): number {
 	return Number.isFinite(v) && v > 0 ? v : DEFAULT_BASH_TIMEOUT;
 }
 
-export function timeoutMessage(secs: number): string {
+export function timeoutMessage(secs: number, env = process.env): string {
+	const start = runsToolOn(env)
+		? `start it with the ${RUNS_TOOL} tool (action start), then check it in a separate command (curl) and read its output with ${RUNS_TOOL} output. `
+		: "start it detached with its output to a file, e.g. `setsid nohup python3 -m http.server 8000 > server.log 2>&1 < /dev/null &`, " +
+			"then check it in a separate command (curl, tail server.log). ";
 	return (
 		`The command did not return within ${secs} s and was killed together with everything it started in the foreground. ` +
-		"A long-running process (a web server, a watcher) must not run in the foreground of a bash call: start it detached " +
-		"with its output to a file, e.g. `setsid nohup python3 -m http.server 8000 > server.log 2>&1 < /dev/null &`, " +
-		"then check it in a separate command (curl, tail server.log). A client script (a WebSocket or HTTP test client) " +
+		`A long-running process (a web server, a watcher) must not run in the foreground of a bash call: ${start}` +
+		"A client script (a WebSocket or HTTP test client) " +
 		"must close its connection and exit, with a timeout of its own. If the command is just slow, give it a larger timeout."
 	);
 }
+
+/** Exit code 130 from a window: Ctrl-C, most likely a person watching it. */
+export const INTERRUPT_NOTE = `(Exit code 130: interrupted with Ctrl-C, likely by a person watching it in tmux session ${RUNS_SESSION}.)`;
 
 /**
  * Quiet defaults for the model's commands (ticket 057 of the process): no
@@ -72,7 +82,8 @@ export function bashDescription(piText: string, defaultSecs: number, env = proce
 	const max = outputMax(env);
 	let d = piText.replace(
 		"Optionally provide a timeout in seconds.",
-		`Commands time out after ${defaultSecs} s unless you give another timeout in seconds; start servers detached.`,
+		`Commands time out after ${defaultSecs} s unless you give another timeout in seconds; ` +
+			(runsToolOn(env) ? `start servers with the ${RUNS_TOOL} tool.` : "start servers detached."),
 	);
 	if (max > 0) {
 		d = d.replace(
@@ -85,7 +96,11 @@ export function bashDescription(piText: string, defaultSecs: number, env = proce
 
 /** The built-in bash tool for `cwd` with a default timeout of `defaultSecs`. */
 export function nerdBashTool(cwd: string, defaultSecs = bashTimeout()) {
-	const base = createBashToolDefinition(cwd, { spawnHook: (c) => ({ ...c, env: quietEnv(c.env) }) });
+	const windows = tmuxRunsOn();
+	const base = createBashToolDefinition(cwd, {
+		spawnHook: (c) => ({ ...c, env: quietEnv(c.env) }),
+		...(windows ? { operations: tmuxOperations(runsOfProcess()) } : {}),
+	});
 	// Pi's schema says "no default timeout"; the same schema with our default
 	// in the description (spread keeps TypeBox's symbol keys).
 	const p = base.parameters;
@@ -104,7 +119,12 @@ export function nerdBashTool(cwd: string, defaultSecs = bashTimeout()) {
 		async execute(id, params, signal, onUpdate, ctx) {
 			const timeout = params.timeout ?? defaultSecs;
 			try {
-				return await base.execute(id, { ...params, timeout }, signal, onUpdate, ctx);
+				const r = await base.execute(id, { ...params, timeout }, signal, onUpdate, ctx);
+				const last = r.content.at(-1);
+				if (windows && last?.type === "text" && /Command exited with code 130$/.test(last.text)) {
+					return { ...r, content: [...r.content.slice(0, -1), { ...last, text: `${last.text}\n${INTERRUPT_NOTE}` }] };
+				}
+				return r;
 			} catch (e) {
 				// Pi ends a timed-out call with "<output>\n\nCommand timed out after N seconds".
 				if (e instanceof Error && /Command timed out after \S+ seconds$/.test(e.message)) {

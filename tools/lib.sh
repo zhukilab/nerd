@@ -82,10 +82,13 @@ nerd_keys_file() {
 nerd_settings() {
   NERD_NAME=${NERD_NAME:-nerd}
   NERD_MODEL_VARIANT=${NERD_MODEL_VARIANT:-q1}
+  # A provider's window is its model's (agent/src/local.ts); only one set here overrides it.
+  NERD_CTX_GIVEN=${NERD_CTX:-}
   NERD_CTX=${NERD_CTX:-65536}
   NERD_SSH_PORT=${NERD_SSH_PORT:-2222}
   NERD_APP_PORT=${NERD_APP_PORT:-8000}
   NERD_LLAMA_PORT=${NERD_LLAMA_PORT:-8080}
+  NERD_KEYPROXY_PORT=18096  # agent/src/keyproxy.ts; on the instance's own network, never published
   NERD_BIND=${NERD_BIND:-0.0.0.0}
   NERD_GPU=${NERD_GPU:-auto}
   NERD_MODELS_VOLUME=${NERD_MODELS_VOLUME:-nerd-models}
@@ -97,9 +100,12 @@ nerd_settings() {
   fi
   # Where the model server runs: container (llama-server in its own container
   # <name>-llm, from the server image, with the GPU), host (llama-server on
-  # the machine itself, tools/llama-host.sh) or mlx (mlx-vlm's server on a Mac,
-  # the model in Apple's MLX format, tools/mlx-host.sh). auto: host on macOS,
-  # where docker cannot reach the GPU, container elsewhere. The agent is
+  # the machine itself, tools/llama-host.sh), mlx (mlx-vlm's server on a Mac,
+  # the model in Apple's MLX format, tools/mlx-host.sh) or remote (a server on
+  # another machine at NERD_LLAMA_URL, llama-server or Ollama; nothing is
+  # started here) or provider (a cloud provider at NERD_PROVIDER_URL, through
+  # the key proxy <name>-keyproxy, which alone holds the key). auto: host on
+  # macOS, where docker cannot reach the GPU, container elsewhere. The agent is
   # always its own container <name>.
   NERD_LLAMA=${NERD_LLAMA:-auto}
   if [ "$NERD_LLAMA" = auto ]; then
@@ -114,6 +120,23 @@ nerd_settings() {
   NERD_IMAGE=${NERD_IMAGE:-nerd:agent}
   NERD_SERVER_IMAGE=${NERD_SERVER_IMAGE:-nerd:server-sm${NERD_CUDA_ARCH//;/-}}
   NERD_LLM_NAME=$NERD_NAME-llm
+  # provider: the key proxy is the agent's server, its address ours; the key a
+  # file on this machine, mounted into the proxy alone (compose.provider.yaml).
+  if [ "$NERD_LLAMA" = provider ]; then
+    if [ -n "${NERD_NETWORK:-}" ]; then NERD_LLAMA_URL=http://127.0.0.1:$NERD_KEYPROXY_PORT/v1
+    else NERD_LLAMA_URL=http://$NERD_NAME-keyproxy:$NERD_KEYPROXY_PORT/v1; fi
+    NERD_PROVIDER_KEY_FILE=${NERD_PROVIDER_KEY_FILE:-$NERD_ROOT/var/provider.key}
+    NERD_PROVIDER_KEY_FILE=${NERD_PROVIDER_KEY_FILE/#\~/$HOME}
+  fi
+  # on: the key proxy answers only a request with the token ./UP makes at each
+  # start (var/keyproxy.token, 600; the agent is given it as its API key, other
+  # tools of yours read it there). off: anyone who reaches the proxy spends the key.
+  NERD_KEYPROXY_AUTH=${NERD_KEYPROXY_AUTH:-off}
+  NERD_KEYPROXY_TOKEN_FILE=$NERD_ROOT/var/keyproxy.token
+  NERD_KEYPROXY_TOKEN=
+  if [ "$NERD_LLAMA" = provider ] && [ "$NERD_KEYPROXY_AUTH" = on ] && [ -s "$NERD_KEYPROXY_TOKEN_FILE" ]; then
+    NERD_KEYPROXY_TOKEN=$(cat "$NERD_KEYPROXY_TOKEN_FILE")
+  fi
   # The server as the agent's container reaches it: the host (Docker Desktop
   # names it host.docker.internal; on Linux ./UP maps the name to the host
   # gateway), the server container by name on <name>-net, or loopback when
@@ -128,6 +151,10 @@ nerd_settings() {
 # The model server runs on this machine, not in a container (NERD_LLAMA=host
 # or mlx); ./UP starts it with nerd_host_tool and ./DOWN stops it.
 nerd_on_host() { [ "$NERD_LLAMA" = host ] || [ "$NERD_LLAMA" = mlx ]; }
+# The model is another machine's: nothing of it is started or stored here (remote, provider).
+nerd_elsewhere() { [ "$NERD_LLAMA" = remote ] || [ "$NERD_LLAMA" = provider ]; }
+# No model server in a container here, so no GPU to pass (host, mlx, remote, provider).
+nerd_no_gpu() { nerd_on_host || nerd_elsewhere; }
 nerd_host_tool() {
   if [ "$NERD_LLAMA" = mlx ]; then echo "$NERD_ROOT/tools/mlx-host.sh"; else echo "$NERD_ROOT/tools/llama-host.sh"; fi
 }
@@ -200,9 +227,9 @@ nerd_docker_cdi() {
   docker info --format '{{json .CDISpecDirs}}' 2>/dev/null | grep -q '/'
 }
 
-# docker run arguments that pass the GPU (none when llama-server is on the host).
+# docker run arguments that pass the GPU (none when the server is not in a container here).
 nerd_gpu_args() {
-  nerd_on_host && return 0
+  nerd_no_gpu && return 0
   case "$NERD_GPU" in
     cdi) echo "--device nvidia.com/gpu=all" ;;
     gpus) echo "--gpus all" ;;
@@ -245,9 +272,9 @@ nerd_port_busy() {
 
 # --- docker compose (decision 0012) --------------------------------------------------
 
-# How the server gets the GPU: cdi, gpus, or none (llama-server on the host).
+# How the server gets the GPU: cdi, gpus, or none (the server on the host or remote).
 nerd_gpu_mode() {
-  nerd_on_host && { echo none; return 0; }
+  nerd_no_gpu && { echo none; return 0; }
   case "$NERD_GPU" in
     cdi|gpus) echo "$NERD_GPU" ;;
     *) if nerd_have_cdi && nerd_docker_cdi; then echo cdi; else echo gpus; fi ;;
@@ -274,13 +301,25 @@ nerd_compose_env() {
   export NERD_OPERATOR_URL=${NERD_OPERATOR_URL:-} NERD_NETWORK=${NERD_NETWORK:-} \
     NERD_WORKSPACE_DIR=${NERD_WORKSPACE_DIR:-} HF_TOKEN=${HF_TOKEN:-} \
     NERD_MODEL_GGUF=${NERD_MODEL_GGUF:-${NERD_MODEL_FILE:-}} NERD_MODEL_SHA256=${NERD_MODEL_SHA256:-} \
-    NERD_MODEL_ALIAS=${NERD_MODEL_ALIAS:-} NERD_SAMPLING=${NERD_SAMPLING:-}
+    NERD_MODEL_ALIAS=${NERD_MODEL_ALIAS:-} NERD_SAMPLING=${NERD_SAMPLING:-} NERD_MODEL=${NERD_MODEL:-} \
+    NERD_PROVIDER_URL=${NERD_PROVIDER_URL:-} NERD_PROVIDER_KEY_FILE=${NERD_PROVIDER_KEY_FILE:-} \
+    NERD_PROVIDER_MODELS=${NERD_PROVIDER_MODELS:-} \
+    NERD_KEYPROXY_PORT NERD_KEYPROXY_AUTH NERD_KEYPROXY_TOKEN
   # llama-server tells the agent its context (/props); mlx-vlm's server has
-  # none of its own, so the agent is told NERD_CTX.
-  if [ "$NERD_LLAMA" = mlx ]; then export NERD_AGENT_CTX=$NERD_CTX; else export NERD_AGENT_CTX=; fi
-  # The server's service is in a profile, so it is left out where llama-server
-  # runs on the host.
-  if [ "$NERD_LLAMA" = container ]; then export COMPOSE_PROFILES=llm; else export COMPOSE_PROFILES=; fi
+  # none of its own, so the agent is told NERD_CTX; a provider's model list
+  # may say it, and NERD_CTX overrides only when set.
+  case "$NERD_LLAMA" in
+    mlx) export NERD_AGENT_CTX=$NERD_CTX ;;
+    provider) export NERD_AGENT_CTX=$NERD_CTX_GIVEN ;;
+    *) export NERD_AGENT_CTX= ;;
+  esac
+  # The server's and the key proxy's services are in profiles, so each is left
+  # out where it is not the agent's server.
+  case "$NERD_LLAMA" in
+    container) export COMPOSE_PROFILES=llm ;;
+    provider) export COMPOSE_PROFILES=keyproxy ;;
+    *) export COMPOSE_PROFILES= ;;
+  esac
 }
 
 # The volumes compose.yaml declares external (the model's is NERD_MODELS_VOLUME).
@@ -296,6 +335,7 @@ nerd_compose_files() {
     cdi) echo -f; echo "$NERD_ROOT/compose.cdi.yaml" ;;
     gpus) echo -f; echo "$NERD_ROOT/compose.gpus.yaml" ;;
   esac
+  [ "$NERD_LLAMA" = provider ] && { echo -f; echo "$NERD_ROOT/compose.provider.yaml"; }
   [ -n "${NERD_NETWORK:-}" ] && { echo -f; echo "$NERD_ROOT/compose.netns.yaml"; }
   [ -n "${NERD_WORKSPACE:-}" ] && { echo -f; echo "$NERD_ROOT/compose.workspace-dir.yaml"; }
   nerd_on_host && { echo -f; echo "$NERD_ROOT/compose.host-llama.yaml"; }

@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# nerd's settings on one screen: the host's and the model server's (.env) and the
+# agent's (its settings file in the <name>-home volume, the one /nerd in Pi
+# edits). Enter changes a value; on closing, what changed is applied: ./UP for
+# the host's and the server's, a restart of the agent's container for the
+# agent's (Pi comes back and continues the conversation). Asks before either.
+#   ./SETTINGS        what is usually changed
+#   ./SETTINGS all    and the tuning knobs
+# The screen runs from the agent's image (node is not needed on this machine):
+# ./UP must have built it once.
+set -uo pipefail
+# shellcheck source=tools/lib.sh
+. "$(dirname "$0")/tools/lib.sh"
+nerd_load_env
+nerd_settings
+
+die() { echo "SETTINGS: $*" >&2; exit 1; }
+ask() { local a; read -r -p "$1 [y/N] " a; [ "$a" = y ] || [ "$a" = Y ]; }
+
+docker image inspect "$NERD_IMAGE" >/dev/null 2>&1 || die "no image $NERD_IMAGE yet: ./UP builds it"
+env_file=${NERD_ENV_FILE:-$NERD_ROOT/.env}
+[ -f "$env_file" ] || : > "$env_file" || die "cannot create $env_file"
+home=$NERD_NAME-home
+agent_file=/home/nerd/.config/nerd/settings.env
+
+d=$(mktemp -d); trap 'rm -rf "$d"' EXIT
+chmod 755 "$d"
+docker run --rm -it --user "$(id -u):$(id -g)" -e HOME=/tmp --network none \
+  -v "$(dirname "$env_file")":/envdir -v "$home":/home/nerd:ro -v "$d":/out \
+  --entrypoint node "$NERD_IMAGE" /opt/nerd/agent/src/settings-host.ts show \
+  --env "/envdir/$(basename "$env_file")" --agent "$agent_file" --out /out/result "$@" \
+  || die "the settings screen failed"
+[ -s "$d/result" ] || { echo "nothing changed"; exit 0; }
+chmod 644 "$d/result"
+
+if grep -q '^\(set\|unset\) ' "$d/result"; then
+  docker run --rm --network none -v "$home":/home/nerd -v "$d":/out:ro \
+    --entrypoint node "$NERD_IMAGE" /opt/nerd/agent/src/settings-host.ts apply /out/result --agent "$agent_file" \
+    || die "the agent's settings were not saved"
+  echo "the agent's settings saved in $agent_file (volume $home)"
+fi
+
+if grep -q '^need host up' "$d/result"; then
+  echo "changed in $env_file: the containers take it when ./UP recreates them"
+  if ask "run ./UP now?"; then "$NERD_ROOT/UP" || exit $?; fi
+fi
+if grep -q '^need agent ' "$d/result"; then
+  running=$(docker inspect -f '{{.State.Running}}' "$NERD_NAME" 2>/dev/null)
+  if [ "$running" = true ]; then
+    echo "the agent's Pi reads its settings when it starts"
+    ask "restart the agent's container $NERD_NAME now (Pi continues the conversation)?" && docker restart "$NERD_NAME" >/dev/null && echo "restarted $NERD_NAME"
+  else
+    echo "the agent takes them when it starts (./UP)"
+  fi
+fi

@@ -18,6 +18,15 @@ tool=tools/$(basename "$(nerd_host_tool)")
 if nerd_on_host; then
   if nerd_host_llama_up; then row OK server "the model server on this machine, 127.0.0.1:$NERD_LLAMA_PORT ($tool)"
   else row DOWN server "no model server on this machine: ./UP starts it ($tool)"; fi
+elif [ "$NERD_LLAMA" = remote ]; then
+  row OK server "on another machine, $NERD_LLAMA_URL (not started here; whether it answers: below)"
+elif [ "$NERD_LLAMA" = provider ]; then
+  s=$(cstate "$NERD_NAME-keyproxy")
+  case "$s" in
+    running*) row OK server "$NERD_NAME-keyproxy $s, to $NERD_PROVIDER_URL" ;;
+    "") row DOWN server "no container $NERD_NAME-keyproxy (./UP starts it)" ;;
+    *) row DOWN server "$NERD_NAME-keyproxy $s (docker logs --tail 30 $NERD_NAME-keyproxy)" ;;
+  esac
 else
   s=$(cstate "$NERD_LLM_NAME")
   case "$s" in
@@ -43,18 +52,33 @@ esac
 inside() { docker exec "$NERD_NAME" "$@" 2>/dev/null; }
 base=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$NERD_NAME" 2>/dev/null | sed -n 's/^NERD_BASE_URL=//p')
 base=${base:-$NERD_LLAMA_URL}
-if health=$(inside curl -sf -m 3 "${base%/v1}/health"); then
+if health=$(inside curl -sf -m 3 "${base%/v1}/health") && [[ $health == *'"keyproxy"'* ]]; then
+  # The key proxy answers; whether the provider takes the key: its model list through it.
+  code=$(inside curl -s -m 10 -o /dev/null -w '%{http_code}' "$base/models")
+  model=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$NERD_NAME" 2>/dev/null | sed -n 's/^NERD_MODEL=//p')
+  case "$code" in
+    200) row OK llama "$base (key proxy) answers the agent, the provider takes the key; model ${model:-?}" ;;
+    401|403) row DOWN llama "the provider refuses the key ($code): fix $NERD_PROVIDER_KEY_FILE, then docker restart $NERD_NAME-keyproxy" ;;
+    *) row DOWN llama "the key proxy answers, the provider does not (${code:-no answer}; docker logs --tail 30 $NERD_NAME-keyproxy)" ;;
+  esac
+elif [ -n "${health:-}" ]; then
   # mlx-vlm's /health names the model it loaded; its /v1/models lists the
   # Hugging Face cache too, so the first entry there may be another one.
   model=$(echo "$health" | grep -o '"loaded_model":"[^"]*"' | cut -d'"' -f4)
   [ -n "$model" ] || model=$(inside curl -sf -m 3 "$base/models" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
   row OK llama "$base answers the agent, model ${model:-?}"
+elif version=$(inside curl -sf -m 3 "${base%/v1}/api/version"); then
+  # Ollama serves many models; the agent's is the one NERD_MODEL names.
+  model=$(docker inspect -f '{{range .Config.Env}}{{println .}}{{end}}' "$NERD_NAME" 2>/dev/null | sed -n 's/^NERD_MODEL=//p')
+  row OK llama "$base (Ollama $(echo "$version" | grep -o '"version":"[^"]*"' | cut -d'"' -f4)) answers the agent, model ${model:-? (NERD_MODEL not set)}"
 elif nerd_on_host && nerd_host_llama_up; then
   row DOWN llama "answers on the host's 127.0.0.1:$NERD_LLAMA_PORT, but not from the container at $base (docs/MACOS.md, troubleshooting)"
 elif [ "$NERD_LLAMA" = container ] && docker logs "$NERD_LLM_NAME" 2>&1 | tr '\r' '\n' | grep -q 'downloading'; then
   row WAIT llama "not serving yet; the model is downloading or loading (docker logs -f $NERD_LLM_NAME)"
 elif nerd_on_host; then
   row WAIT llama "$base does not answer yet ($tool logs)"
+elif [ "$NERD_LLAMA" = remote ]; then
+  row DOWN llama "$base does not answer the agent: the other machine, or the network to it (the agent retries each request, NERD_RETRIES)"
 else
   row WAIT llama "$base does not answer yet (docker logs --tail 30 $NERD_LLM_NAME)"
 fi

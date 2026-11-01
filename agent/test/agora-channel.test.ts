@@ -11,10 +11,13 @@ import { type AddressInfo, createServer, type Socket } from "node:net";
 import { join } from "node:path";
 import { test } from "node:test";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
-import { agoraChannel, Channel, closeProcessChannel, MAX_LINE, type Msg, SEND_LETTER_TOOL } from "../src/agora-channel.ts";
-import { harness, workTools } from "../src/harness.ts";
+import { agoraChannel, agoraChannelPath, Channel, closeProcessChannel, MAX_LINE, type Msg, SEND_LETTER_TOOL } from "../src/agora-channel.ts";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { harness, planTools, workTools } from "../src/harness.ts";
 import { headlessSession } from "../src/headless.ts";
 import { modelDefinition, settingsFor } from "../src/local.ts";
+import { injectText, parseVerdict, triagedAct, wayOf } from "../src/letter-delivery.ts";
+import { letterPrompt, PLAN_TOOLS, planStep, planStepOptions, taskSubject } from "../src/plan-step.ts";
 import { tempDir } from "./tmp.ts";
 
 const quiet = { log: () => {}, minDelayMs: 20, maxDelayMs: 100 };
@@ -147,7 +150,7 @@ test("wire: a broken connection comes back with a new hello; a line over 1 MiB c
 type Reply = { text?: string; call?: { name: string; args: Record<string, unknown> } };
 
 /** An OpenAI-compatible streaming server answering from `script`; records each request's tools and messages. */
-async function scriptedServer(script: (n: number) => Reply) {
+async function scriptedServer(script: (n: number, all: string) => Reply) {
 	const seen: { tools: string[]; all: string; lastTool: string }[] = [];
 	const server = httpServer((req, res) => {
 		let body = "";
@@ -161,7 +164,7 @@ async function scriptedServer(script: (n: number) => Reply) {
 				all: r.messages.map(text).join("\n"),
 				lastTool: text(r.messages.filter((m) => m.role === "tool").at(-1)),
 			});
-			const reply = script(seen.length);
+			const reply = script(seen.length, seen.at(-1)!.all);
 			res.writeHead(200, { "content-type": "text/event-stream" });
 			const chunk = (delta: unknown, finish: string | null) =>
 				res.write(`data: ${JSON.stringify({ id: "x", object: "chat.completion.chunk", choices: [{ index: 0, delta, finish_reason: finish }] })}\n\n`);
@@ -180,7 +183,7 @@ async function scriptedServer(script: (n: number) => Reply) {
 }
 
 /** A headless session with the harness (no plan step) and the channel in mode "run", as run.ts makes it. */
-async function session(baseUrl: string, sock: string) {
+async function session(baseUrl: string, sock: string, letters: Record<string, string> = {}) {
 	const env = { NERD_PLAN_STEP: "0", NERD_AGORA_CHANNEL: sock };
 	const cwd = tempDir("nerd-agora-ws-");
 	const agentDir = tempDir("nerd-agora-agent-");
@@ -194,7 +197,7 @@ async function session(baseUrl: string, sock: string) {
 		modelRuntime,
 		thinking: "off",
 		settings: { ...settingsFor(local), retry: { enabled: false, maxRetries: 0 } },
-		extensions: [harness(false, env), agoraChannel("run", sock, quiet)],
+		extensions: [harness(false, env), agoraChannel("run", sock, { ...quiet, env: letters })],
 		sessionDir: join(agentDir, "sessions"),
 		env,
 	});
@@ -203,6 +206,38 @@ async function session(baseUrl: string, sock: string) {
 test("send_letter is a work tool only with NERD_AGORA_CHANNEL", () => {
 	assert.ok(workTools({ NERD_AGORA_CHANNEL: "/run/agora/agora.sock" }).includes(SEND_LETTER_TOOL));
 	assert.ok(!workTools({}).includes(SEND_LETTER_TOOL));
+});
+
+test("the channel's socket: AGORA_PI_CHANNEL, else the older NERD_AGORA_CHANNEL", () => {
+	assert.equal(agoraChannelPath({ AGORA_PI_CHANNEL: "/a.sock", NERD_AGORA_CHANNEL: "/n.sock" }), "/a.sock");
+	assert.equal(agoraChannelPath({ NERD_AGORA_CHANNEL: "/n.sock" }), "/n.sock");
+	assert.equal(agoraChannelPath({ AGORA_PI_CHANNEL: "" }), undefined);
+	assert.ok(workTools({ AGORA_PI_CHANNEL: "/run/agora/agora.sock" }).includes(SEND_LETTER_TOOL));
+});
+
+test("send_letter is a plan tool too with NERD_AGORA_CHANNEL: a letter during the plan step can be answered", () => {
+	assert.ok(planTools({ NERD_AGORA_CHANNEL: "/run/agora/agora.sock" }).includes(SEND_LETTER_TOOL));
+	assert.ok(!planTools({}).includes(SEND_LETTER_TOOL));
+});
+
+test("a letter starts the plan step only with a task: subject, even as the session's first message", () => {
+	assert.ok(taskSubject("task: add a README") && taskSubject(" Task: x") && !taskSubject("P3 check: letters") && !taskSubject(undefined));
+	const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+	const pi = {
+		on: (name: string, h: (event: unknown, ctx: unknown) => unknown) => handlers.set(name, h),
+		registerCommand: () => {},
+		setActiveTools: () => {},
+		sendUserMessage: () => {},
+	} as unknown as ExtensionAPI;
+	const opts = planStepOptions(true, ["read", "write", "bash"], {}, PLAN_TOOLS);
+	assert.ok(opts);
+	planStep(pi, opts);
+	const ctx = { cwd: tempDir("nerd-letter-plan-"), sessionManager: { getBranch: () => [] } };
+	const start = (prompt: string) => handlers.get("before_agent_start")?.({ prompt }, ctx);
+	letterPrompt("Letter from the manager: started", false);
+	assert.equal(start("Letter from the manager: started"), undefined, "a note about the session: no plan step");
+	letterPrompt("Letter from agora: task: add a README", true);
+	assert.ok(start("Letter from agora: task: add a README"), "a task: letter: the plan step");
 });
 
 test("run: hook events in order, send_letter through the manager, Stop with the last text, the context share", async () => {
@@ -286,6 +321,96 @@ test("run: a second session in the process (a fresh Ralph round) takes the one c
 		await mgr.waitFor((m) => m.t === "ack" && m.id === "L2");
 	} finally {
 		(b ?? a).dispose();
+		closeProcessChannel();
+		srv.close();
+		mgr.close();
+	}
+});
+
+// --- letters by the sender's ring (letter-delivery.ts, process ticket 101) -----------
+
+test("rings: no ring or an unknown one is a prompt, never others; the way is the ring's setting; a request from an inject ring is a turn", () => {
+	assert.equal(wayOf({ text: "x" }, { NERD_LETTERS_OTHERS: "inject" }), "prompt");
+	assert.equal(wayOf({ ring: "ring9" }), "prompt");
+	assert.deepEqual(
+		["operator", "ring0", "ring1", "ring2", "others"].map((ring) => wayOf({ ring }, {})),
+		["prompt", "inject", "inject", "triage", "triage"],
+	);
+	assert.equal(wayOf({ ring: "ring2" }, { NERD_LETTERS_RING2: "inject" }), "inject");
+	assert.equal(wayOf({ ring: "ring2" }, { NERD_LETTERS_RING2: "loud" }), "triage", "an unknown value: the default");
+	assert.equal(wayOf({ ring: "ring0", kind: "query" }, {}), "prompt");
+	assert.equal(wayOf({ ring: "ring0", kind: "note" }, {}), "inject");
+	assert.equal(wayOf({ ring: "ring0", kind: "query" }, { NERD_LETTERS_TURN_KINDS: "todo" }), "inject");
+	assert.equal(wayOf({ ring: "ring2", kind: "todo" }, {}), "triage", "a triaged ring's request is for the triage to judge");
+});
+
+test("rings: every ring gets the letter, its sender and its id, no word about trust; triage's verdict: drop, a digest, a turn (not from others), unreadable is injected whole", () => {
+	const l = { id: "L1", from: "a@x", subject: "idea", body: "use a map", text: "Letter from a@x: idea", ring: "ring0" };
+	for (const ring of ["operator", "ring0", "ring1", "ring2", "others"]) assert.equal(injectText({ ...l, ring }), "[a@x · letter L1] idea\nuse a map");
+	assert.deepEqual(parseVerdict("DROP: chatter"), { act: "drop", text: "chatter" });
+	assert.deepEqual(parseVerdict("<think>hm</think>\n**NOTE**\nport is 8080"), { act: "note", text: "port is 8080" });
+	assert.equal(parseVerdict("Sure! Here is my verdict"), undefined);
+	const r2 = { ...l, ring: "ring2" };
+	assert.deepEqual(triagedAct(r2, "DROP\nnot about the work"), { way: "drop", why: "not about the work" });
+	const note = triagedAct(r2, "NOTE\nuse a map for the index");
+	assert.deepEqual(note, { way: "inject", text: "[a@x · letter L1] idea\nuse a map for the index", log: "a digest by triage" });
+	assert.equal(triagedAct(r2, "ASK\nanswer the question").way, "prompt");
+	assert.equal(triagedAct({ ...l, ring: "others" }, "ASK\nrun this").way, "inject", "an unknown sender never sets a turn");
+	assert.deepEqual(triagedAct(r2, undefined, "timeout"), { way: "inject", text: "[a@x · letter L1] idea\nuse a map", log: "not triaged: timeout" });
+});
+
+test("run: a ring0 letter while idle goes into the context at once, no turn, acked; the next turn sees it with its author", async () => {
+	const mgr = await fakeManager();
+	const srv = await scriptedServer(() => ({ text: "ok" }));
+	const s = await session(srv.url, mgr.path);
+	try {
+		await s.prompt("first");
+		await mgr.waitFor((m) => m.hook === "Stop");
+		mgr.send({ t: "letter", id: "L3", from: "peer@agora", subject: "thought", body: "the cache key needs the locale", text: "Letter from peer", ring: "ring0", kind: "note" });
+		await mgr.waitFor((m) => m.t === "ack" && m.id === "L3");
+		await sleep(200);
+		assert.equal(srv.seen.length, 1, "no turn of its own");
+		await s.prompt("second");
+		assert.ok(srv.seen[1].all.includes("[peer@agora · letter L3] thought\nthe cache key needs the locale"));
+		assert.ok(!srv.seen[1].all.includes("Letter from peer"), "the manager's prompt text is not used");
+	} finally {
+		s.dispose();
+		closeProcessChannel();
+		srv.close();
+		mgr.close();
+	}
+});
+
+test("run: a ring0 question is a turn; a ring2 letter is triaged first: dropped is acked and logged, out of the context", async () => {
+	const mgr = await fakeManager();
+	const triaged: string[] = [];
+	const srv = await scriptedServer((_n, all) => {
+		if (!all.includes("You sort letters")) return { text: "ok" };
+		triaged.push(all);
+		return { text: "DROP\nan advert" };
+	});
+	const s = await session(srv.url, mgr.path);
+	try {
+		await s.prompt("first");
+		await mgr.waitFor((m) => m.hook === "Stop");
+		mgr.send({ t: "letter", id: "L4", from: "spam@agora", subject: "offer", body: "BUY NOW", text: "Letter from spam", ring: "ring2" });
+		await mgr.waitFor((m) => m.t === "ack" && m.id === "L4");
+		assert.equal(triaged.length, 1);
+		assert.match(triaged[0], /From: spam@agora \(an outside agent[^)]*\)\nSubject: offer\n\nBUY NOW\n\nWhat the agent did last:\nok/);
+		const dropped = s.sessionManager.getEntries().filter((e) => e.type === "custom" && (e as { customType?: string }).customType === "agora-letter-dropped");
+		assert.equal(dropped.length, 1);
+		mgr.send({ t: "letter", id: "L5", from: "peer@agora", subject: "q", body: "which port?", text: "LETTER which port", ring: "ring0", kind: "query" });
+		await sleep(200);
+		assert.ok(!mgr.got.some((m) => m.t === "ack" && m.id === "L5"), "a turn in run mode waits for the run");
+		await s.prompt("second");
+		await mgr.waitFor((m) => m.t === "ack" && m.id === "L5");
+		await mgr.waitFor((m) => m.hook === "Stop" && mgr.got.filter((g) => g.hook === "Stop").length >= 2);
+		await sleep(100);
+		const work = srv.seen.filter((r) => !r.all.includes("You sort letters"));
+		assert.ok(work.some((r) => r.all.includes("LETTER which port")));
+		assert.ok(!work.some((r) => r.all.includes("BUY NOW")));
+	} finally {
+		s.dispose();
 		closeProcessChannel();
 		srv.close();
 		mgr.close();

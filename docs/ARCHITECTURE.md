@@ -91,7 +91,11 @@ context compaction and the terminal UI. nerd adds, in `agent/src/`:
 | `output-cap.ts` | long bash output as head and tail, the whole of it in a file (`NERD_BASH_MAX_CHARS`, 8000) |
 | `repeat-guard.ts` | cuts a reply whose tail repeats one piece of text, or a tool call whose streamed arguments do, at most twice per task (`NERD_REPEAT_GUARD`, on) |
 | `scout.ts` | `scout`: a question about the project goes to a helper session with reading tools only, its findings to `notes/scout/` (`NERD_SCOUT=1`; off) |
-| `agora-channel.ts` | a session manager's channel (a unix socket): session events out, letters in as the operator's messages, the `send_letter` tool (`NERD_AGORA_CHANNEL`; unset, nothing loads) |
+| `settings-registry.ts` | every `NERD_*` setting: owner (host, server, agent), kind, default, what a change needs (next request, reload, Pi restart, `./UP`); a test keeps the code and docs/SETTINGS.md (`settings-doc.ts`) in step |
+| `settings.ts`, `settings-load.ts` | the agent's settings file (`~/.config/nerd/settings.env`, the home volume) read into the environment first thing in `tui.ts` and `run.ts`; it wins over the container's environment |
+| `settings-command.ts`, `settings-view.ts`, `settings-host.ts` | `/nerd` in Pi, and the screen of `./SETTINGS` on the host (run from the agent's image), on one list |
+| `agora-channel.ts` | a session manager's channel (a unix socket): session events out, letters in by the sender's ring, the `send_letter` tool (`AGORA_PI_CHANNEL`, else `NERD_AGORA_CHANNEL`; unset, nothing loads) |
+| `letter-delivery.ts` | how a letter goes in by the sender's ring: a turn, into the context without one, or triaged by one short model request first (`NERD_LETTERS_*`) |
 | `calc-guard.ts` | every calculation by a program: a rule in the system prompt, and a reply of hand arithmetic is cut (`NERD_CALC=1`; off) |
 | `work-budget.ts` | the wall clock of each turn of work: a note, then the tools go away and the harness commits (`NERD_WORK_MAX_MINUTES`; off) |
 | `fetch-guard.ts` | a note when `web_fetch` gets 404 for an address no search result had (`NERD_FETCH_GUARD`, on) |
@@ -137,7 +141,7 @@ with docker; no GPU.
 | image | mode | runs | ends |
 |---|---|---|---|
 | agent | `tui` (what `./UP` starts) | sshd, waits for the server (as long as it takes), Pi in tmux (restarted with `--continue` if it exits) | when sshd exits; docker restarts it. A server that goes away is retried by Pi |
-| agent | `"<task>"` | waits for the server (up to 15 min), `run.ts` on the task | when the agent finishes; exit code 0 = final answer |
+| agent | `"<task>"` | waits for the server (up to 15 min), `run.ts` on the task | when the agent finishes; exit code 0 = final answer and the plan's checks shown passing |
 | agent | `hold` | SearXNG only, no Pi, no sshd: a session manager runs `docker exec -it <c> nerd-pi tui [--continue]` or `nerd-pi run "<task>"` (`container/nerd-pi.sh`) | when stopped (143 at once); Pi's life is the manager's |
 | server | `serve` (default) | download and check the model if needed, llama-server in the foreground | never; docker restarts it |
 | server | `fetch` | download and check the model | after the check |

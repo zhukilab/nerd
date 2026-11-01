@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseDoneWhen, syntaxError, unfailable } from "../src/done-when.ts";
-import { callNumbers, exercisesBehavior, hasOwnInput, highestThreshold, lintPlan, lintRetryMessage, planLintOn } from "../src/plan-lint.ts";
+import { callNumbers, exercisesBehavior, hasOwnInput, highestThreshold, lintPlan, lintRetryMessage, planLintOn, searchTask } from "../src/plan-lint.ts";
 
 const plan = (done: string, steps = "1. write it — check: `npm test`") => `# Plan
 
@@ -76,6 +76,19 @@ test("unfailable: git diff without --exit-code always exits 0", () => {
 	assert.match(unfailable("git diff -- test/") ?? "", /git diff/);
 	assert.equal(unfailable("git diff --exit-code -- test/"), undefined);
 	assert.equal(unfailable("git diff --quiet -- test/"), undefined);
+});
+
+test("unfailable: constant strings compared, a dotfile listing of the workspace counted", () => {
+	// Process ticket 102: both "passed" on a long-lived agent.
+	assert.match(unfailable(`[ "$(printf 'MARKER 163 reached the end')" = "MARKER 163 reached the end" ] && exit 0 || exit 1`) ?? "", /constant strings/);
+	assert.match(unfailable(`test "a" = 'a'`) ?? "", /constant strings/);
+	assert.equal(unfailable(`[ "$(cat out.txt)" = "42" ]`), undefined);
+	assert.equal(unfailable(`[ "$(printf '%s' "$x")" = "y" ]`), undefined);
+	assert.equal(unfailable(`[ "$n" = 3 ]`), undefined);
+	assert.match(unfailable("ls -1A . | grep -c .") ?? "", /never empty/);
+	assert.match(unfailable("ls -a | grep -q .") ?? "", /never empty/);
+	assert.equal(unfailable("ls -1A out/ | grep -c ."), undefined);
+	assert.equal(unfailable("ls -1 . | grep -q report"), undefined);
 });
 
 test("unfailable: a node script that only prints", () => {
@@ -261,6 +274,76 @@ test("done when, Rust: a bare cargo command is read; nerd-rs-eval that only prin
 	assert.equal(syntaxError(`nerd-rs-eval 'assert_eq!(to_roman(4), "IV");'`), undefined);
 });
 
+// Process ticket 107: a Done when that is a bare command goes back once, then runs as one check.
+test("plan-lint: a Done when that is a bare command is an error, at its line", () => {
+	const text = plan("\nbash -c 'set -e\n./wuxing generates wood fire | grep -qx true\n'");
+	const bare = errors(text).filter((f) => /bare command/.test(f.message));
+	assert.equal(bare.length, 1);
+	assert.match(bare[0].text, /^bash -c/);
+	assert.ok(!errors(text).some((f) => /no Done when items/.test(f.message)));
+	assert.ok(errors(plan("\nIt works.")).some((f) => /no Done when items/.test(f.message)));
+});
+
+// Process ticket 108: the plans of the bench of process ticket 106, cut down.
+const cli = (own: string) => `# Plan
+
+## Task
+
+> Write a program \`wuxing\`.
+>
+>     ./wuxing generates A B    prints true if A generates B
+>     ./wuxing round A B        prints win, lose or draw
+>
+> - Only \`./wuxing\` is checked; \`round wood wood\` is \`draw\`.
+
+${own}
+`;
+
+test("plan-lint: another spelling of the task's command is an error; a check that it is refused is not", () => {
+	const drift = errors(cli("## Steps\n1. write it — check: `./wuxing generate wood fire | grep -qx true`\n\n## Done when\n- generates — check: `./wuxing generate wood fire | grep -qx true`"));
+	const found = drift.filter((f) => /task's command is `\.\/wuxing generates`/.test(f.message));
+	assert.equal(found.length, 1, "once per word");
+	assert.match(found[0].text, /generate wood fire/);
+	// The task's word used as well: `generate` is a check that a wrong command exits 2.
+	const refused = cli(
+		"## Done when\n- generates — check: `./wuxing generates wood fire | grep -qx true`\n- a wrong command — check: `./wuxing generate wood fire; test $? -eq 2`",
+	);
+	assert.ok(!errors(refused).some((f) => /task's command/.test(f.message)));
+	// The task's own words, and words that are not near them, are left alone.
+	assert.ok(!errors(cli("## Done when\n- r — check: `./wuxing round wood wood | grep -qx draw`\n- x — check: `./wuxing explode; test $? -eq 2`")).some((f) => /task's command/.test(f.message)));
+});
+
+test("plan-lint: the task's program made as name.py and never run as ./name is an error", () => {
+	const task = "# Plan\n\n## Task\n\n> The program is an executable file named `medsched` in the current directory.\n\n";
+	const py = errors(`${task}## Assumptions\n- The executable will be a script named \`medsched.py\`.\n\n## Done when\n- runs — check: \`python3 medsched.py < in.json\``);
+	assert.ok(py.some((f) => /names the program `medsched`, the plan makes `medsched.py`/.test(f.message) && /medsched\.py/.test(f.text)));
+	const wrapped = errors(`${task}## Steps\n1. write medsched.py and ./medsched that runs it\n\n## Done when\n- runs — check: \`./medsched < in.json\``);
+	assert.ok(!wrapped.some((f) => /names the program/.test(f.message)));
+});
+
+// Process ticket 111: a search with a "none" answer needs a check over many inputs.
+test("plan-lint: a task with a 'nothing satisfies' answer and only example checks is an error", () => {
+	const task = (own: string) => `# Plan
+
+## Task
+
+> Print a schedule of the doses that satisfies all of these rules.
+> If no schedule satisfies these rules, print nothing on standard output, explain on
+> standard error, and exit with status 1.
+
+${own}
+`;
+	const examples = "## Done when\n- the example — check: `echo '{\"meds\":{\"A\":2}}' | ./medsched | grep -qx '07:00 A'`";
+	assert.ok(errors(task(examples)).some((f) => /nothing satisfies the rules/.test(f.message)));
+	for (const cmd of ["python3 tests/stress.py", "for i in $(seq 1 300); do python3 gen.py $i | ./medsched >/dev/null || exit 1; done", "python3 -c 'import random; …'"]) {
+		assert.ok(!errors(task(`${examples}\n- many inputs — check: \`${cmd}\``)).some((f) => /nothing satisfies the rules/.test(f.message)), cmd);
+	}
+	// A task with no such answer is left alone.
+	assert.ok(!errors(plan("- f — check: `./wuxing generates wood fire | grep -qx true`")).some((f) => /nothing satisfies the rules/.test(f.message)));
+	assert.ok(searchTask("If there is no way to fit them, exit with status 1."));
+	assert.ok(!searchTask("Exit with status 1 on invalid input."));
+});
+
 // Process ticket 093: false findings on the Rust plans of the small-task run.
 test("plan-lint, Rust: todo! is not a placeholder; a built binary without ./ is a run; $? of a substitution is fine", () => {
 	const todo = plan("- f — check: `nerd-rs-eval 'assert_eq!(f(1), 2);'`", "1. replace the two `todo!` stubs in src/lib.rs — check: `cargo test`");
@@ -269,6 +352,9 @@ test("plan-lint, Rust: todo! is not a placeholder; a built binary without ./ is 
 	assert.ok(exercisesBehavior("cargo build -q && o=$(printf '1\\n2\\n' | target/debug/stats 2>/dev/null) && [ \"$o\" = 'count 2' ]"));
 	assert.equal(unfailable("cargo build -q && o=$(printf '1\\n' | target/debug/stats) && ec=$? && [ $ec -eq 0 ]"), undefined);
 	assert.match(unfailable("printf '1\\n' | cargo run -q | tail -1; [ $? -eq 0 ]") ?? "", /reads \$\? after a pipe/);
+	// Process ticket 111: the program last in the pipe — its own code is read, a right check.
+	assert.equal(unfailable("echo 'not json' | ./medsched 2>/dev/null; test $? -eq 2"), undefined);
+	assert.equal(unfailable(`bash -c 'echo "{}" | ./medsched'; test $? -eq 2`), undefined);
 	const runner = lintPlan(plan("- tests — check: `cargo test --quiet 2>&1 | grep -q 'test result: ok'`\n- f — check: `nerd-rs-eval 'assert_eq!(f(1), 2);'`"), { checks: true, rust: true });
 	assert.match(runner.find((f) => /test runner prints/.test(f.message))?.message ?? "", /Use `cargo test` alone/);
 });

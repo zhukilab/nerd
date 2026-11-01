@@ -13,8 +13,9 @@
 // against arithmetic done by hand (calc-guard.ts, NERD_CALC=1), the plan
 // step's calculator (plan-calc.ts, NERD_PLAN_CALC=1), the scout (scout.ts, NERD_SCOUT=1,
 // headless), and with
-// the Ralph loop (ralph.ts, decision 0014; NERD_RALPH=0 = off). The
-// TUI loads it from
+// the Ralph loop (ralph.ts, decision 0014; NERD_RALPH=0 = off), and in the TUI
+// the modes (mode.ts, decision 0019: conversation first, work on /plan,
+// /solve, /ralph). The TUI loads it from
 // extension.ts, the headless run through headless.ts.
 
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
@@ -25,7 +26,8 @@ import { doneGate, doneGateOn, doneGateRounds } from "./done-gate.ts";
 import { fetchGuard, fetchGuardOn } from "./fetch-guard.ts";
 import { lintCheck, lintOn } from "./lint-check.ts";
 import { calcOn, TOOLS } from "./local.ts";
-import { loopGuard } from "./loop-guard.ts";
+import { loopGuard, loopGuardHard } from "./loop-guard.ts";
+import { checkedMode, modes, newModeState, type PlanStepHandle } from "./mode.ts";
 import { outputCap } from "./output-cap.ts";
 import { packageReadOnlyTools, packageTools, pinWebSearchProvider } from "./packages.ts";
 import { CALC_TOOL, planCalcOn } from "./plan-calc.ts";
@@ -38,6 +40,7 @@ import { stepLog, stepsOn } from "./step-log.ts";
 import { parseSampling, sampling } from "./sampling.ts";
 import { summaryGoal, summaryGoalOn } from "./summary-goal.ts";
 import { thinkingKeep, thinkingKeepExtension } from "./thinking-keep.ts";
+import { RUNS_TOOL, runsToolOn } from "./tmux-runs.ts";
 import { webNotes, webNotesOn } from "./web-notes.ts";
 import { workBudget, workMaxMinutes } from "./work-budget.ts";
 
@@ -46,14 +49,28 @@ function scoutTools(env: NodeJS.ProcessEnv, headless: boolean): string[] {
 	return headless && scoutOn(env) ? [SCOUT_TOOL] : [];
 }
 
-/** The work's tools: ours plus those of the enabled Pi packages (packages.ts), and send_letter with an agora channel. */
+/** The work's tools: ours plus those of the enabled Pi packages (packages.ts), send_letter with an agora channel,
+ * runs (background commands, tmux-runs.ts) with NERD_RUNS_BACKGROUND. */
 export function workTools(env = process.env, headless = false): string[] {
-	return [...TOOLS, ...packageTools(env), ...scoutTools(env, headless), ...(agoraChannelPath(env) ? [SEND_LETTER_TOOL] : [])];
+	return [
+		...TOOLS,
+		...packageTools(env),
+		...scoutTools(env, headless),
+		...(agoraChannelPath(env) ? [SEND_LETTER_TOOL] : []),
+		...(runsToolOn(env) ? [RUNS_TOOL] : []),
+	];
 }
 
-/** The plan turn's tools: reading only, the packages' read-only ones included, calc with NERD_PLAN_CALC=1, the scout. */
+/** The plan turn's tools: reading only, the packages' read-only ones included, calc with NERD_PLAN_CALC=1, the scout;
+ * send_letter with an agora channel, so a letter that comes during the step can be answered (it changes no file). */
 export function planTools(env = process.env, headless = false): string[] {
-	return [...PLAN_TOOLS, ...packageReadOnlyTools(env), ...(planCalcOn(env) ? [CALC_TOOL] : []), ...scoutTools(env, headless)];
+	return [
+		...PLAN_TOOLS,
+		...packageReadOnlyTools(env),
+		...(planCalcOn(env) ? [CALC_TOOL] : []),
+		...scoutTools(env, headless),
+		...(agoraChannelPath(env) ? [SEND_LETTER_TOOL] : []),
+	];
 }
 
 /** Every tool either step may switch on: what Pi must have registered (--tools). */
@@ -84,13 +101,17 @@ export function harness(operator: boolean, env = process.env, hooks: HarnessHook
 		// declares its own tools alone, as before.
 		const work = workTools(env, !operator);
 		pi.on("session_start", () => pi.setActiveTools(work));
-		loopGuard(pi);
+		steers.push(loopGuard(pi, { operator, hard: loopGuardHard(env) }).takeSteer);
 		if (work.includes("web_search")) pinWebSearchProvider(pi);
 		if (work.includes("web_fetch") && fetchGuardOn(env)) fetchGuard(pi);
 		if (work.includes("web_fetch") && webNotesOn(env)) webNotes(pi);
 		if (lintOn(env)) lintCheck(pi);
 		sampling(pi, parseSampling(env.NERD_SAMPLING));
-		if (doneGateOn(env)) doneGate(pi, { maxRounds: doneGateRounds(env) });
+		// The modes (mode.ts, process ticket 104): in the TUI conversation first; headless, NERD_MODE.
+		const mode = newModeState(operator, env);
+		const step: PlanStepHandle = {};
+		const reading = planTools(env, !operator);
+		if (doneGateOn(env)) doneGate(pi, { maxRounds: doneGateRounds(env), active: () => checkedMode(mode) });
 		if (stepsOn(env)) stepLog(pi);
 		outputCap(pi, env);
 		if (anchorsOn(env)) anchors(pi, env);
@@ -98,12 +119,15 @@ export function harness(operator: boolean, env = process.env, hooks: HarnessHook
 		const keepThinking = thinkingKeep(env);
 		if (keepThinking !== undefined) thinkingKeepExtension(pi, keepThinking);
 		rules(pi, env);
-		// The Ralph loop: by events in the TUI; the headless run drives it itself (run.ts).
-		if (operator && ralphOn(env)) ralph(pi, ralphOptions(env));
 		// Before the plan step, so that a new task's plan tools come after the work's tools are given back.
 		const workMinutes = workMaxMinutes(env);
 		if (workMinutes > 0) steers.push(workBudget(pi, { maxMinutes: workMinutes, workTools: work, operator }).takeSteer);
-		const opts = planStepOptions(operator, work, env, planTools(env, !operator));
-		if (opts) planStep(pi, opts);
+		// After the work clock, which gives the work's tools back on a turn; before the Ralph loop, which reads
+		// the turn's mode, and the plan step, which takes the tools for a new task.
+		if (operator) modes(pi, mode, { planTools: reading, workTools: work, step });
+		// The Ralph loop: by events in the TUI; the headless run drives it itself (run.ts).
+		if (operator && ralphOn(env)) ralph(pi, ralphOptions(env), undefined, mode);
+		const opts = planStepOptions(operator, work, env, reading);
+		if (opts) Object.assign(step, planStep(pi, { ...opts, mode }));
 	};
 }

@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, test } from "node:test";
-import { localModel, mlxLoadedModel, modelDefinition } from "../src/local.ts";
+import { localModel, mlxLoadedModel, modelDefinition, retries, settingsFor } from "../src/local.ts";
 import { parseSampling, sampling, withSampling } from "../src/sampling.ts";
 
 // Two servers: llama-server's /health ({"status":"ok"}, /props with n_ctx) and
@@ -22,8 +22,17 @@ const url = (s: Server) => `http://127.0.0.1:${(s.address() as AddressInfo).port
 
 let llama: Server;
 let mlx: Server;
+let ollama: Server;
 const loaded = "/Users/me/.nerd/mlx-models/prism-ml--Ternary-Bonsai-2-27B-mlx-2bit";
 before(async () => {
+	// Ollama (ticket 099): /api/version, no /health or /props; /api/ps empty
+	// (nothing loaded), so the window is the model's from /api/show.
+	ollama = await serve({
+		"/api/version": { version: "0.40.12" },
+		"/api/ps": { models: [] },
+		"/api/show": { model_info: { "general.architecture": "qwen35moe", "qwen35moe.context_length": 262144 } },
+		"/v1/models": { data: [{ id: "a-cached:model" }, { id: "qwen3.6:latest" }] },
+	});
 	llama = await serve({
 		"/health": { status: "ok" },
 		"/props": { default_generation_settings: { n_ctx: 65536 } },
@@ -37,6 +46,7 @@ before(async () => {
 after(() => {
 	llama.close();
 	mlx.close();
+	ollama.close();
 });
 
 async function withEnv<T>(env: Record<string, string | undefined>, f: () => Promise<T>): Promise<T> {
@@ -75,6 +85,56 @@ test("mlx-vlm: the loaded model, not the first of /v1/models; context from NERD_
 	const e = await withEnv({ NERD_BASE_URL: url(mlx), NERD_CTX: "", NERD_MODEL: "" }, localModel);
 	assert.equal(e.id, loaded);
 	assert.equal(e.ctx, 16384);
+});
+
+test("Ollama: NERD_MODEL required, window from /api/show, thinking off by reasoning_effort none", async () => {
+	await assert.rejects(withEnv({ NERD_BASE_URL: url(ollama), NERD_CTX: undefined, NERD_MODEL: "" }, localModel), /NERD_MODEL is not set/);
+	const m = await withEnv({ NERD_BASE_URL: url(ollama), NERD_CTX: undefined, NERD_MODEL: "qwen3.6:latest" }, localModel);
+	assert.equal(m.server, "ollama");
+	assert.equal(m.id, "qwen3.6:latest");
+	assert.equal(m.ctx, 262144);
+	const d = modelDefinition(m);
+	assert.equal(d.compat.thinkingFormat, "openai");
+	assert.equal(d.compat.supportsReasoningEffort, true);
+	assert.deepEqual(d.thinkingLevelMap, { off: "none" });
+	const c = await withEnv({ NERD_BASE_URL: url(ollama), NERD_CTX: "65536", NERD_MODEL: "qwen3.6:latest" }, localModel);
+	assert.equal(c.ctx, 65536);
+	// llama-server is not taken for Ollama.
+	assert.equal((await withEnv({ NERD_BASE_URL: url(llama), NERD_MODEL: undefined }, localModel)).server, "llama");
+});
+
+test("provider behind the key proxy: NERD_MODEL required, limits from /v1/models, no thinking fields, no verifier", async () => {
+	const proxy = await serve({
+		"/health": { keyproxy: "openrouter.ai" },
+		"/v1/models": { data: [{ id: "other" }, { id: "vendor/m:free", context_length: 131072, top_provider: { max_completion_tokens: 32768 } }, { id: "bare" }] },
+	});
+	const env = { NERD_BASE_URL: url(proxy), NERD_CTX: undefined, NERD_VERIFY_N: "3", NERD_THINKING: "high" };
+	await assert.rejects(withEnv({ ...env, NERD_MODEL: "" }, localModel), /NERD_MODEL is not set: name the model of openrouter.ai/);
+	const m = await withEnv({ ...env, NERD_MODEL: "vendor/m:free" }, localModel);
+	assert.deepEqual([m.server, m.ctx, m.maxOut, m.verifyN, m.thinking], ["provider", 131072, 32768, 1, "off"]);
+	const d = modelDefinition(m);
+	assert.equal(d.maxTokens, 32768);
+	assert.equal(d.reasoning, false);
+	assert.equal(d.compat.supportsReasoningEffort, false);
+	// No window in the list: NERD_CTX or a refusal; the reply limit falls back to 8192.
+	await assert.rejects(withEnv({ ...env, NERD_MODEL: "bare" }, localModel), /NERD_CTX is not set/);
+	const b = await withEnv({ ...env, NERD_MODEL: "bare", NERD_CTX: "65536" }, localModel);
+	assert.deepEqual([b.ctx, b.maxOut], [65536, 8192]);
+	assert.equal(d.compat.maxTokensField, "max_tokens");
+	assert.equal(modelDefinition({ ...b, provider: "api.openai.com" }).compat.maxTokensField, "max_completion_tokens");
+	// llama-server's /health ({"status":"ok"}) is not the proxy's.
+	assert.equal((await withEnv({ NERD_BASE_URL: url(llama), NERD_MODEL: undefined }, localModel)).server, "llama");
+	proxy.close();
+});
+
+test("NERD_RETRIES: default 8 with backoff to 30 s; 0 allowed; junk falls back", () => {
+	assert.equal(retries({}), 8);
+	assert.equal(retries({ NERD_RETRIES: "0" }), 0);
+	assert.equal(retries({ NERD_RETRIES: "3" }), 3);
+	assert.equal(retries({ NERD_RETRIES: "x" }), 8);
+	assert.equal(retries({ NERD_RETRIES: "-1" }), 8);
+	const r = settingsFor({ baseUrl: "", id: "m", ctx: 65536, thinking: "off", verifyN: 1 }).retry;
+	assert.deepEqual({ base: r.baseDelayMs, max: r.maxAgentDelayMs }, { base: 2000, max: 30000 });
 });
 
 test("NERD_SAMPLING: parsed, added only where the request has no value, junk refused", () => {

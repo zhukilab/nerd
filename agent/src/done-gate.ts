@@ -466,7 +466,10 @@ export async function changedSince(cwd: string, base: string | undefined): Promi
 }
 
 /** The gate as a Pi extension. `notify` reports a round where a person can see it. */
-export function doneGate(pi: ExtensionAPI, opts: { maxRounds: number; log?: (r: { round: number; failures: string[] }) => void }) {
+export function doneGate(
+	pi: ExtensionAPI,
+	opts: { maxRounds: number; log?: (r: { round: number; failures: string[] }) => void; active?: () => boolean },
+) {
 	let base: string | undefined;
 	let startFp = "";
 	let wrote = false;
@@ -490,7 +493,8 @@ export function doneGate(pi: ExtensionAPI, opts: { maxRounds: number; log?: (r: 
 	});
 
 	pi.on("agent_before_settle", async (event, ctx) => {
-		if (event.outcome !== "completed" || rounds >= opts.maxRounds) return;
+		// Not in talk, plan or solve (mode.ts): there the operator is the checker.
+		if (event.outcome !== "completed" || rounds >= opts.maxRounds || opts.active?.() === false) return;
 		const cwd = ctx.cwd || process.cwd();
 		const fp = await fingerprint(cwd);
 		if (!wrote && !(ranBash && fp !== startFp)) return;

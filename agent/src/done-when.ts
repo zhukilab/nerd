@@ -100,6 +100,28 @@ export function parseItem(text: string): ParsedItem {
 export interface DoneLine extends ParsedItem {
 	/** 1-based line of the item in the plan. */
 	line: number;
+	/** The section is a bare command, not items (bareCommand): taken as one check. */
+	bare?: boolean;
+}
+
+/** The claim of a section that is a bare command (bareCommand). */
+export const BARE_CLAIM = "the plan's Done when command";
+
+/**
+ * A "Done when" section with no items but a command (process ticket 107: a model on
+ * the stand of 106 wrote `bash -c '…'` there, over several lines or in backticks; no
+ * item, so no check, and the loop took that for a pass). The lines as one command,
+ * a code fence or one pair of backticks around it taken off; undefined unless it
+ * starts like a command.
+ */
+function bareCommand(body: string[]): string | undefined {
+	let text = body.join("\n").trim();
+	const fence = /^```[\w-]*\n([\s\S]*?)\n```/.exec(text);
+	// A code span first, words after it ("`…` exits with status 0, and …"; the series a1 of 107).
+	const span = /^`([^`]+)`/.exec(text);
+	if (fence) text = fence[1].trim();
+	else if (span) text = span[1].trim();
+	return text && (COMMAND.test(text) || /^\.\/\S/.test(text)) ? text : undefined;
 }
 
 /** The items of a plan's "Done when" section with their lines; undefined: no such section. */
@@ -108,11 +130,17 @@ export function doneWhenLines(plan: string): DoneLine[] | undefined {
 	const start = lines.findIndex((l) => /^#{1,3}\s*done when\s*$/i.test(l.trim()) || /^DONE WHEN\s*$/.test(l.trim()));
 	if (start < 0) return undefined;
 	const items: DoneLine[] = [];
+	const body: string[] = [];
 	for (const [k, raw] of lines.slice(start + 1).entries()) {
 		const l = raw.trim();
 		if (/^#{1,3}\s/.test(l) || /^[A-Z][A-Z ]+$/.test(l)) break;
+		body.push(raw);
 		const m = /^[-*]\s+(.*)$/.exec(l);
 		if (m) items.push({ ...parseItem(m[1]), line: start + 2 + k });
+	}
+	if (!items.length) {
+		const cmd = bareCommand(body);
+		if (cmd) items.push({ claim: BARE_CLAIM, cmd, after: "", line: start + 2 + body.findIndex((l) => l.trim()), bare: true });
 	}
 	return items;
 }
@@ -203,8 +231,17 @@ export function unfailable(cmd: string): string | undefined {
 	if (/console\.assert\s*\(/.test(c) && !/process\.exit(Code)?\b|assert\.|throw\b/.test(c)) return "console.assert only logs: a failed assertion still exits 0";
 	// A pipe inside a command substitution is not this pipe: `o=$(printf … | bin) && ec=$?` reads
 	// the substitution's code, the binary's (process ticket 093).
-	if (/\|\s*[^|]*\$\?/.test(c.replace(/\$\((?:[^()]|\([^()]*\))*\)/g, "SUB"))) return "it reads $? after a pipe, which is the last command's code, not the check's";
+	// Only when the pipe's last step is a filter: `echo '{…}' | ./prog; test $? -eq 2` reads the
+	// program's own code, a right check that the acceptance series of process ticket 111 saw
+	// thrown out 5 times in one plan.
+	if (/\|\s*(tail|head|grep|egrep|wc|sed|awk|sort|uniq|cat|tee|cut|tr|jq|xargs|less|more)\b[^|;&]*(;|&&)[^;&|]*\$\?/.test(c.replace(/\$\((?:[^()]|\([^()]*\))*\)/g, "SUB")))
+		return "it reads $? after a pipe that ends in a filter, which is the filter's code, not the program's";
 	if (/(^|[;&|]\s*)git diff\b/.test(c) && !/--exit-code|--quiet/.test(c) && !/git diff[^;&|]*\|/.test(c)) return "`git diff` exits 0 whether or not there are changes (add --exit-code or --quiet)";
+	// Process ticket 102: both checks that "passed" on a long-lived agent, the second task's against the first's plan.
+	const lit = c.replace(/\$\(\s*(?:printf|echo)\s+(?:'[^']*'|"[^"$`]*"|[^\s$`()'"]+)\s*\)/g, "LIT");
+	const side = `(?:'[^']*'|"(?:[^"$\`]|LIT)*"|LIT|[^\\s$\`'"\\]]+)`;
+	if (new RegExp(`(^|[;&|(]\\s*)(\\[\\[?|test)\\s+${side}\\s*(=|==|!=)\\s*${side}\\s*(\\]\\]?|$|[;&|)])`).test(lit)) return "it compares two constant strings, so its result is known before any work is done";
+	if (/^ls\s+(-\w*[aA]\w*\s*)+(\.\/?\s*)?\|\s*grep\s+-\w*[cq]\w*\s+['"]?\.['"]?$/.test(c)) return "a listing of the workspace with dotfiles is never empty (.git is in it), so the grep always matches";
 	for (const s of nodeScripts(cmd)) {
 		if ((s.prints || PRINTS.test(s.body)) && !DECIDES.test(s.body) && !/\|\s*grep\b/.test(c)) {
 			return "its node script only prints: the harness reads the exit code, not the output (exit non-zero with process.exit, assert or throw)";
@@ -281,14 +318,25 @@ export function syntaxError(cmd: string): string | undefined {
 type Git =(cwd: string, ...args: string[]) => Promise<{ code: number | null; out: string }>;
 const git: Git = (cwd, ...args) => sh("git", args, cwd, 30_000);
 
-/** PLAN.md as the plan step committed it (the first commit that added it), or undefined. */
+/**
+ * PLAN.md as the plan step committed it for this task: the latest "Plan" commit
+ * of it (plan-step.ts savePlan; the task's start in done-gate.ts taskBase too),
+ * else the latest commit that added it; undefined without either. Not the first
+ * that added it: in a workspace that outlives a task the next plan only changes
+ * PLAN.md, and every later task was checked against the first one's Done when
+ * (process ticket 102: "./hello.sh prints ready" judged a task to write wc.py).
+ */
 export async function frozenPlan(cwd: string): Promise<string | undefined> {
-	const added = await git(cwd, "log", "--diff-filter=A", "--format=%H", "--", PLAN_FILE);
-	const first = added.out.trim().split("\n").filter(Boolean).at(-1);
-	if (added.code !== 0 || !first) return undefined;
+	const planned = await git(cwd, "log", "-1", "--format=%H", "--grep=^Plan$", "--", PLAN_FILE);
+	let commit = planned.code === 0 ? planned.out.trim() : "";
+	if (!commit) {
+		const added = await git(cwd, "log", "-1", "--diff-filter=A", "--format=%H", "--", PLAN_FILE);
+		commit = added.code === 0 ? added.out.trim() : "";
+	}
+	if (!commit) return undefined;
 	const top = await git(cwd, "rev-parse", "--show-toplevel");
 	const path = relative(top.out.trim(), join(cwd, PLAN_FILE));
-	const shown = await git(cwd, "show", `${first}:${path}`);
+	const shown = await git(cwd, "show", `${commit}:${path}`);
 	return shown.code === 0 ? shown.out : undefined;
 }
 

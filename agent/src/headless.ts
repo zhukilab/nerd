@@ -13,9 +13,10 @@ import {
 	SessionManager,
 	SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { nerdBashTool } from "./bash-tool.ts";
+import { nerdBashTool, quietEnv } from "./bash-tool.ts";
 import { allTools } from "./harness.ts";
-import { calcOn, type settingsFor, systemPrompt, type Thinking } from "./local.ts";
+import { runsOfProcess, runsTool, runsToolOn } from "./tmux-runs.ts";
+import { calcOn, type settingsFor, systemPrompt, type Thinking, widenRetry } from "./local.ts";
 import { configurePackages, packagePaths } from "./packages.ts";
 import { loopGuard } from "./loop-guard.ts";
 import { outputCap } from "./output-cap.ts";
@@ -73,6 +74,7 @@ export async function scoutSession(o: HeadlessOptions): Promise<ScoutSession> {
 		sessionManager: SessionManager.inMemory(o.cwd),
 		settingsManager,
 	});
+	widenRetry(session);
 	await session.bindExtensions({
 		mode: "print",
 		onError: (err) => console.error(`Extension error (${err.extensionPath}): ${err.error}`),
@@ -115,11 +117,14 @@ export async function headlessSession(o: HeadlessOptions) {
 			nerdBashTool(o.cwd),
 			...(planCalcOn(env) ? [calcTool()] : []),
 			...(scoutOn(env) ? [scoutTool(o.cwd, () => scoutSession(o), env)] : []),
+			// Background commands in tmux session nerd-runs (tmux-runs.ts, NERD_RUNS_BACKGROUND).
+			...(runsToolOn(env) ? [runsTool(o.cwd, runsOfProcess(), () => quietEnv(process.env))] : []),
 		],
 		// A session file is what pi-vcc's vcc_recall searches.
 		sessionManager: o.sessionDir ? SessionManager.create(o.cwd, o.sessionDir) : SessionManager.inMemory(o.cwd),
 		settingsManager,
 	});
+	if (!widenRetry(session)) console.error("[nerd] this Pi has no _isRetryableError: a provider's broken-off reply is not retried");
 	await session.bindExtensions({
 		mode: "print",
 		onError: (err) => console.error(`Extension error (${err.extensionPath}): ${err.error}`),

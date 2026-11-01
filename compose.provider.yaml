@@ -1,0 +1,9 @@
+# NERD_LLAMA=provider: the provider's API key, a file on this machine
+# (NERD_PROVIDER_KEY_FILE, default var/provider.key), mounted into the key
+# proxy as /run/secrets/provider_key — and into no other container.
+services:
+  keyproxy:
+    secrets: [provider_key]
+secrets:
+  provider_key:
+    file: ${NERD_PROVIDER_KEY_FILE:?}

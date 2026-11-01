@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { changedItems, frozenPlan, parseDoneWhen, runDoneWhen } from "../src/done-when.ts";
+import { BARE_CLAIM, changedItems, frozenPlan, parseDoneWhen, runDoneWhen } from "../src/done-when.ts";
 import { checksOn, planStepPrompt, rustTask } from "../src/plan-step.ts";
 import { checkRound, decide, newState, type RoundCheck, ralphOn, ralphOptions, runRalphHeadless } from "../src/ralph.ts";
 import { tempDir } from "./tmp.ts";
@@ -123,6 +123,32 @@ test("the checks are the plan as committed; a later edit is reported, not run", 
 	assert.ok(c.failures.some((f) => f.includes("grep -q 42 out.txt")), "the frozen check ran and failed");
 	assert.ok(c.notes.some((n) => /differs from the plan as committed/.test(n)));
 	assert.equal(changedItems(frozen, parseDoneWhen(PLAN.replace("grep -q 42 out.txt", "true"))).length, 1);
+});
+
+test("a second task in the same workspace is checked against its own plan, not the first one's", async () => {
+	// Process ticket 102: the first task's plan added PLAN.md; the second's only changed it.
+	const first = "## Done when\n- hello says ready — check: `./hello.sh | grep -q ready`\n";
+	const d = repo({ "PLAN.md": first, "hello.sh": "#!/bin/sh\necho ready\n" }, "Plan");
+	commit(d, { "PLAN.md": PLAN }, "Plan");
+	commit(d, { "PLAN.md": PLAN.replace("grep -q 42 out.txt", "true"), "out.txt": "41\n" }, "work");
+	const frozen = parseDoneWhen((await frozenPlan(d)) ?? "");
+	assert.equal(frozen[1].cmd, "grep -q 42 out.txt");
+	assert.ok(!frozen.some((i) => i.cmd?.includes("hello.sh")));
+	// Without a "Plan" commit: the latest addition of PLAN.md.
+	const h = repo({ "PLAN.md": first }, "init");
+	commit(h, { "PLAN.md": PLAN }, "edit");
+	assert.equal(parseDoneWhen((await frozenPlan(h)) ?? "")[0].cmd, "./hello.sh | grep -q ready");
+});
+
+test("no claim of PLAN.md among the committed ones: a warning first, not an edit note", async () => {
+	const d = repo({ "PLAN.md": PLAN }, "Plan");
+	commit(d, { "PLAN.md": "## Done when\n- the reply is the marker — check: `true`\n" }, "work");
+	const c = await checkRound(d, newState());
+	assert.match(c.notes[0], /^WARNING: none of PLAN\.md's Done when claims/);
+	assert.ok(!c.notes.some((n) => /differs from the plan as committed/.test(n)));
+	const edit = repo({ "PLAN.md": PLAN }, "Plan");
+	commit(edit, { "PLAN.md": PLAN.replace("grep -q 42 out.txt", "true") }, "work");
+	assert.ok(!(await checkRound(edit, newState())).notes.some((n) => /WARNING/.test(n)));
 });
 
 test("an unusable check is not a reason for a round, and is reported as not demonstrated", async () => {
@@ -297,6 +323,64 @@ test("checkRound with the amend guard: an early correction must pass on the firs
 	assert.ok(c.notes.some((n) => /corrected check was not taken/.test(n)));
 });
 
+test("parseDoneWhen: a section that is a bare command is one check (process ticket 107)", () => {
+	// As nemotron-3-nano wrote it on the stand of 106: over lines, and in one pair of backticks.
+	const lines = "## Done when\n\nbash -c 'set -e\n./wuxing generates wood fire | grep -q \"^true$\"\n'\n\n## Plan lint\n";
+	assert.deepEqual(parseDoneWhen(lines), [{ claim: BARE_CLAIM, cmd: "bash -c 'set -e\n./wuxing generates wood fire | grep -q \"^true$\"\n'" }]);
+	assert.deepEqual(parseDoneWhen("## Done when\n\n`./wuxing round wood wood | grep -qx draw`\n"), [{ claim: BARE_CLAIM, cmd: "./wuxing round wood wood | grep -qx draw" }]);
+	assert.deepEqual(parseDoneWhen("## Done when\n\n```sh\ntest -x ./medsched\n```\n"), [{ claim: BARE_CLAIM, cmd: "test -x ./medsched" }]);
+	// The span first, then words (the acceptance series of 107).
+	assert.deepEqual(parseDoneWhen("## Done when\n`./wuxing generates wood fire && ./wuxing round\n wood water` exits with status 0, and any deviation fails.\n"), [
+		{ claim: BARE_CLAIM, cmd: "./wuxing generates wood fire && ./wuxing round\n wood water" },
+	]);
+	// Words, not a command: still no check.
+	assert.deepEqual(parseDoneWhen("## Done when\n\nThe program works for every case.\n"), []);
+	// Items win: the lines between them are not a command.
+	assert.deepEqual(parseDoneWhen("## Done when\nbash -c true\n- x — check: `true`\n"), [{ claim: "x", cmd: "true" }]);
+});
+
+test("decide: with a plan, nothing demonstrated is not done (process ticket 107)", () => {
+	const opts = { maxRounds: 3, maxMs: 0 };
+	const none = decide(newState(0), { failures: [], gate: [], items: [], notes: [], planned: false, plan: true }, "t", undefined, opts);
+	assert.equal(none.kind, "stop");
+	if (none.kind === "stop") assert.match(none.report, /Not done .* nothing is demonstrated .* no Done when checks/);
+	const unusable = [{ claim: "it is right", ok: false, unusable: true, why: "no check: the plan gives no command for this item" }];
+	const all = decide(newState(0), { failures: [], gate: [], items: unusable, notes: [], planned: true, plan: true }, "t", undefined, opts);
+	assert.equal(all.kind, "stop");
+	if (all.kind === "stop") assert.match(all.report, /none of its 1 Done when checks could be run/);
+	// No plan at all (solve, a loop with no plan step): the gate is all there is to check.
+	assert.equal(decide(newState(0), { failures: [], gate: [], items: [], notes: [], planned: false, plan: false }, "t", undefined, opts).kind, "done");
+});
+
+test("decide: a search task is done only with a passing check over many inputs (process ticket 111)", () => {
+	const opts = { maxRounds: 3, maxMs: 0 };
+	const example = { claim: "the example", cmd: "echo '{}' | ./medsched | grep -q 07:00", ok: true, why: "" };
+	const stress = { claim: "many inputs", cmd: "python3 tests/stress.py", ok: true, why: "" };
+	const c = (items: (typeof example)[]): RoundCheck => ({ failures: [], gate: [], items, notes: [], planned: true, plan: true, search: true });
+	const d = decide(newState(0), c([example]), "t", undefined, opts);
+	assert.equal(d.kind, "stop");
+	if (d.kind === "stop") assert.match(d.report, /no Done when check over many inputs passed/);
+	assert.equal(decide(newState(0), c([example, stress]), "t", undefined, opts).kind, "done");
+	assert.equal(decide(newState(0), { ...c([example]), search: false }, "t", undefined, opts).kind, "done");
+});
+
+test("checkRound: the committed plan's task decides whether it is a search", async () => {
+	const task = "> Print a schedule.\n> If no schedule satisfies these rules, print nothing and exit with status 1.\n";
+	const d = repo({ "PLAN.md": `# Plan\n\n## Task\n\n${task}\n## Done when\n- runs — check: \`true\`\n` }, "Plan");
+	assert.equal((await checkRound(d, newState())).search, true);
+	const w = repo({ "PLAN.md": "# Plan\n\n## Task\n\n> Print hi.\n\n## Done when\n- runs — check: `true`\n" }, "Plan");
+	assert.equal((await checkRound(w, newState())).search, false);
+});
+
+test("checkRound: a committed plan with an empty Done when stops the loop as not done", async () => {
+	const d = repo({ "PLAN.md": "# Plan\n\n## Steps\n1. do it\n\n## Done when\n\nIt works.\n" }, "Plan");
+	commit(d, { "out.txt": "x\n" }, "work");
+	const c = await checkRound(d, newState());
+	assert.equal(c.plan, true);
+	assert.equal(c.planned, false);
+	assert.equal(decide(newState(), c, "t", undefined, { maxRounds: 3, maxMs: 0 }).kind, "stop");
+});
+
 test("decide: all checks pass", () => {
 	const d = decide(newState(0), { failures: [], items: [{ claim: "x", cmd: "true", ok: true, why: "" }], notes: [], planned: true }, "t", undefined, { maxRounds: 3, maxMs: 0 });
 	assert.equal(d.kind, "done");
@@ -320,6 +404,27 @@ test("runRalphHeadless: a failing round is compacted, then prompted with its fai
 	assert.equal(d.kind, "done");
 	assert.deepEqual(calls, ["compact", "prompt:[ralph round 1/3] A new round of the same task. The conversation before it was compacted; what counts is in the files: the code, PLAN.md (its Done when items are the checks), notes/, git log."]);
 	assert.deepEqual(rounds, ["next", "done"]);
+});
+
+test("runRalphHeadless: a round the model request failed stops with the error, not as no progress", async () => {
+	let err: string | undefined;
+	const session = {
+		compact: async () => {},
+		prompt: async () => {
+			err = "Connection error.";
+		},
+		failed: () => err,
+	};
+	let checks = 0;
+	const check = async (): Promise<RoundCheck> => {
+		checks++;
+		return fail(["gate: npm test failed"]);
+	};
+	const d = await runRalphHeadless(session, "/nowhere", "t", { maxRounds: 3, maxMs: 0 }, () => {}, check);
+	assert.equal(d.kind, "stop");
+	assert.match(d.kind === "stop" ? d.report : "", /model request failed \(Connection error\.\)/);
+	assert.doesNotMatch(d.kind === "stop" ? d.report : "", /no progress/);
+	assert.equal(checks, 1);
 });
 
 test("runRalphHeadless with the pair: the amend round goes to the planner, the rest to the worker", async () => {

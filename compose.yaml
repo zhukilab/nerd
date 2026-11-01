@@ -60,6 +60,10 @@ services:
       # Empty unless NERD_LLAMA=mlx: llama-server reports its own context.
       NERD_CTX: ${NERD_AGENT_CTX:-}
       NERD_SAMPLING: ${NERD_SAMPLING:-}
+      # The model to ask for; required with Ollama (NERD_LLAMA=remote), which serves many.
+      NERD_MODEL: ${NERD_MODEL:-}
+      # The key proxy's token (NERD_KEYPROXY_AUTH=on), sent as the agent's API key; not the provider's key.
+      NERD_MODEL_API_KEY: ${NERD_KEYPROXY_TOKEN:-}
       NERD_SUDO: ${NERD_SUDO:-1}
     volumes:
       - ws:/workspace
@@ -74,6 +78,30 @@ services:
     ports:
       - ${NERD_BIND:?}:${NERD_SSH_PORT}:${NERD_SSH_PORT}
       - ${NERD_BIND}:${NERD_APP_PORT}:${NERD_APP_PORT}
+    networks: [net]
+
+  # NERD_LLAMA=provider: the cloud provider's key lives here alone (decision
+  # 0018; compose.provider.yaml mounts it); the agent talks to this proxy
+  # without a key, and the proxy adds it (agent/src/keyproxy.ts). Root inside,
+  # so the key file may keep its owner's 600 — by DAC_READ_SEARCH alone, every
+  # other capability dropped; no shell, no ports published.
+  keyproxy:
+    profiles: [keyproxy]
+    image: ${NERD_IMAGE:?}
+    container_name: ${NERD_NAME}-keyproxy
+    entrypoint: [/opt/node/bin/node, /opt/nerd/agent/src/keyproxy.ts]
+    user: root
+    cap_drop: [ALL]
+    cap_add: [DAC_READ_SEARCH]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+    read_only: true
+    environment:
+      NERD_PROVIDER_URL: ${NERD_PROVIDER_URL:-}
+      NERD_PROVIDER_MODELS: ${NERD_PROVIDER_MODELS:-}
+      NERD_KEYPROXY_HOST: ${NERD_SERVER_HOST:?}
+      NERD_KEYPROXY_PORT: ${NERD_KEYPROXY_PORT:?}
+      NERD_KEYPROXY_TOKEN: ${NERD_KEYPROXY_TOKEN:-}
     networks: [net]
 
 networks:

@@ -13,6 +13,8 @@
 //   NERD_VERIFY_LOG      the verifier's JSONL log, when NERD_VERIFY_N > 1
 // Extra options go to Pi as they are, e.g. --continue to pick up the last session.
 
+// First: the operator's settings file into process.env, before modules that read NERD_* at load.
+import "./settings-load.ts";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";

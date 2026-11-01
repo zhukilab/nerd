@@ -43,7 +43,7 @@ pretty=$( (. /etc/os-release 2>/dev/null && echo "${PRETTY_NAME:-}") )
 if [ "$os" = Darwin ]; then
   if [ "$arch" = arm64 ]; then row OK os "macOS $(sw_vers -productVersion 2>/dev/null) $arch (llama-server on the host with Metal, docs/MACOS.md)"
   else row MISSING os "macOS $arch" "only Apple silicon Macs: an Intel Mac has no Metal GPU fast enough for the model"; fi
-  nerd_on_host || row MISSING llama-mode "NERD_LLAMA=$NERD_LLAMA" "on macOS the server must run on the host: NERD_LLAMA=host (or unset), or mlx"
+  nerd_no_gpu || row MISSING llama-mode "NERD_LLAMA=$NERD_LLAMA" "on macOS the server must run on the host: NERD_LLAMA=host (or unset), or mlx; or remote, on another machine; or provider"
   bv=${BASH_VERSINFO[0]}
   [ "$bv" -ge 4 ] || row MISSING bash "bash $BASH_VERSION (macOS ships 3.2)" "brew install bash (./UP and ./STATUS need bash 4+, first in PATH)"
 elif [ "$os" != Linux ]; then
@@ -186,7 +186,7 @@ else
 fi
 
 # --- container toolkit / CDI --------------------------------------------------------
-if nerd_on_host; then
+if nerd_no_gpu; then
   :   # no GPU in the container
 elif [ $docker_ok = 1 ]; then
   cdi=0 rt=0

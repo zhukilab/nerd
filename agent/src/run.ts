@@ -1,8 +1,15 @@
 // Headless run of Pi's agent core against a local llama-server (decision 0007).
 //
 //   node src/run.ts <workspace-dir> "<task>" [--log events.jsonl]
+//   node src/run.ts <workspace-dir> --task-file <path> [--log events.jsonl]   (run-args.ts)
 //
 // Environment:
+//   NERD_MODE      plan | solve | ralph (src/mode.ts, process ticket 104). Unset: the plan step,
+//                  then the work under Ralph, as always. plan: the plan only (a PLAN.md there is
+//                  revised to the task, commit "Plan" on top), exit 0 when it is committed. solve:
+//                  no plan step, no Ralph, no done gate; what is there committed before and after.
+//                  ralph: a PLAN.md there is carried out under Ralph without a plan step; none, as unset
+//   NERD_PROBLEM_FILE  the task from this file (relative to the workspace) when none is given
 //   NERD_BASE_URL  OpenAI-compatible endpoint (default http://127.0.0.1:18091/v1)
 //   NERD_MODEL     model id to report (default: whatever the server serves;
 //                  for mlx-vlm's server, the model its /health says it loaded)
@@ -77,7 +84,7 @@
 //                  amend round), the one at NERD_BASE_URL writes the code;
 //                  NERD_PLAN_MODEL its model id (default: whatever it serves)
 //
-// NERD_AGORA_CHANNEL=<socket> connects the run to a session manager's channel
+// AGORA_PI_CHANNEL=<socket> (or the older NERD_AGORA_CHANNEL) connects the run to a session manager's channel
 // (src/agora-channel.ts; agora's PI-CHANNEL.md): events out, letters in, send_letter.
 //
 // The temp agent dir (under $TMPDIR) is removed when the run ends, unless the
@@ -86,7 +93,10 @@
 //
 // The interactive counterpart is tui.ts; what both share is in local.ts.
 
-import { appendFileSync, cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+// First: the operator's settings file into process.env, before modules that read NERD_* at load.
+import "./settings-load.ts";
+import { execFileSync } from "node:child_process";
+import { appendFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
@@ -94,28 +104,60 @@ import { agoraChannel, agoraChannelPath, closeProcessChannel } from "./agora-cha
 import { logged } from "./event-log.ts";
 import { type HarnessHooks, harness } from "./harness.ts";
 import { headlessSession } from "./headless.ts";
-import { localModel, modelDefinition, plannerModel, settingsFor, stayOffline, withVerifier } from "./local.ts";
+import { localModel, modelApiKey, modelDefinition, plannerModel, settingsFor, stayOffline, withVerifier } from "./local.ts";
+import { CARRY_OUT, commitAll, commitPlan, headlessMode, type Mode, planCommit, solveSubject } from "./mode.ts";
 import { PLANNER, type Role } from "./pair.ts";
+import { PLAN_FILE, planTask } from "./plan-step.ts";
 import { enabledPackages } from "./packages.ts";
 import { ralphOn, ralphOptions, runRalphHeadless } from "./ralph.ts";
+import { RUN_USAGE, runArgs } from "./run-args.ts";
 import { runSpecCheck } from "./spec-check.ts";
 
 stayOffline();
 
-function arg(name: string): string | undefined {
-	const i = process.argv.indexOf(name);
-	return i > 0 ? process.argv[i + 1] : undefined;
+/** Whether `file` has changes git has not committed (false outside a repository). */
+function uncommitted(cwd: string, file: string): boolean {
+	try {
+		return execFileSync("git", ["status", "--porcelain", "--", file], { cwd, stdio: "pipe" }).toString().trim() !== "";
+	} catch {
+		return false;
+	}
 }
 
 async function main() {
-	const [workspace, task] = process.argv.slice(2);
-	if (!workspace || !task) {
-		console.error('usage: node src/run.ts <workspace-dir> "<task>" [--log events.jsonl]');
+	const args = runArgs(process.argv.slice(2), process.env, true);
+	if ("error" in args) {
+		console.error(args.error);
 		process.exit(2);
 	}
+	const { workspace, log: logPath } = args;
+	let task = args.task;
+	// The first prompt: the task, or with a plan to carry out, the ask to carry it out.
+	let opening = task;
 	const cwd = resolve(workspace);
 	mkdirSync(cwd, { recursive: true });
-	const logPath = arg("--log");
+	// NERD_MODE (mode.ts, process ticket 104): unset, the path as it always was.
+	let mode: Mode;
+	try {
+		mode = headlessMode();
+	} catch (e) {
+		console.error((e as Error).message);
+		process.exit(2);
+	}
+	const explicitRalph = mode === "ralph" && !!process.env.NERD_MODE?.trim();
+	// ralph with a plan there: the plan is carried out, not made again; plan: the plan step always.
+	const carryOut = explicitRalph && existsSync(join(cwd, PLAN_FILE));
+	const withPlanStep = mode === "plan" || (mode === "ralph" && !carryOut && process.env.NERD_PLAN_STEP !== "0");
+	if (carryOut) {
+		const warning = await commitPlan(cwd);
+		if (warning) console.log(`[${warning}]`);
+		opening = `${CARRY_OUT}${task.trim() ? `\n\n${task.trim()}` : ""}`;
+		// The Ralph loop's "task in the operator's words": the one given, else the plan's own.
+		if (!task.trim()) task = planTask(readFileSync(join(cwd, PLAN_FILE), "utf8")) || CARRY_OUT; // whole-read: the plan, a page
+	} else if (!task.trim()) {
+		console.error(RUN_USAGE);
+		process.exit(2);
+	}
 	const local = await localModel();
 	const { baseUrl, ctx, thinking, id: modelId } = local;
 	const planner = await plannerModel();
@@ -127,7 +169,7 @@ async function main() {
 		join(agentDir, "models.json"),
 		JSON.stringify({
 			providers: {
-				local: { baseUrl, api: "openai-completions", apiKey: "none", models: [modelDefinition(local)] },
+				local: { baseUrl, api: "openai-completions", apiKey: modelApiKey(), models: [modelDefinition(local)] },
 				...(planner
 					? { [PLANNER]: { baseUrl: planner.baseUrl, api: "openai-completions", apiKey: "none", models: [modelDefinition(planner)] } }
 					: {}),
@@ -161,7 +203,7 @@ async function main() {
 			thinking,
 			settings: settingsFor(local),
 			extensions: [
-				harness(false, planStep ? process.env : { ...process.env, NERD_PLAN_STEP: "0" }, hooks),
+				harness(false, planStep ? { ...process.env, NERD_PLAN_STEP: "1" } : { ...process.env, NERD_PLAN_STEP: "0" }, hooks),
 				// A session manager's channel (agora-channel.ts): the newest session takes it over.
 				...(agora ? [agoraChannel("run", agora)] : []),
 			],
@@ -198,7 +240,7 @@ async function main() {
 			process.stdout.write(`[tool ${event.toolName} done${event.isError ? ", ERROR" : ""}]\n`);
 		}
 	};
-	let session = await makeSession(true);
+	let session = await makeSession(withPlanStep);
 	// SIGINT/SIGTERM (a manager stopping the run, docker stop): the turn is aborted and the
 	// run ends as the finally below would, not with Node's default death mid-turn.
 	const stop = (sig: NodeJS.Signals, code: number) => {
@@ -226,11 +268,39 @@ async function main() {
 		}
 	};
 	try {
-		await prompt(task);
+		// solve: what is there is committed before the work and after it (mode.ts commitAll).
+		const commit = (subject: string) => {
+			const r = commitAll(cwd, subject);
+			if (r.committed) console.log(`\n[solve: committed "${r.committed}"]`);
+			if (r.error) console.log(`\n[solve: not committed (${r.error})]`);
+		};
+		if (mode === "solve") commit("Before solve");
+		const planBefore = planCommit(cwd);
+		const planAt = join(cwd, PLAN_FILE);
+		const writtenBefore = existsSync(planAt) ? statSync(planAt).mtimeMs : -1;
+		await prompt(opening);
+		if (mode === "solve") commit(solveSubject(task));
+		if (mode === "plan") {
+			// The plan is the run's result: done when the step saved it and it is committed —
+			// a new "Plan" commit, or none because the revised plan came out the same.
+			const secs = ((Date.now() - t0) / 1000).toFixed(0);
+			const now = planCommit(cwd);
+			const saved = existsSync(planAt) && statSync(planAt).mtimeMs !== writtenBefore;
+			const notDone = (why: string) => {
+				console.error(`\n[NOT DONE after ${secs} s: ${why}]`);
+				process.exitCode = 1;
+			};
+			if (!saved) notDone("no plan saved");
+			else if (now && now !== planBefore) console.log(`\n[plan done in ${secs} s: ${PLAN_FILE} committed (${now.slice(0, 7)})]`);
+			else if (uncommitted(cwd, PLAN_FILE)) notDone(`${PLAN_FILE} saved but not committed: git refused (the plan step's note above says why)`);
+			else console.log(`\n[plan done in ${secs} s: unchanged, the same as the last "Plan" commit]`);
+			return;
+		}
 		// The Ralph loop (decision 0014): rounds from the files until the DONE
 		// WHEN checks pass, no progress, or the budget.
 		let ralphDone = false;
-		if (ralphOn()) {
+		let ralphStopped = false;
+		if (mode === "ralph" && ralphOn()) {
 			const opts = ralphOptions();
 			// The pair: the amend round goes to the checks' author (pair.ts).
 			const role = plannerAt
@@ -247,13 +317,18 @@ async function main() {
 				old.dispose();
 				process.stdout.write("\n[ralph: the round starts in a new session]\n");
 			};
-			const guarded = { compact: (i?: string) => session.compact(i), prompt, role, fresh };
+			const failed = () => {
+				const last = session.messages.at(-1) as { role?: string; stopReason?: string; errorMessage?: string };
+				return last?.role === "assistant" && last.stopReason === "error" ? last.errorMessage || "error" : undefined;
+			};
+			const guarded = { compact: (i?: string) => session.compact(i), prompt, role, fresh, failed };
 			const d = await runRalphHeadless(guarded, cwd, task, opts, (r) => {
 				if (logPath) appendFileSync(logPath, `${JSON.stringify({ t: Date.now() - t0, type: "ralph_round", ...r })}\n`);
 				process.stdout.write(`\n[ralph round ${r.round}/${opts.maxRounds}: ${r.kind}, ${r.failures.length} failing]\n`);
 			});
 			process.stdout.write(`\n${d.kind === "next" ? "" : d.report}\n`);
 			ralphDone = d.kind === "done";
+			ralphStopped = !ralphDone;
 		}
 		// Spec check before done (ticket 030): off unless NERD_SPEC_CHECK=1, and
 		// only after a first reply that ended by itself.
@@ -277,21 +352,29 @@ async function main() {
 		// Only a final assistant reply that stopped by itself counts as done.
 		const last = session.messages.at(-1) as { role?: string; stopReason?: string; errorMessage?: string };
 		const secs = ((Date.now() - t0) / 1000).toFixed(0);
+		// Process ticket 107: a loop that stopped short of "done" (no progress, the budget,
+		// nothing demonstrated) is not done, however the last reply ended; it used to exit 0.
 		const why =
 			last?.role !== "assistant"
 				? `ended on a ${last?.role ?? "missing"} message`
 				: last.stopReason !== "stop"
 					? `last reply stopped with ${last.stopReason}${last.errorMessage ? `: ${last.errorMessage}` : ""}`
-					: undefined;
+					: ralphStopped
+						? "the Ralph loop stopped without its checks passing (its report above)"
+						: undefined;
 		// A compaction that failed on the way does not undo a finish the Ralph loop checked
 		// itself (process ticket 089: exit 1, "NOT DONE … compaction failed 4x", on runs whose
 		// every check had passed).
 		const extra = compactionFailures.length ? `; compaction failed ${compactionFailures.length}x` : "";
-		if (why || (compactionFailures.length && !ralphDone)) {
+		// Nor does a last reply that was cut (the token cap, the loop guard's hard step) undo it
+		// (process ticket 109: a run whose checks passed exited 1, "last reply stopped with length").
+		// "done" from the loop means its checks ran and passed (ralph.ts decide, process ticket 107).
+		if (!ralphDone && (why || compactionFailures.length)) {
 			console.error(`\n[NOT DONE after ${secs} s: ${why ?? "finished"}${extra}]`);
 			process.exitCode = 1;
 		} else {
-			console.log(`\n[done in ${secs} s, ${session.messages.length} messages${extra}]`);
+			const cut = why ? `; the checks passed, though the ${why}` : "";
+			console.log(`\n[done in ${secs} s, ${session.messages.length} messages${extra}${cut}]`);
 		}
 	} finally {
 		session.dispose();

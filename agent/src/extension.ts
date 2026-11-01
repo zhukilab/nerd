@@ -10,10 +10,14 @@
 //     whole, so the TUI shows a step only once the verifier picked it;
 //   - provider "planner", when NERD_PLAN_BASE_URL is set: the ping-pong pair's
 //     planner (pair.ts), which writes the plan and its checks;
-//   - bash with a default timeout, NERD_BASH_TIMEOUT (600 s; bash-tool.ts);
+//   - bash with a default timeout, NERD_BASH_TIMEOUT (600 s; bash-tool.ts), each
+//     command in a window of tmux session nerd-runs, and the runs tool for
+//     commands in the background (tmux-runs.ts);
 //   - the harness (harness.ts, ticket 043): a questions-and-plan turn without
-//     write tools at the start of a task (the first message, or /task <text>),
-//     whose questions wait for the operator; the loop guard on tool results;
+//     write tools at the start of a task (/task <text> or /plan [text]), whose
+//     questions wait for the operator; the modes (mode.ts): a conversation
+//     starts in talk, /plan, /solve and /ralph start the work; the loop guard
+//     on tool results;
 //   - /spec-check [task]: the clause-by-clause check of ticket 030, on demand.
 //     The task is the argument, or else the first user message of the session.
 //     Rounds repeat while checks fail, up to NERD_SPEC_CHECK_ROUNDS (3).
@@ -24,12 +28,14 @@ import type { AssistantMessageEventStream, Model, Api } from "@earendil-works/pi
 import { getApiProvider } from "@earendil-works/pi-ai/compat";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { agoraChannel, agoraChannelPath } from "./agora-channel.ts";
-import { nerdBashTool } from "./bash-tool.ts";
-import { localModel, modelDefinition, plannerModel, withVerifier } from "./local.ts";
+import { nerdBashTool, quietEnv } from "./bash-tool.ts";
+import { localModel, modelApiKey, modelDefinition, plannerModel, withVerifier } from "./local.ts";
+import { runsOfProcess, runsTool, runsToolOn } from "./tmux-runs.ts";
 import { PLANNER } from "./pair.ts";
 import { calcTool, planCalcOn } from "./plan-calc.ts";
 import { harness } from "./harness.ts";
 import { parseVerdict, specCheckPrompt } from "./spec-check.ts";
+import { settingsCommand } from "./settings-command.ts";
 
 const VERIFIED_API = "nerd-verified";
 
@@ -57,18 +63,20 @@ export default async function nerd(pi: ExtensionAPI) {
 
 	// bash with a default timeout (bash-tool.ts), in place of the built-in one.
 	pi.registerTool(nerdBashTool(process.cwd()));
+	// Background commands in tmux session nerd-runs (tmux-runs.ts, NERD_RUNS_BACKGROUND).
+	if (runsToolOn()) pi.registerTool(runsTool(process.cwd(), runsOfProcess(), () => quietEnv(process.env)));
 	// The plan step's calculator (plan-calc.ts), switched on by the step only.
 	if (planCalcOn()) pi.registerTool(calcTool());
 	// An operator answers the plan step's questions here.
 	await harness(true)(pi);
-	// A session manager's channel (agora-channel.ts), only with NERD_AGORA_CHANNEL.
+	// A session manager's channel (agora-channel.ts), only with AGORA_PI_CHANNEL (or NERD_AGORA_CHANNEL).
 	const agora = agoraChannelPath();
 	if (agora) await agoraChannel("tui", agora)(pi);
 
 	pi.registerProvider("local", {
 		name: "nerd local llama-server",
 		baseUrl: local.baseUrl,
-		apiKey: "none",
+		apiKey: modelApiKey(),
 		api: verify ? (VERIFIED_API as Api) : "openai-completions",
 		models: [modelDefinition(local)],
 		// The composer awaits what the handler returns, so the verifier's async stream function fits.
@@ -87,6 +95,8 @@ export default async function nerd(pi: ExtensionAPI) {
 			models: [modelDefinition(planner)],
 		});
 	}
+
+	settingsCommand(pi);
 
 	const maxRounds = Number(process.env.NERD_SPEC_CHECK_ROUNDS ?? 3);
 	let check: { task: string; round: number } | undefined;

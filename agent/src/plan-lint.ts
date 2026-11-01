@@ -136,6 +136,117 @@ export function behaviorExample(rust?: boolean): string {
  * `calcPrinted`: the numbers the plan step's calc calls printed (plan-calc.ts, NERD_PLAN_CALC_LINT=1);
  * with it, a number of a check that is neither in the task, an input, nor printed is an error.
  */
+// Process ticket 111: on the bench of process ticket 106 a task asked for a schedule under
+// several rules, "if no schedule satisfies these rules … exit with status 1". In 6 runs of 6,
+// of two models, the program answered "no schedule" on inputs that have one, and said done:
+// its checks were the task's examples and a few edges, which a greedy answer passes. A search
+// with a "none" answer is checked over many generated inputs: every output against the rules
+// themselves, every "none" against an exhaustive search on small inputs.
+
+/** The task has an answer for "nothing satisfies the rules" (a search, not a formula). */
+export function searchTask(task: string): boolean {
+	return /\bif (?:no|there is no)\b[^.]{0,80}\b(?:satisf\w*|exists?|possible|fits?)\b[^.]{0,200}\b(?:exit|status)\b[^.]{0,40}\b1\b/i.test(task.replace(/\n>?\s*/g, " "));
+}
+
+/** The command checks over many inputs: a generator or a loop, or a script named for it. */
+export function searchesInputs(cmd: string): boolean {
+	return (
+		/\b(random|randint|randrange|shuf|itertools|product\(|permutations|combinations|hypothesis)\b/.test(cmd) ||
+		/\bfor\b[^;]*\bin\b[^;]*\b(range\(\s*\d{2,}|seq\s+\d+\s+\d{2,}|\{\d+\.\.\d{2,}\})/.test(cmd) ||
+		/[\w/-]*(prop|propert|fuzz|random|stress|brute|exhaust|search|exhaustive)[\w-]*\.(py|js|mjs|ts|sh)\b/i.test(cmd)
+	);
+}
+
+const SEARCH_MESSAGE =
+	'the task has an answer for "nothing satisfies the rules", and no check runs the program over many inputs: a check on the examples passes an answer that gives up on inputs that do have a solution. Add a Done when check that runs a script of your own (e.g. `python3 tests/stress.py`) which (1) generates a few hundred small inputs — random, and the edges of every rule (uneven counts, one item with most of the total, tight limits) — (2) checks every output against each rule of the task, written apart from the program\'s code, and (3) for every "none" answer finds by exhaustive search on that small input that there really is none; it exits 1 on the first failure, printing the input';
+
+// Process ticket 108: the task's own names, kept by the plan. On the bench of process
+// ticket 106 two models planned `./wuxing generate` for the task's `./wuxing generates`
+// and one `medsched.py` for "a program named `medsched`", with the task quoted right in
+// the same PLAN.md; the work followed the plan, its own tests used the plan's names, and
+// every outside check of those names failed.
+
+const unquote = (l: string) => l.replace(/^\s*>\s?/, "");
+
+/** The code of the task: its backtick spans and its indented or fenced lines. */
+function taskCode(task: string[]): string[] {
+	const out: string[] = [];
+	let fenced = false;
+	for (const raw of task) {
+		const l = unquote(raw);
+		if (/^\s*```/.test(l)) {
+			fenced = !fenced;
+			continue;
+		}
+		if (fenced || /^( {4}|\t)/.test(l)) out.push(l.trim());
+		for (const m of l.matchAll(/`([^`]+)`/g)) out.push(m[1]);
+	}
+	return out;
+}
+
+/** The programs the task runs as `./name word …`, with those words, and the names it gives files. */
+export function taskInterface(task: string[]): { commands: Map<string, Set<string>>; files: Set<string> } {
+	const commands = new Map<string, Set<string>>();
+	for (const code of taskCode(task)) {
+		for (const m of code.matchAll(/(?:^|[\s;&|(])\.\/([\w-]+)(?=[\s;&|)<>]|$)(?:\s+([a-z][\w-]*))?/g)) {
+			const words = commands.get(m[1]) ?? new Set<string>();
+			if (m[2]) words.add(m[2]);
+			commands.set(m[1], words);
+		}
+	}
+	const files = new Set(commands.keys());
+	for (const m of task.map(unquote).join("\n").matchAll(/\b(?:named|called)\s+`(?:\.\/)?([\w-]+)`/gi)) files.add(m[1]);
+	return { commands, files };
+}
+
+function editDistance(a: string, b: string): number {
+	let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+	for (let i = 1; i <= a.length; i++) {
+		const row = [i];
+		for (let j = 1; j <= b.length; j++) row.push(Math.min(prev[j] + 1, row[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)));
+		prev = row;
+	}
+	return prev[b.length];
+}
+
+/** Another spelling of the same word: one a short extension of the other, or one letter off. */
+const near = (a: string, b: string) =>
+	a !== b && ((a.startsWith(b) || b.startsWith(a)) && Math.abs(a.length - b.length) <= 3 ? true : Math.min(a.length, b.length) >= 4 && editDistance(a, b) === 1);
+
+/** Lines of the plan (not the quoted task) that use another spelling of the task's names. */
+export function interfaceDrift(lines: string[]): { line: number; message: string }[] {
+	const task = lines.filter((l) => l.trim().startsWith(">"));
+	const { commands, files } = taskInterface(task);
+	const out: { line: number; message: string }[] = [];
+	const seen = new Set<string>();
+	const own = lines.map((l, k) => ({ l, k })).filter(({ l }) => !l.trim().startsWith(">"));
+	for (const [name, words] of commands) {
+		if (!words.size) continue;
+		const call = new RegExp(`(?:\\./|\\bpython3?\\s+(?:\\./)?)${name}(?:\\.py)?\\s+([a-z][\\w-]*)`, "g");
+		const used = new Set(own.flatMap(({ l }) => [...l.matchAll(call)].map((m) => m[1])));
+		for (const { l, k } of own) {
+			for (const m of l.matchAll(call)) {
+				const w = m[1];
+				const meant = [...words].find((t) => near(w, t));
+				// The task's word used too: the other one is a check that it is refused (an unknown command, exit 2).
+				if (words.has(w) || !meant || used.has(meant) || seen.has(`${name} ${w}`)) continue;
+				seen.add(`${name} ${w}`);
+				out.push({ line: k + 1, message: `\`${name} ${w}\`: the task's command is \`./${name} ${meant}\` (quoted above). Use the task's names exactly, in the steps and the checks: the work is checked from outside by them` });
+			}
+		}
+	}
+	for (const name of files) {
+		if (name.includes(".")) continue;
+		const other = new RegExp(`\\b${name}\\.(py|js|mjs|ts|sh|rb)\\b`);
+		const self = new RegExp(`(?:^|[\\s\`'"(])\\./${name}(?![\\w.-])`);
+		const at = own.find(({ l }) => other.test(l));
+		if (!at || own.some(({ l }) => self.test(l))) continue;
+		const made = other.exec(at.l)?.[0];
+		out.push({ line: at.k + 1, message: `the task names the program \`${name}\`, the plan makes \`${made}\` and never runs \`./${name}\`: the program must be \`./${name}\` itself, executable (a script with a #! line), and the checks must run it so` });
+	}
+	return out;
+}
+
 export function lintPlan(text: string, opts: { checks: boolean; ownInput?: boolean; rust?: boolean; calcPrinted?: number[] }): Finding[] {
 	const lines = text.split("\n");
 	const out: Finding[] = [];
@@ -155,6 +266,7 @@ export function lintPlan(text: string, opts: { checks: boolean; ownInput?: boole
 		if (PLACEHOLDER.test(l)) at(k + 1, "error", "a placeholder or a deferral: say what will actually be done");
 		if (steps && /^\d+[.)]\s/.test(l) && !/check:/i.test(l)) at(k + 1, "warning", "a step without `check:` — how will you know it is done?");
 	}
+	for (const d of interfaceDrift(lines)) at(d.line, "error", d.message);
 
 	const items = doneWhenLines(text);
 	if (!opts.checks) return out;
@@ -163,6 +275,9 @@ export function lintPlan(text: string, opts: { checks: boolean; ownInput?: boole
 		at(lines.length, "error", "no Done when items: every requirement needs one, with the command that checks it");
 		return out;
 	}
+	// Process ticket 107: a bare command is run as one check if not fixed, but one check
+	// for every requirement is what tells the operator which of them failed.
+	if (items[0].bare) at(items[0].line, "error", "Done when is a bare command, not items: write one item per requirement, `- <claim> — check: `<command>``, each command on one line in backticks, exiting 0 only if the claim is true");
 	for (const i of items) {
 		if (!i.cmd) {
 			const split = (i.claim.match(/`/g) ?? []).length % 2 === 1 ? " The command must be on the item's one line, in one pair of backticks." : "";
@@ -209,10 +324,15 @@ export function lintPlan(text: string, opts: { checks: boolean; ownInput?: boole
 			);
 		}
 	}
+	const behaving = items.filter((i) => i.cmd && exercisesBehavior(i.cmd));
+	// Process ticket 111: a task with a "no solution" answer, and no check over many inputs.
+	const run = items.filter((i) => i.cmd);
+	if (searchTask(taskText) && run.length && !run.some((i) => searchesInputs(i.cmd as string))) {
+		at(run[0].line, "error", SEARCH_MESSAGE);
+	}
 	// Process ticket 089: 4 of 5 failures on substance read "x% on the part over T" as a band
 	// that stops at the next threshold, and no check of the plan went past the threshold.
 	const top = highestThreshold(lines.filter((l) => l.trim().startsWith(">")).join("\n"));
-	const behaving = items.filter((i) => i.cmd && exercisesBehavior(i.cmd));
 	if (top !== undefined && behaving.length && !behaving.some((i) => callNumbers(i.cmd as string).some((n) => n > top))) {
 		at(
 			behaving[0].line,

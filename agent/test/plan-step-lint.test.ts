@@ -103,6 +103,8 @@ test("plan step: max_tokens is capped while planning, not during the work", () =
 	const reply = session(d, { NERD_RALPH: "1" });
 	assert.deepEqual(reply.request({ max_tokens: 16384, model: "m" }), { max_tokens: 6144, model: "m" });
 	assert.deepEqual(reply.request({ max_tokens: 1000 }), { max_tokens: 1000 });
+	// OpenAI's own API: the cap goes into the field the request uses, never a max_tokens it refuses.
+	assert.deepEqual(reply.request({ max_completion_tokens: 16384 }), { max_completion_tokens: 6144 });
 	reply(GOOD);
 	assert.equal(reply.request({ max_tokens: 16384 }), undefined);
 	const capped = session(repo(), { NERD_PLAN_MAX_TOKENS: "0" });
@@ -162,6 +164,9 @@ test("plan step: a cut or empty reply with no plan — the next request goes wit
 	const p = reply.request({ model: "m", chat_template_kwargs: { foo: 1 } }) as Record<string, unknown>;
 	assert.deepEqual(p.chat_template_kwargs, { foo: 1, enable_thinking: false });
 	assert.equal(p.enable_thinking, false);
+	// A cloud provider's request (no local thinking switch in it) gets no fields it would refuse.
+	const cloud = reply.request({ model: "m", max_completion_tokens: 100 }) as Record<string, unknown>;
+	assert.deepEqual([cloud.chat_template_kwargs, cloud.enable_thinking], [undefined, undefined]);
 	const empty = session(repo(), { NERD_RALPH: "1" });
 	assert.match(empty("").entries[0].content, /final plan/);
 });
@@ -191,7 +196,9 @@ test("plan step: past the time budget the tools go away with a note and thinking
 	const r = handlers.get("tool_result")?.({ content: [{ type: "text", text: "file" }] }, ctx) as { content: { text: string }[] };
 	assert.match(r.content[1].text, /time budget/);
 	assert.deepEqual(active, []);
-	const p = handlers.get("before_provider_request")?.({ payload: { model: "m" } }, ctx) as Record<string, unknown>;
+	// As Pi sends it to llama-server (local.ts: always a reasoning model with the chat-template switch).
+	const payload = { model: "m", chat_template_kwargs: { enable_thinking: true } };
+	const p = handlers.get("before_provider_request")?.({ payload }, ctx) as Record<string, unknown>;
 	assert.equal(p.enable_thinking, false);
 	assert.equal(handlers.get("tool_result")?.({ content: [] }, ctx), undefined); // noted once
 });

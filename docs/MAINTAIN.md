@@ -200,7 +200,7 @@ GPUs need 12.8 or later.
 | tmux borders drawn as `qqqq` | the terminal is not UTF-8 | PuTTY: Translation → UTF-8; the session already sets `LANG=C.UTF-8` |
 | the agent's web server is gone | a new agent container (restart, `./UP`) does not restart processes the agent started | ask the agent to start it again |
 | the agent stops with "Context overflow recovery failed" | the conversation outgrew the context | a larger `NERD_CTX` if memory allows; `/task` starts a fresh task |
-| the agent repeats the same command | the model looped; the loop guard tells it after `NERD_LOOP_GUARD_N` repeats | interrupt with a remark (type and Enter) |
+| the agent repeats the same command | the model looped; the loop guard tells it after `NERD_LOOP_GUARD_N` repeats, and after `NERD_LOOP_GUARD_HARD` such notes cuts the reply | interrupt with a remark (type and Enter) |
 
 **Silent GPU memory overflow.** On WSL2 (and Windows generally) the driver
 does not fail when GPU memory runs out: it moves the excess to shared system

@@ -20,7 +20,9 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { pairOn, pairSwitch, type Role } from "./pair.ts";
 import { changedSince, checkProject, fingerprint, sh, taskBase } from "./done-gate.ts";
 import { changedItems, type DoneItem, filesOf, frozenPlan, hashFiles, type ItemResult, parseDoneWhen, runDoneWhen } from "./done-when.ts";
-import { PLAN_FILE } from "./plan-step.ts";
+import { checkedMode, type ModeState } from "./mode.ts";
+import { searchesInputs, searchTask } from "./plan-lint.ts";
+import { PLAN_FILE, planTask } from "./plan-step.ts";
 
 export function ralphOn(env = process.env): boolean {
 	return env.NERD_RALPH !== "0";
@@ -79,6 +81,10 @@ export interface RoundCheck {
 	notes: string[];
 	/** False when the plan has no DONE WHEN items: the loop has nothing of its own to check. */
 	planned: boolean;
+	/** A plan was committed (frozenPlan): its Done when is then what "done" must show. */
+	plan?: boolean;
+	/** The plan's task has a "nothing satisfies the rules" answer (plan-lint searchTask). */
+	search?: boolean;
 	/** The commit the checks ran on. */
 	head?: string;
 }
@@ -106,7 +112,8 @@ const firstLine = (s: string) => s.split("\n")[0];
 
 /** Runs the round's checks in a clean clone; updates the tamper record in `state`. */
 export async function checkRound(cwd: string, state: RalphState, run = runDoneWhen): Promise<RoundCheck> {
-	let frozen = parseDoneWhen((await frozenPlan(cwd)) ?? "");
+	const committed = await frozenPlan(cwd);
+	let frozen = parseDoneWhen(committed ?? "");
 	let current: DoneItem[] = [];
 	try {
 		current = parseDoneWhen(readFileSync(join(cwd, PLAN_FILE), "utf8"));
@@ -140,7 +147,10 @@ export async function checkRound(cwd: string, state: RalphState, run = runDoneWh
 	});
 	for (const [claim, a] of state.amended) notes.push(`"${claim}": its check was corrected by the model after the tests passed — was \`${a.from}\`, now \`${a.to}\`.`);
 	const edited = changedItems(frozen, current);
-	if (frozen.length && edited.length) {
+	// Process ticket 102: a frozen plan of another task once passed this note off as an edit of the checks.
+	if (frozen.length && current.length && !current.some((i) => frozen.some((f) => f.claim === i.claim))) {
+		notes.unshift(`WARNING: none of PLAN.md's Done when claims is in the plan as committed, so the checks run here may be another task's: ${frozen.map((i) => `"${i.claim}"`).join("; ")}. Read the verdict with that in mind.`);
+	} else if (frozen.length && edited.length) {
 		notes.push(`PLAN.md's Done when differs from the plan as committed; the committed items were run. Changed or added: ${edited.map((i) => `"${i.claim}"`).join("; ")}`);
 	}
 	const top = (await sh("git", ["rev-parse", "--show-toplevel"], cwd, 30_000)).out.trim() || cwd;
@@ -197,7 +207,8 @@ export async function checkRound(cwd: string, state: RalphState, run = runDoneWh
 	const failures = [...gate, ...items.filter((r) => !r.ok && !r.unusable).map((r) => `Done when "${r.claim}"${r.cmd ? ` — \`${r.cmd}\`` : ""}: ${r.why}`)];
 	const head = (await sh("git", ["rev-parse", "HEAD"], cwd, 30_000)).out.trim() || undefined;
 	state.entryHead ??= head;
-	return { failures, gate, items, notes, planned: frozen.length > 0, head };
+	const search = committed !== undefined && searchTask(planTask(committed));
+	return { failures, gate, items, notes, planned: frozen.length > 0, plan: committed !== undefined, search, head };
 }
 
 export function amendMessage(task: string, round: number, max: number, check: RoundCheck): string {
@@ -228,6 +239,25 @@ export function decide(state: RalphState, check: RoundCheck, task: string, remar
 	const notes = check.notes.length ? `\n${check.notes.map((n) => `- ${n}`).join("\n")}` : "";
 	if (!check.failures.length) {
 		const passed = check.items.filter((i) => i.ok).length;
+		// Process ticket 107: with a plan, "nothing failed" is not "done" when nothing passed
+		// either — no items, or only unusable ones. On the stand of 106 that was 4 runs out of
+		// 9 of one model: "the gate passes (the plan has no Done when checks)", and 3 of them
+		// failed the external check. The plan is frozen, so another round cannot fix it.
+		if (check.plan && passed === 0) {
+			const what = check.items.length
+				? `none of its ${check.items.length} Done when checks could be run`
+				: "the plan has no Done when checks the harness can run";
+			return { kind: "stop", report: `[ralph] Not done after ${state.round} round(s): nothing is demonstrated — ${what}; the gate alone does not show the task done.${notes}${checkedReport(check)}` };
+		}
+		// Process ticket 111: plan-lint asks a search with a "none" answer for a check over many
+		// inputs; on its acceptance series the plans kept only examples after the one retry, and
+		// 3 runs of 3 said done on a program that answers "none" where a schedule exists.
+		if (check.search && !check.items.some((i) => i.ok && i.cmd && searchesInputs(i.cmd))) {
+			return {
+				kind: "stop",
+				report: `[ralph] Not done after ${state.round} round(s): the task has an answer for "nothing satisfies the rules", and no Done when check over many inputs passed — the examples alone do not show that "none" is said only when there is none.${notes}${checkedReport(check)}`,
+			};
+		}
 		const what = !check.planned
 			? "the gate passes (the plan has no Done when checks)"
 			: passed === check.items.length
@@ -266,7 +296,14 @@ export function decide(state: RalphState, check: RoundCheck, task: string, remar
  * old conversation is where the model already convinced itself it was done).
  */
 export async function runRalphHeadless(
-	session: { compact(i?: string): Promise<unknown>; prompt(text: string): Promise<void>; role?(r: Role): Promise<void>; fresh?(): Promise<void> },
+	session: {
+		compact(i?: string): Promise<unknown>;
+		prompt(text: string): Promise<void>;
+		role?(r: Role): Promise<void>;
+		fresh?(): Promise<void>;
+		/** The error the last reply stopped with (the model server unreachable), if it did. */
+		failed?(): string | undefined;
+	},
 	cwd: string,
 	task: string,
 	opts: RalphOptions,
@@ -277,6 +314,13 @@ export async function runRalphHeadless(
 	const fresh = opts.fresh && session.fresh ? session.fresh.bind(session) : undefined;
 	const d0 = { ...opts, fresh: !!fresh };
 	for (;;) {
+		// A round the model server failed made no move at all: its checks fail as
+		// before, and "no progress" would blame the work for the network (ticket 099).
+		const err = session.failed?.();
+		if (err) {
+			await session.role?.("worker");
+			return { kind: "stop", report: `[ralph] Stopped after round ${state.round}: the model request failed (${err}); the work was not checked again.` };
+		}
 		const c = await check(cwd, state);
 		const d = decide(state, c, task, undefined, d0);
 		log({ round: state.round, kind: d.kind, failures: c.failures.map(firstLine), notes: c.notes });
@@ -296,8 +340,8 @@ export async function runRalphHeadless(
 	}
 }
 
-/** The TUI: rounds driven by events after the agent settles. */
-export function ralph(pi: ExtensionAPI, opts: RalphOptions, check = checkRound) {
+/** The TUI: rounds driven by events after the agent settles; only in the ralph mode (mode.ts). */
+export function ralph(pi: ExtensionAPI, opts: RalphOptions, check = checkRound, mode?: ModeState) {
 	let task = "";
 	let remark: string | undefined;
 	let state = newState(Date.now(), opts);
@@ -309,14 +353,20 @@ export function ralph(pi: ExtensionAPI, opts: RalphOptions, check = checkRound) 
 	const role = pairOn() ? pairSwitch(pi) : undefined;
 
 	pi.on("before_agent_start", async (event, ctx) => {
+		if (mode && !checkedMode(mode)) return;
 		const cwd = ctx.cwd || process.cwd();
-		if (ownTurn) {
+		// A new task (/ralph, /task) wins over ownTurn: a round sent by sendMessage starts no
+		// before_agent_start, so ownTurn can still be set from the last failed round.
+		const fresh = mode?.fresh ?? false;
+		if (mode) mode.fresh = false;
+		if (ownTurn && !fresh) {
 			ownTurn = false;
 		} else if (event.prompt) {
+			ownTurn = false;
 			const first = !ctx.sessionManager
 				.getBranch()
 				.some((e: { type?: string; message?: { role?: string } }) => e.type === "message" && e.message?.role === "user");
-			if (first || !task) {
+			if (first || !task || fresh) {
 				task = event.prompt;
 				remark = undefined;
 			} else remark = event.prompt;
@@ -334,7 +384,7 @@ export function ralph(pi: ExtensionAPI, opts: RalphOptions, check = checkRound) 
 	});
 
 	pi.on("agent_settled", async (_event, ctx) => {
-		if (busy || !task) return;
+		if (busy || !task || (mode && !checkedMode(mode))) return;
 		const cwd = ctx.cwd || process.cwd();
 		if (!wrote && !(ranBash && (await fingerprint(cwd)) !== startFp)) return;
 		busy = true;

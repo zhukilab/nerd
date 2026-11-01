@@ -1,13 +1,16 @@
 // The agora channel (process ticket 095; the wire is agora-doc docs/PI-CHANNEL.md v1):
 // a session manager on the host (agora) listens on a unix socket mounted into the
-// container, and this extension connects to it when NERD_AGORA_CHANNEL names it.
+// container, and this extension connects to it when AGORA_PI_CHANNEL (agora's name since
+// its cc1fced) or the older NERD_AGORA_CHANNEL names it.
 //
 //   - events under Claude Code's hook names (SessionStart, UserPromptSubmit, PostToolUse,
 //     Stop, PreCompact, PostCompact, SessionEnd) and the context share after each turn;
-//   - letters in: the manager's ready text goes into the session with sendUserMessage,
-//     then `ack`. In the TUI an idle session gets it as a prompt; the headless run
-//     (mode "run") drives its own prompts, so there a letter waits for the next turn and
-//     goes in as a follow-up (a steer if urgent). Held during a compaction in both;
+//   - letters in, by the sender's ring (letter-delivery.ts, ticket 101), then `ack`. A
+//     prompt: the manager's ready text with sendUserMessage; in the TUI an idle session
+//     gets it as a prompt; the headless run (mode "run") drives its own prompts, so there
+//     a letter waits for the next turn and goes in as a follow-up (a steer if urgent).
+//     Injected: into the context without a turn, at once. Triaged: a short request to the
+//     model first, then one of those or dropped. Held during a compaction in all;
 //   - send_letter: the model's letter, sent by the manager on the agent's behalf.
 //
 // One connection per process: a Ralph round in a new session (run.ts) makes a new
@@ -16,21 +19,29 @@
 // (scout.ts) loads its own extensions only, so it has no channel.
 
 import { createConnection, type Socket } from "node:net";
-import { StringEnum, Type } from "@earendil-works/pi-ai";
+import { StringEnum, Type, type Api, type Model } from "@earendil-works/pi-ai";
+import { completeSimple } from "@earendil-works/pi-ai/compat";
 import { defineTool, type ExtensionContext, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import { type Act, injectText, TRIAGE_SYSTEM, triagedAct, triagePrompt, wayOf } from "./letter-delivery.ts";
+import { letterPrompt, taskSubject } from "./plan-step.ts";
 
 export const SEND_LETTER_TOOL = "send_letter";
 /** A longer line breaks the wire (PI-CHANNEL §1). */
 export const MAX_LINE = 1 << 20;
 const STOP_CHARS = 8192;
-const EXT_VERSION = "0.1.0";
+const EXT_VERSION = "0.2.1";
+/** The triage's reply: a word and a few lines; thinking is off (no reasoning asked). */
+const TRIAGE_TOKENS = 600;
+const TRIAGE_MS = 5 * 60_000;
+/** The verifier's api (extension.ts): the triage asks the server once, not best-of-N. */
+const VERIFIED_API = "nerd-verified";
 
 export type Mode = "tui" | "run";
 export type Msg = { t: string; [k: string]: unknown };
 
 /** The channel's socket path, or undefined: no channel, nothing of this file loads. */
 export function agoraChannelPath(env: Record<string, string | undefined> = process.env): string | undefined {
-	return env.NERD_AGORA_CHANNEL || undefined;
+	return env.AGORA_PI_CHANNEL || env.NERD_AGORA_CHANNEL || undefined;
 }
 
 /** The instance that owns the process's connection. */
@@ -44,6 +55,8 @@ export interface ChannelOptions {
 	maxDelayMs?: number;
 	answerMs?: number;
 	log?: (s: string) => void;
+	/** The settings the ring's way is read from at each letter (default process.env). */
+	env?: Record<string, string | undefined>;
 }
 
 /** The process's one connection: reconnects with a doubling pause, queues until `welcome`. */
@@ -61,7 +74,7 @@ export class Channel {
 	private outbox: Msg[] = [];
 	private nextId = 1;
 	private pending = new Map<string, { done: (m: Msg) => void; timer: NodeJS.Timeout }>();
-	private readonly o: Required<Omit<ChannelOptions, "log">>;
+	private readonly o: Required<Omit<ChannelOptions, "log" | "env">>;
 
 	readonly path: string;
 
@@ -247,7 +260,9 @@ export function agoraChannel(mode: Mode, path: string, opts?: ChannelOptions): E
 		let running = false;
 		let compacting = false;
 		let outcome: string | undefined;
-		const held: Msg[] = [];
+		let sorting = false;
+		const env = opts?.env ?? process.env;
+		const held: { m: Msg; act?: Act }[] = [];
 		// Pi's screen is not stderr's: the TUI shows the channel's notes as notifications.
 		if (mode === "tui" && !opts?.log) ch.log = (s) => ctx?.ui.notify(`agora: ${s}`, "info");
 
@@ -263,7 +278,7 @@ export function agoraChannel(mode: Mode, path: string, opts?: ChannelOptions): E
 				pid: process.pid,
 			}),
 			letter: (m) => {
-				held.push(m);
+				held.push({ m });
 				deliver();
 			},
 		};
@@ -275,15 +290,65 @@ export function agoraChannel(mode: Mode, path: string, opts?: ChannelOptions): E
 			const u = ctx?.getContextUsage();
 			if (u && mine()) ch.send({ t: "context", tokens: u.tokens, window: u.contextWindow, percent: u.percent });
 		};
+		// The triage's one request: the session's model, its plain stream, no tools, thinking off.
+		const triage = async (m: Msg, c: ExtensionContext): Promise<Act> => {
+			const model = c.model;
+			if (!model) return triagedAct(m, undefined, "no model");
+			try {
+				const auth = await c.modelRegistry.getApiKeyAndHeaders(model);
+				const r = await completeSimple(
+					(model.api === VERIFIED_API ? { ...model, api: "openai-completions" } : model) as Model<Api>,
+					{ systemPrompt: TRIAGE_SYSTEM, messages: [{ role: "user", content: triagePrompt(m, lastAssistantText(c)), timestamp: Date.now() }] },
+					{ ...(auth.ok ? { apiKey: auth.apiKey, headers: auth.headers } : {}), maxTokens: TRIAGE_TOKENS, signal: AbortSignal.timeout(TRIAGE_MS) },
+				);
+				if (r.stopReason === "error" || r.stopReason === "aborted") return triagedAct(m, undefined, r.errorMessage ?? r.stopReason);
+				return triagedAct(m, textOf(r.content));
+			} catch (e) {
+				return triagedAct(m, undefined, e instanceof Error ? e.message : String(e));
+			}
+		};
 		// One letter at a time: the manager sends the next after the ack.
 		const deliver = () => {
-			if (!held.length || !ctx || compacting || !mine()) return;
-			if (mode === "run" && !running) return;
-			const m = held.shift()!;
-			const idle = mode === "tui" && ctx.isIdle();
-			pi.sendUserMessage(String(m.text), idle ? undefined : { deliverAs: m.urgent === true ? "steer" : "followUp" });
+			if (sorting || !held.length || !ctx || compacting || !mine()) return;
+			const h = held[0];
+			if (!h.act) {
+				const way = wayOf(h.m, env);
+				if (way === "triage") {
+					sorting = true;
+					void triage(h.m, ctx).then((act) => {
+						h.act = act;
+						sorting = false;
+						deliver();
+					});
+					return;
+				}
+				h.act = way === "prompt" ? { way, text: String(h.m.text) } : { way, text: injectText(h.m) };
+			}
+			const m = h.m;
+			const act = h.act;
+			if (act.way === "prompt" && mode === "run" && !running) return;
+			held.shift();
+			if (act.way === "prompt") {
+				const idle = mode === "tui" && ctx.isIdle();
+				// A prompt of its own: a new task only by its subject (plan-step.ts).
+				if (idle) letterPrompt(act.text, taskSubject(m.subject));
+				pi.sendUserMessage(act.text, idle ? undefined : { deliverAs: m.urgent === true ? "steer" : "followUp" });
+			} else if (act.way === "inject") {
+				// No turn: pending until the running turn ends, else appended to the session now.
+				pi.sendMessage(
+					{ customType: "agora-letter", content: act.text, display: true, details: { id: m.id, from: m.from, ring: m.ring, kind: m.kind, ...(act.log ? { note: act.log } : {}) } },
+					{ triggerTurn: false },
+				);
+				if (act.log) ch.log(`letter ${m.id} from ${m.from}: ${act.log}`);
+			} else {
+				// Read by triage and not worth the tokens: acked all the same (PI-CHANNEL amendment 3), logged here.
+				pi.appendEntry("agora-letter-dropped", { id: m.id, from: m.from, subject: m.subject, ring: m.ring, why: act.why });
+				ch.log(`letter ${m.id} from ${m.from} dropped by triage: ${act.why}`);
+			}
 			ch.injected.add(String(m.id));
 			ch.send({ t: "ack", id: m.id });
+			// No turn follows an inject or a drop: a letter already held behind it goes on now.
+			if (act.way !== "prompt") deliver();
 		};
 
 		pi.on("session_start", (e, c) => {

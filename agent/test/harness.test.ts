@@ -14,7 +14,7 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { type HarnessHooks, harness } from "../src/harness.ts";
 import { headlessSession } from "../src/headless.ts";
 import { modelDefinition, settingsFor } from "../src/local.ts";
-import { LoopGuard, loopGuardN } from "../src/loop-guard.ts";
+import { LoopGuard, loopGuard, loopGuardHard, loopGuardN } from "../src/loop-guard.ts";
 import { DEFAULT_PLAN_MAX_CALLS, parsePlanReply, planFileText, planMaxCalls, savePlan } from "../src/plan-step.ts";
 import { remember, writeRules } from "../src/rules.ts";
 import { tempDir } from "./tmp.ts";
@@ -126,6 +126,57 @@ test("loop guard: N from the environment, 0 turns it off", () => {
 	for (let i = 0; i < 5; i++) assert.equal(off.record("bash", { command: "ls" }, "a"), undefined);
 });
 
+test("loop guard, hard step: after its notes the next repeat is stuck (process ticket 109)", () => {
+	const g = new LoopGuard(3, 2);
+	const call = () => g.record("bash", { command: "bash t.sh | wc -l" }, "7");
+	const notes: number[] = [];
+	for (let i = 1; i <= 6; i++) if (call()) notes.push(i);
+	assert.deepEqual(notes, [3, 6]);
+	assert.equal(g.stuck, undefined);
+	assert.equal(call(), undefined, "no third note");
+	assert.equal((g.stuck as { times: number } | undefined)?.times, 7);
+	assert.equal(g.record("bash", { command: "ls" }, "a"), undefined);
+	assert.equal(g.stuck, undefined, "another call is not stuck");
+	g.reset();
+	assert.equal(call(), undefined);
+	assert.equal(g.stuck, undefined, "after a reset the notes come first again");
+	assert.equal(loopGuardHard({}), 2);
+	assert.equal(loopGuardHard({ NERD_LOOP_GUARD_HARD: "0" }), 0);
+	const soft = new LoopGuard(3);
+	for (let i = 0; i < 20; i++) soft.record("bash", { command: "x" }, "y");
+	assert.equal(soft.stuck, undefined, "hard 0: notes only");
+});
+
+test("loop guard, hard step: the reply is cut, the steer handed over twice per task, then the turn only ends", () => {
+	const handlers = new Map<string, (e: unknown, c: unknown) => unknown>();
+	let aborts = 0;
+	const entries: unknown[] = [];
+	const pi = { on: (n: string, h: (e: unknown, c: unknown) => unknown) => handlers.set(n, h), appendEntry: (_t: string, d: unknown) => entries.push(d), sendUserMessage: () => {} };
+	const g = loopGuard(pi as unknown as Parameters<typeof loopGuard>[0], { operator: false, n: 3, hard: 2 });
+	const ctx = { abort: () => aborts++ };
+	const content = [{ type: "text", text: "7" }];
+	const loop = () => {
+		for (let i = 0; i < 7; i++) handlers.get("tool_result")?.({ toolName: "bash", input: { command: "bash t.sh | wc -l" }, content }, ctx);
+	};
+	handlers.get("before_agent_start")?.({ prompt: "build it" }, ctx);
+	loop();
+	assert.equal(aborts, 1);
+	assert.match(g.takeSteer() ?? "", /cut by the loop guard: you made this exact call 7 times[\s\S]*bash t\.sh/);
+	assert.equal(g.takeSteer(), undefined, "once");
+	handlers.get("before_agent_start")?.({ prompt: "[harness] Your reply was cut by the loop guard: …" }, ctx);
+	loop();
+	assert.equal(aborts, 2);
+	assert.match(g.takeSteer() ?? "", /second time/);
+	loop();
+	assert.equal(aborts, 3, "a third loop is cut too");
+	assert.equal(g.takeSteer(), undefined, "but with no message: the turn ends");
+	// The count is the task's whole: 3 loops of 7.
+	assert.deepEqual(entries.at(-1), { tool: "bash", times: 21, steer: 0 });
+	handlers.get("before_agent_start")?.({ prompt: "a new message of the operator" }, ctx);
+	loop();
+	assert.ok(g.takeSteer(), "a new operator message starts a fresh budget");
+});
+
 test("plan step budget: NERD_PLAN_MAX_CALLS from the environment, 0 = no budget, junk = default", () => {
 	assert.equal(planMaxCalls({}), DEFAULT_PLAN_MAX_CALLS);
 	assert.equal(planMaxCalls({ NERD_PLAN_MAX_CALLS: "5" }), 5);
@@ -231,6 +282,8 @@ async function runHeadless(
 	setup?: (cwd: string) => void,
 	hooks?: HarnessHooks,
 ) {
+	// No tmux windows here (tmux-runs.ts has its own test): the tool lists are the same on any machine.
+	env = { NERD_RUNS: "0", ...env };
 	const cwd = tempDir("nerd-harness-ws-");
 	setup?.(cwd);
 	const agentDir = tempDir("nerd-harness-agent-");
@@ -252,9 +305,18 @@ async function runHeadless(
 		sessionDir: join(agentDir, "sessions"),
 		env,
 	});
+	// A command (/solve, /plan, …) sends its message from its handler and returns at once (mode.ts).
+	const send = async (p: string) => {
+		await session.prompt(p);
+		if (!p.startsWith("/")) return;
+		const tick = () => new Promise((ok) => setTimeout(ok, 10));
+		// Its turn first has to start (a refused command starts none), then to end.
+		for (let i = 0; i < 100 && session.isIdle; i++) await tick();
+		while (!session.isIdle) await tick();
+	};
 	try {
-		await session.prompt(task);
-		for (const p of later) await session.prompt(p);
+		await send(task);
+		for (const p of later) await send(p);
 		if (inspect) await inspect(session);
 	} finally {
 		session.dispose();
@@ -308,7 +370,7 @@ test("with an operator: questions end the turn; the answer leads to the final pl
 		][n - 1] ?? { text: "extra" },
 	);
 	try {
-		const cwd = await runHeadless(srv.url, "Make a page", { NERD_RALPH: "0" }, true, ["rubles", "make it blue"]);
+		const cwd = await runHeadless(srv.url, "/task Make a page", { NERD_RALPH: "0" }, true, ["rubles", "make it blue"]);
 		assert.equal(srv.seen.length, 4, "the questions turn ends: no automatic answer");
 		assert.deepEqual(srv.seen[1].tools, READ_ONLY, "the answer's turn: final plan, reading only");
 		assert.match(srv.seen[1].lastUser, /final plan in the same form/);
@@ -316,6 +378,207 @@ test("with an operator: questions end the turn; the answer leads to the final pl
 		assert.deepEqual(srv.seen[3].tools, WORK, "a remark goes straight to work");
 		assert.equal(srv.seen[3].lastUser, "make it blue");
 		assert.ok(readFileSync(join(cwd, "PLAN.md"), "utf8").includes("Answer: rubles"));
+	} finally {
+		srv.close();
+	}
+});
+
+// --- the TUI's modes (mode.ts, process ticket 104) ---------------------------
+
+const git = (cwd: string, ...a: string[]) => execFileSync("git", a, { cwd }).toString().trim();
+
+test("modes: with an operator a session starts in conversation — reading tools, the talk note, no plan, nothing committed", async () => {
+	const srv = await scriptedServer(() => ({ text: "Fine, thanks. I would write it as one page — /solve or /plan?" }));
+	try {
+		const cwd = await runHeadless(srv.url, "Hi! How are you?", {}, true, ["Can you make me a page with a clock?"]);
+		assert.equal(srv.seen.length, 2, "one request per message: no plan step, no Ralph, no gate");
+		for (const s of srv.seen) {
+			assert.deepEqual(s.tools, READ_ONLY);
+			assert.match(s.all, /\[harness\] Conversation/);
+			assert.doesNotMatch(s.all, /A new task/);
+		}
+		assert.ok(!existsSync(join(cwd, "PLAN.md")));
+		assert.ok(!existsSync(join(cwd, ".git")));
+	} finally {
+		srv.close();
+	}
+});
+
+test("modes: /plan — the plan step, PLAN.md committed, a stop; the next messages revise it (the joint plan) until /talk", async () => {
+	const srv = await scriptedServer((n) =>
+		[
+			{ text: "QUESTIONS\nnone\nPLAN\n1. write hello.txt — check: cat it\nDONE WHEN\n- hello.txt says hi — check: `grep -qx hi hello.txt`" },
+			{ text: "QUESTIONS\nnone\nPLAN\n1. write hello.txt and bye.txt — check: cat them\nDONE WHEN\n- bye.txt says bye — check: `grep -qx bye bye.txt`" },
+			{ text: "QUESTIONS\nnone\nPLAN\n1. write hi, bye, ok — check: cat them\nDONE WHEN\n- ok.txt says ok — check: `grep -qx ok ok.txt`" },
+			{ text: "You are welcome." },
+		][n - 1] ?? { text: "extra" },
+	);
+	try {
+		// plan-lint off: its one retry of these short plans would be more requests.
+		const cwd = await runHeadless(srv.url, "/plan Make hello.txt that says hi", { NERD_PLAN_LINT: "0" }, true, ["also bye.txt", "and ok.txt", "/talk thanks"]);
+		assert.equal(srv.seen.length, 4, "no work after any plan");
+		assert.match(srv.seen[0].lastUser, /\[harness\] A new task/);
+		for (const s of srv.seen.slice(0, 3)) assert.deepEqual(s.tools, READ_ONLY);
+		assert.match(srv.seen[1].all, /This was \/plan: the work does not start/);
+		assert.match(srv.seen[1].lastUser, /\[harness\] A revision of the plan/);
+		assert.match(srv.seen[1].lastUser, /1\. write hello\.txt — check: cat it/, "the plan so far goes with it");
+		assert.match(srv.seen[2].lastUser, /write hello\.txt and bye\.txt/, "the second revision starts from the first");
+		assert.doesNotMatch(srv.seen[1].all, /\[harness\] Conversation/);
+		assert.match(srv.seen[3].all, /\[harness\] Conversation/, "/talk: conversation again");
+		const plan = readFileSync(join(cwd, "PLAN.md"), "utf8"); // whole-read: the test's own PLAN.md, a few lines
+		assert.ok(plan.includes("> Make hello.txt that says hi\n> \n> Change: also bye.txt\n> \n> Change: and ok.txt"), plan);
+		assert.ok(plan.includes("ok.txt says ok"));
+		assert.equal(git(cwd, "log", "--format=%s"), "Plan\nPlan\nPlan", "each revision a commit on top");
+		assert.equal(git(cwd, "status", "--porcelain"), "", "nothing changed but the plan");
+		assert.ok(!existsSync(join(cwd, "hello.txt")));
+	} finally {
+		srv.close();
+	}
+});
+
+test("modes: a bare /plan carries the talk before it as the task; a PLAN.md of an earlier session is planned anew, not revised", async () => {
+	const srv = await scriptedServer((n) =>
+		[
+			{ text: "A clock page; /plan?" },
+			{ text: "QUESTIONS\nnone\nPLAN\n1. write clock.html — check: cat it\nDONE WHEN\n- has a clock — check: `grep -q clock clock.html`" },
+		][n - 1] ?? { text: "extra" },
+	);
+	try {
+		const old = "# Plan\n\n## Task\n\n> Something else entirely\n";
+		const cwd = await runHeadless(srv.url, "I want a page with a clock,\nin red", { NERD_PLAN_LINT: "0" }, true, ["/plan"], undefined, (d) =>
+			writeFileSync(join(d, "PLAN.md"), old),
+		);
+		assert.equal(srv.seen.length, 2);
+		assert.match(srv.seen[1].lastUser, /\[harness\] A new task/, "not a revision of the earlier PLAN.md");
+		const plan = readFileSync(join(cwd, "PLAN.md"), "utf8"); // whole-read: the test's PLAN.md
+		assert.ok(plan.includes("> Make the plan for what we discussed:\n> \n> - I want a page with a clock,\n>   in red"), plan);
+		assert.ok(!plan.includes("Something else"));
+	} finally {
+		srv.close();
+	}
+});
+
+test("modes: an answer to the plan step's questions is the answer, not a revision", async () => {
+	const srv = await scriptedServer((n) =>
+		[
+			{ text: "QUESTIONS\n- Which greeting?\nPLAN\n1. draft" },
+			{ text: "PLAN\n1. write hello.txt — check: cat it\nDONE WHEN\n- says hey — check: `grep -qx hey hello.txt`" },
+		][n - 1] ?? { text: "extra" },
+	);
+	try {
+		const cwd = await runHeadless(srv.url, "/plan Make hello.txt", { NERD_PLAN_LINT: "0" }, true, ["hey"]);
+		assert.equal(srv.seen.length, 2);
+		assert.match(srv.seen[1].lastUser, /final plan in the same form/);
+		assert.ok(readFileSync(join(cwd, "PLAN.md"), "utf8").includes("Answer: hey")); // whole-read: the test's PLAN.md
+		assert.equal(git(cwd, "log", "--format=%s"), "Plan");
+	} finally {
+		srv.close();
+	}
+});
+
+test("headless NERD_MODE=plan: a PLAN.md there is revised to the new task, which replaces the old; no work", async () => {
+	const srv = await scriptedServer((n) =>
+		[{ text: "QUESTIONS\nnone\nPLAN\n1. write bye.txt — check: cat it\nDONE WHEN\n- says bye — check: `grep -qx bye bye.txt`" }][n - 1] ?? {
+			text: "extra",
+		},
+	);
+	try {
+		const old = "# Plan\n\n## Task\n\n> Make hello.txt\n\n## Steps\n\n1. write hello.txt — check: cat it\n";
+		const cwd = await runHeadless(srv.url, "Make bye.txt instead", { NERD_MODE: "plan", NERD_PLAN_LINT: "0" }, false, [], undefined, (d) =>
+			writeFileSync(join(d, "PLAN.md"), old),
+		);
+		assert.equal(srv.seen.length, 1, "the plan only");
+		assert.match(srv.seen[0].lastUser, /\[harness\] A revision of the plan/);
+		assert.match(srv.seen[0].lastUser, /> Make hello\.txt/);
+		const plan = readFileSync(join(cwd, "PLAN.md"), "utf8"); // whole-read: the test's PLAN.md
+		assert.ok(plan.includes("## Task\n\n> Make bye.txt instead\n"), plan);
+		assert.ok(!plan.includes("Make hello.txt"), "a problem file's task is the whole task now");
+		assert.equal(git(cwd, "log", "-1", "--format=%s"), "Plan");
+	} finally {
+		srv.close();
+	}
+});
+
+test("headless NERD_MODE=solve: no plan step, the work's tools, no done gate; committed before and after by run.ts", async () => {
+	const srv = await scriptedServer((n) =>
+		[{ call: { name: "write", args: { path: "a.txt", content: "a\n" } } }, { text: "Done." }][n - 1] ?? { text: "extra" },
+	);
+	try {
+		const cwd = await runHeadless(srv.url, "Make a.txt", { NERD_MODE: "solve", NERD_PLAN_STEP: "0" });
+		assert.equal(srv.seen.length, 2, "no gate's message back for the uncommitted a.txt");
+		assert.deepEqual(srv.seen[0].tools, WORK);
+		assert.ok(!existsSync(join(cwd, "PLAN.md")));
+	} finally {
+		srv.close();
+	}
+});
+
+test("modes: /solve — the work's tools, no plan step, no Ralph, no gate; commits before and after each cycle; a remark stays in solve", async () => {
+	const srv = await scriptedServer((n) =>
+		[
+			{ call: { name: "write", args: { path: "hello.txt", content: "hi\n" } } },
+			{ text: "Done: hello.txt says hi." },
+			{ call: { name: "write", args: { path: "hello.txt", content: "bye\n" } } },
+			{ text: "Changed to bye." },
+		][n - 1] ?? { text: "extra" },
+	);
+	try {
+		const cwd = await runHeadless(srv.url, "/solve Write hello.txt with hi", {}, true, ["now make it say bye"], undefined, (d) =>
+			writeFileSync(join(d, "notes.txt"), "the operator's\n"),
+		);
+		assert.equal(srv.seen.length, 4, "no plan step, no Ralph round, no gate note");
+		for (const s of srv.seen) assert.deepEqual(s.tools, WORK);
+		assert.doesNotMatch(srv.seen[0].all, /A new task|Conversation/);
+		assert.equal(srv.seen[2].lastUser, "now make it say bye");
+		assert.deepEqual(git(cwd, "log", "--format=%s").split("\n"), ["Solve: now make it say bye", "Solve: Write hello.txt with hi", "Before solve"]);
+		assert.equal(git(cwd, "show", "--name-only", "--format=", "HEAD~2"), "notes.txt", "the given state committed first");
+		assert.equal(git(cwd, "status", "--porcelain"), "");
+	} finally {
+		srv.close();
+	}
+});
+
+test("modes: /ralph is refused without PLAN.md; with one, the plan is committed and carried out under Ralph", async () => {
+	const none = await scriptedServer(() => ({ text: "should not be asked" }));
+	try {
+		const cwd = await runHeadless(none.url, "/ralph", {}, true);
+		assert.equal(none.seen.length, 0, "no plan — no request");
+		assert.ok(!existsSync(join(cwd, ".git")));
+	} finally {
+		none.close();
+	}
+	const srv = await scriptedServer((n) =>
+		[
+			{ call: { name: "write", args: { path: "hello.txt", content: "hi\n" } } },
+			{ call: { name: "bash", args: { command: "git add hello.txt && git commit -qm hello" } } },
+			{ text: "Done." },
+		][n - 1] ?? { text: "extra" },
+	);
+	try {
+		const plan = "# Plan\n\n## Steps\n\n1. write hello.txt\n\n## Done when\n\n- hello.txt says hi — check: `grep -qx hi hello.txt`\n";
+		const cwd = await runHeadless(srv.url, "/ralph", { NERD_DONE_GATE: "0" }, true, [], undefined, (d) => writeFileSync(join(d, "PLAN.md"), plan));
+		assert.equal(srv.seen.length, 3, "the check passes: no further round");
+		assert.deepEqual(srv.seen[0].tools, WORK);
+		assert.match(srv.seen[0].lastUser, /Carry out the plan in PLAN.md/);
+		assert.deepEqual(git(cwd, "log", "--format=%s").split("\n"), ["hello", "Plan"]);
+	} finally {
+		srv.close();
+	}
+});
+
+test("modes: /solve while the plan step waits for answers drops the step — the work's tools, no final plan", async () => {
+	const srv = await scriptedServer((n) =>
+		[{ text: "QUESTIONS\n- Which colour?\nPLAN\n1. draft" }, { call: { name: "write", args: { path: "a.txt", content: "a\n" } } }, { text: "Done." }][n - 1] ?? {
+			text: "extra",
+		},
+	);
+	try {
+		const cwd = await runHeadless(srv.url, "/plan Make a page", {}, true, ["/solve just do it, blue"]);
+		assert.equal(srv.seen.length, 3);
+		assert.deepEqual(srv.seen[1].tools, WORK);
+		assert.doesNotMatch(srv.seen[1].lastUser, /final plan/);
+		assert.ok(!existsSync(join(cwd, "PLAN.md")));
+		assert.ok(existsSync(join(cwd, "a.txt")));
 	} finally {
 		srv.close();
 	}

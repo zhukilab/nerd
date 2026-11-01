@@ -11,8 +11,14 @@
 //     PLAN.md, commits it (git init if needed), gives the tools back and the
 //     run goes on with the work in the same turn.
 //
-// A new task is the first user message of a session, or one sent with
-// `/task <text>` in the TUI. Any other message is a remark within the task.
+// Headless, a new task is the first user message of a session. In the TUI it is
+// one sent with `/task <text>`, or `/plan [text]`, after which the step stops at
+// the saved plan (mode.ts, process ticket 104: the first message is conversation).
+// Any other message is a remark within the task.
+// A letter of an agora channel (agora-channel.ts) is a new task when its
+// subject starts with "task:", and a remark otherwise, the first message of a
+// session included: the manager's notes about the session itself came first and
+// were planned as a task, with no send_letter to answer the next letter.
 // NERD_PLAN_STEP=0 turns the step off.
 //
 // The step has a budget of tool calls (ticket 054). Unbounded, the model kept
@@ -27,17 +33,36 @@
 // runs a Python program and changes nothing in the project.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { pairOn, pairSwitch, type Role } from "./pair.ts";
 import { CALC_TOOL, outputNumbers, planCalcLintOn, planCalcNote } from "./plan-calc.ts";
 import { lintPlan, lintRetryMessage, lintSection, ownInputOn, planLintOn } from "./plan-lint.ts";
 import { isCargoProject } from "./cargo.ts";
+import type { ModeState } from "./mode.ts";
 
 /** Tools of the questions-and-plan turn: reading only. */
 export const PLAN_TOOLS = ["read", "ls", "grep", "find"];
 export const DEFAULT_PLAN_ANSWER = "на твоё усмотрение";
+
+/** Letters put in as prompts, by their text: true when the letter is a new task. */
+const letters = new Map<string, boolean>();
+
+/** The channel says what the next prompt with this text is: a new task or a remark. */
+export function letterPrompt(text: string, task: boolean): void {
+	letters.set(text, task);
+}
+
+/** Whether the next prompt with this text is a letter with a task (mode.ts looks before the step takes it). */
+export function letterIsTask(text: string): boolean {
+	return letters.get(text) === true;
+}
+
+/** A letter's subject that makes it a new task. */
+export function taskSubject(subject: unknown): boolean {
+	return /^\s*task:/i.test(String(subject ?? ""));
+}
 export const PLAN_FILE = "PLAN.md";
 export const DEFAULT_PLAN_MAX_CALLS = 40;
 
@@ -70,7 +95,20 @@ export function checksOn(env: Record<string, string | undefined> = process.env):
 	return env.NERD_RALPH !== "0";
 }
 
-export function planStepPrompt(checks = checksOn(), rust = false, note = ""): string {
+/**
+ * The head of the step when PLAN.md is there already and the plan is asked for again (process
+ * ticket 104, the operator: the plan is revised to the changed problem, not written anew, and the
+ * revision is a commit "Plan" on top, so its diff stands beside the problem's).
+ */
+export function revisePrompt(plan: string): string {
+	return `[harness] A revision of the plan. PLAN.md holds the plan so far:
+
+${plan.trim()}
+
+Revise it to the task as it stands now: keep what still fits, the steps already done among them, and change only what the change asks for. Write the revised plan whole, every step and DONE WHEN item in full: it replaces PLAN.md, so a step left out or named only by its old number ("keep steps 1-4") is lost. This turn is for questions and the revised plan only: you can read files, not change them.`;
+}
+
+export function planStepPrompt(checks = checksOn(), rust = false, note = "", plan?: string): string {
 	// The first version asked for QUESTIONS straight away, and the model
 	// answered "none" to an open request (run 1 of ticket 043). Listing the
 	// choices it would otherwise guess comes first now; the questions are
@@ -81,7 +119,9 @@ export function planStepPrompt(checks = checksOn(), rust = false, note = ""): st
 (one item per requirement of the request, its command on that one line; only the exit code counts, so a command that prints must also fail when the output is wrong — \`| grep -q "<text>"\`, \`process.exit(ok ? 0 : 1)\`, \`assert\`; a claim of quality — harder, faster, correct rules, fits a phone — gets a command that measures it, e.g. plays many games between neighbouring levels, or \`browse <url> | grep -q "<text on the page>"\`; a fact from the web goes into the README as \`> "<the page's exact words>" — notes/web/<file>.md\`, and the harness checks the words against that saved page)`
 		: "- <what the operator can do and see when it is finished>";
 	const rs = checks && rust ? RUST_CHECKS : "";
-	return `[harness] A new task. This turn is for questions and a plan only: you can read files, not change them.
+	const head =
+		plan === undefined ? "[harness] A new task. This turn is for questions and a plan only: you can read files, not change them." : revisePrompt(plan);
+	return `${head}
 Reply in exactly this form:
 ASSUMPTIONS
 - <each choice the request leaves open that you would otherwise make by guessing>
@@ -100,6 +140,34 @@ export function finalPlanPrompt(answer?: string): string {
 
 export function workPrompt(saved: string): string {
 	return `[harness] ${saved} All tools are available again. Carry out the plan step by step, checking each step as it says.`;
+}
+
+/** After /plan (mode.ts): the plan is the turn's result, the work waits for the operator. */
+export function planOnlyNote(saved: string, operator = true): string {
+	if (!operator) return `[harness] ${saved} This was a run for the plan only: the work does not start.`;
+	return `[harness] ${saved} This was /plan: the work does not start. The operator's next message revises the plan, until /solve, /ralph or /talk.`;
+}
+
+/** The task as PLAN.md quotes it under "## Task" ("" when there is none). */
+export function planTask(text: string): string {
+	const m = /^## Task\s*\n([\s\S]*?)(?=^## |(?![\s\S]))/m.exec(text);
+	if (!m) return "";
+	return m[1]
+		.split("\n")
+		.map((l) => l.replace(/\r$/, ""))
+		.filter((l) => l.startsWith(">"))
+		.map((l) => l.replace(/^> ?/, ""))
+		.join("\n")
+		.trim();
+}
+
+/**
+ * The task of a revised plan. The operator's message in the TUI is a change to the task so far,
+ * added to it; a headless run's task (a problem file) is the whole task as it now stands.
+ */
+export function revisedTask(before: string, given: string, operator: boolean): string {
+	if (!operator || !before) return given;
+	return `${before}\n\nChange: ${given.trim()}`;
 }
 
 /**
@@ -265,6 +333,15 @@ export function planFileText(
 	return `# Plan\n\n## Task\n\n${quoted}\n${assumed}${asked}\n${body}\n`;
 }
 
+/** Whether cwd is in a git work tree, its own or a parent directory's. */
+export function insideRepo(cwd: string): boolean {
+	try {
+		return execFileSync("git", ["rev-parse", "--is-inside-work-tree"], { cwd, stdio: "pipe" }).toString().trim() === "true";
+	} catch {
+		return false;
+	}
+}
+
 /** Writes PLAN.md into cwd and commits it; returns what to tell the model. */
 export function savePlan(cwd: string, text: string): string {
 	writeFileSync(join(cwd, PLAN_FILE), text);
@@ -274,8 +351,9 @@ export function savePlan(cwd: string, text: string): string {
 		// is the work's and the done gate does not report the given files as uncommitted.
 		// Process ticket 089: the first Ralph round of a run that began this way was always
 		// "Uncommitted changes: lib/, package.json, test/" — once at the 263rd minute.
-		// A repository that was already there is not ours to commit in.
-		if (!existsSync(join(cwd, ".git"))) {
+		// A repository that was already there is not ours to commit in; nor is a parent's, into
+		// which PLAN.md goes then, as /ralph's and /solve's commits do (mode.ts).
+		if (!insideRepo(cwd)) {
 			git("init", "-q");
 			git("add", "-A", "--", ".", `:!${PLAN_FILE}`, ":!node_modules", ":!target");
 			if (git("diff", "--cached", "--name-only").toString().trim()) git("commit", "-q", "-m", "Project as given");
@@ -333,6 +411,8 @@ export interface PlanStepOptions {
 	calcNote?: string;
 	/** NERD_PLAN_CALC_LINT=1: plan-lint wants the checks' numbers printed by calc (plan-calc.ts). */
 	calcLint?: boolean;
+	/** The TUI's mode (mode.ts): in plan the step stops at the saved plan; a task starts the ralph mode. */
+	mode?: ModeState;
 }
 
 export function planStepOptions(
@@ -363,13 +443,17 @@ export function planStepOptions(
  * The step as a Pi extension. Phases: "work" (normal), "plan" (the first
  * turn of a task), "answered" (questions asked, the final plan is next).
  */
-export function planStep(pi: ExtensionAPI, opts: PlanStepOptions) {
+export function planStep(pi: ExtensionAPI, opts: PlanStepOptions): { markTask: () => void; cancel: () => void; asking: () => boolean } {
 	let phase: "work" | "plan" | "answered" = "work";
 	let task = "";
 	let questions: string[] = [];
 	let assumptions = "";
 	let answer = "";
 	let explicitTask = false;
+	// A plan saved in this session: the one /plan revises (process ticket 104).
+	let plannedHere = false;
+	// The step was dropped for another mode (cancel) while the pair's planner held the session.
+	let backToWorker = false;
 	let calls = 0;
 	let linted = false;
 	let toolNotes = 0;
@@ -404,6 +488,7 @@ export function planStep(pi: ExtensionAPI, opts: PlanStepOptions) {
 				return;
 			}
 			explicitTask = true;
+			if (opts.mode) Object.assign(opts.mode, { mode: "ralph", fresh: true });
 			pi.sendUserMessage(text, ctx.isIdle() ? undefined : { deliverAs: "followUp" });
 		},
 	});
@@ -412,10 +497,21 @@ export function planStep(pi: ExtensionAPI, opts: PlanStepOptions) {
 		const earlier = ctx.sessionManager
 			.getBranch()
 			.some((e: { type?: string; message?: Msg }) => e.type === "message" && e.message?.role === "user");
-		if (explicitTask || !earlier) {
+		const letter = letters.get(event.prompt);
+		letters.delete(event.prompt);
+		// With an operator the first message is conversation (mode.ts): a task starts by /plan or /task.
+		if (letter ?? (explicitTask || (!opts.operator && !earlier))) {
 			explicitTask = false;
+			backToWorker = false;
 			phase = "plan";
 			task = event.prompt;
+			// In the plan mode a PLAN.md there already is revised, not written anew (process ticket 104).
+			// With an operator only one this session made: a PLAN.md left by an earlier task is not
+			// this conversation's plan, and /plan on a new task would bend that one to it.
+			const cwd = ctx.cwd || process.cwd();
+			const revise = opts.mode?.mode === "plan" && existsSync(join(cwd, PLAN_FILE)) && (!opts.operator || plannedHere);
+			const before = revise ? readFileSync(join(cwd, PLAN_FILE), "utf8") : undefined; // whole-read: the plan, a page
+			if (before !== undefined) task = revisedTask(planTask(before), task, opts.operator);
 			questions = [];
 			assumptions = "";
 			answer = "";
@@ -427,15 +523,22 @@ export function planStep(pi: ExtensionAPI, opts: PlanStepOptions) {
 			timeNoted = false;
 			quick = false;
 			calcOutputs = [];
-			rust = rustTask(ctx.cwd || process.cwd(), task);
+			rust = rustTask(cwd, task);
 			pi.setActiveTools(opts.planTools);
-			return as("planner", ctx, { message: { customType: "nerd-plan", content: planStepPrompt(opts.checks, rust, opts.calcNote), display: true } });
+			return as("planner", ctx, {
+				message: { customType: "nerd-plan", content: planStepPrompt(opts.checks, rust, opts.calcNote, before), display: true },
+			});
 		}
 		if (phase === "plan") {
 			// The operator's answer to the questions (or any reply to them).
 			phase = "answered";
 			answer = event.prompt;
 			return { message: { customType: "nerd-plan", content: finalPlanPrompt(), display: true } };
+		}
+		if (backToWorker) {
+			// The step was dropped while the pair's planner wrote the plan: the work is the worker's.
+			backToWorker = false;
+			return as("worker", ctx, undefined);
 		}
 		return;
 	});
@@ -445,10 +548,15 @@ export function planStep(pi: ExtensionAPI, opts: PlanStepOptions) {
 		let p = event.payload as Record<string, unknown> | undefined;
 		if (!p || typeof p !== "object") return;
 		if (overTime()) quick = true;
-		if (quick) p = withoutThinking(p);
+		// Only where the request already speaks the local servers' switch: a cloud
+		// provider (NERD_LLAMA=provider) refuses fields it does not know.
+		if (quick && ("chat_template_kwargs" in p || "enable_thinking" in p)) p = withoutThinking(p);
 		if (opts.maxTokens <= 0) return quick ? p : undefined;
-		const now = typeof p.max_tokens === "number" ? p.max_tokens : Infinity;
-		return now > opts.maxTokens ? { ...p, max_tokens: opts.maxTokens } : p;
+		// The field the request already uses: OpenAI's own API refuses max_tokens
+		// for its newer models, and Pi sends max_completion_tokens there (local.ts).
+		const field = "max_completion_tokens" in p ? "max_completion_tokens" : "max_tokens";
+		const now = typeof p[field] === "number" ? (p[field] as number) : Infinity;
+		return now > opts.maxTokens ? { ...p, [field]: opts.maxTokens } : p;
 	});
 
 	// The budgets: calls counted over the whole step (both plan turns), not per turn; time from its start.
@@ -535,10 +643,34 @@ export function planStep(pi: ExtensionAPI, opts: PlanStepOptions) {
 			text += lintSection(errors);
 		}
 		const saved = savePlan(ctx.cwd, text);
+		plannedHere = true;
+		if (opts.mode?.mode === "plan") {
+			// /plan: the plan is the result; the operator reads it, and the next message revises it
+			// (mode.ts), until another mode is chosen. Headless: the run ends here.
+			phase = "work";
+			pi.setActiveTools(opts.planTools);
+			return as("worker", ctx, {
+				entries: [{ type: "custom_message" as const, customType: "nerd-plan", content: planOnlyNote(saved, opts.operator), display: true }],
+			});
+		}
 		toWork();
 		return as("worker", ctx, {
 			entries: [{ type: "custom_message" as const, customType: "nerd-plan", content: workPrompt(saved), display: true }],
 			continue: true,
 		});
 	});
+
+	return {
+		markTask: () => {
+			explicitTask = true;
+		},
+		// Another mode chosen while the step waited for answers (mode.ts): the step is dropped.
+		cancel: () => {
+			explicitTask = false;
+			if (phase !== "work") backToWorker = true;
+			phase = "work";
+		},
+		// The step waits for the operator's answers to its questions: the next message is that answer.
+		asking: () => phase !== "work",
+	};
 }

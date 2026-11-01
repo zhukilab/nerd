@@ -20,6 +20,8 @@ export interface VerifierEndpoint {
 	/** Cap on the analysis length; the verdict comes after it. */
 	analysisTokens?: number;
 	timeoutMs?: number;
+	/** Ollama: thinking is turned off another way (see scorePair). */
+	ollama?: boolean;
 }
 
 export interface PairScore {
@@ -59,13 +61,17 @@ export async function scorePair(
 ): Promise<PairScore> {
 	const t0 = Date.now();
 	const user = { role: "user", content: buildPrompt(task, a, b, criterion) };
-	const noThinking = { chat_template_kwargs: { enable_thinking: false } };
+	// Ollama ignores chat_template_kwargs and thinks through the whole analysis
+	// budget; reasoning_effort "none" turns that off. On a prefill it already
+	// continues without thinking, and with "none" there it answers nothing
+	// (measured 2026-10-29, Ollama 0.40.12, qwen3.6; ticket 099).
+	const noThinking = ep.ollama ? {} : { chat_template_kwargs: { enable_thinking: false } };
 
 	const analysis = await chat(ep, {
 		messages: [user],
 		max_tokens: ep.analysisTokens ?? 768,
 		temperature: 1.0,
-		...noThinking,
+		...(ep.ollama ? { reasoning_effort: "none" } : noThinking),
 	});
 	let prefix = analysisPart(analysis.choices[0]?.message.content ?? "");
 

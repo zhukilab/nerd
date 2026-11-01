@@ -3,6 +3,7 @@
 // for its window, and the verifier wired as a stream function.
 
 import type { StreamFn } from "@earendil-works/pi-agent-core";
+import type { RetrySettings } from "@earendil-works/pi-coding-agent";
 import { leadingSystemPromptIs, verifierStreamFn } from "./verifier/stream.ts";
 
 // Pi phones home by default (install telemetry, catalog refresh, version
@@ -80,10 +81,12 @@ export const TOOLS = ["read", "bash", "edit", "write"];
 export type Thinking = "off" | "low" | "medium" | "high";
 
 /**
- * What serves the model: llama-server (in its container, or on the host), or
- * mlx-vlm's server (NERD_LLAMA=mlx on macOS, tools/mlx-host.sh).
+ * What serves the model: llama-server (in its container, or on the host),
+ * mlx-vlm's server (NERD_LLAMA=mlx on macOS, tools/mlx-host.sh), or Ollama
+ * (a model server on another machine, ticket 099), or a cloud provider behind
+ * the key proxy (NERD_LLAMA=provider, keyproxy.ts).
  */
-export type Server = "llama" | "mlx";
+export type Server = "llama" | "mlx" | "ollama" | "provider";
 
 export interface LocalModel {
 	baseUrl: string;
@@ -92,6 +95,10 @@ export interface LocalModel {
 	thinking: Thinking;
 	verifyN: number;
 	server?: Server;
+	/** The longest reply the provider allows; a local server's is the window. */
+	maxOut?: number;
+	/** The provider's host, as the key proxy names it (NERD_LLAMA=provider). */
+	provider?: string;
 }
 
 async function servedModelId(baseUrl: string): Promise<string> {
@@ -127,9 +134,113 @@ async function servedContext(baseUrl: string): Promise<number | undefined> {
 	}
 }
 
+/** Whether Ollama serves at baseUrl: its /api/version answers {"version": ...}; llama-server's is a 404. */
+export async function isOllama(baseUrl: string): Promise<boolean> {
+	try {
+		const r = await fetch(`${baseUrl.replace(/\/v1\/?$/, "")}/api/version`);
+		if (!r.ok) return false;
+		const body = (await r.json()) as { version?: unknown };
+		return typeof body.version === "string";
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * The window Ollama runs a model with. Its OpenAI endpoint cannot set one per
+ * request, so it is the server's: /api/ps has it while the model is loaded;
+ * otherwise the model's own maximum from /api/show, which Ollama uses when
+ * memory allows and OLLAMA_CONTEXT_LENGTH does not cap it (NERD_CTX overrides).
+ */
+async function ollamaContext(baseUrl: string, model: string): Promise<number | undefined> {
+	const root = baseUrl.replace(/\/v1\/?$/, "");
+	try {
+		const ps = (await (await fetch(`${root}/api/ps`)).json()) as { models?: { name?: string; context_length?: number }[] };
+		const loaded = ps.models?.find((m) => m.name === model)?.context_length;
+		if (loaded) return loaded;
+		const r = await fetch(`${root}/api/show`, { method: "POST", body: JSON.stringify({ model }) });
+		const show = (await r.json()) as { model_info?: Record<string, unknown> };
+		const key = Object.keys(show.model_info ?? {}).find((k) => k.endsWith(".context_length"));
+		const n = key ? show.model_info![key] : undefined;
+		return typeof n === "number" ? n : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** The provider's host if the key proxy answers at baseUrl (its /health is {"keyproxy": host}). */
+export async function keyProxyHost(baseUrl: string): Promise<string | undefined> {
+	try {
+		const r = await fetch(`${baseUrl.replace(/\/v1\/?$/, "")}/health`);
+		const body = (await r.json()) as { keyproxy?: unknown };
+		return typeof body.keyproxy === "string" ? body.keyproxy : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** The API key the agent sends its model server: the key proxy's token (NERD_KEYPROXY_AUTH=on, set by ./UP), else none. */
+export function modelApiKey(): string {
+	return process.env.NERD_MODEL_API_KEY || "none";
+}
+
+// A provider's reply limit when its model list does not give one: a common
+// floor among OpenAI-compatible APIs, which refuse max_tokens above their own.
+const PROVIDER_MAX_OUT = 8192;
+
+/**
+ * The window and reply limit of a provider's model, from its /v1/models where
+ * it says (OpenRouter: context_length, top_provider.max_completion_tokens).
+ */
+async function providerLimits(baseUrl: string, model: string): Promise<{ ctx?: number; maxOut?: number }> {
+	try {
+		const r = await fetch(`${baseUrl}/models`, { headers: { authorization: `Bearer ${modelApiKey()}` } });
+		const body = (await r.json()) as { data?: { id?: string; context_length?: unknown; top_provider?: { max_completion_tokens?: unknown } }[] };
+		const m = body.data?.find((x) => x.id === model);
+		const num = (v: unknown) => (typeof v === "number" && v > 0 ? v : undefined);
+		return { ctx: num(m?.context_length), maxOut: num(m?.top_provider?.max_completion_tokens) };
+	} catch {
+		return {};
+	}
+}
+
 /** The model as the environment and the running server describe it (NERD_* variables, see run.ts). */
 export async function localModel(): Promise<LocalModel> {
 	const baseUrl = process.env.NERD_BASE_URL ?? "http://127.0.0.1:18091/v1";
+	const provider = await keyProxyHost(baseUrl);
+	if (provider) {
+		const id = process.env.NERD_MODEL;
+		if (!id) throw new Error(`NERD_MODEL is not set: name the model of ${provider} to use`);
+		const lim = await providerLimits(baseUrl, id);
+		const ctx = Number(process.env.NERD_CTX || lim.ctx || 0);
+		if (!ctx) throw new Error(`NERD_CTX is not set and ${provider} does not give ${id}'s window: set it`);
+		return {
+			baseUrl,
+			ctx,
+			// The provider's own thinking defaults; nerd's switch is for local servers.
+			thinking: "off",
+			id,
+			// The verifier needs logprobs and a prefilled reply, which providers lack (0018).
+			verifyN: 1,
+			server: "provider",
+			maxOut: Math.min(ctx, lim.maxOut ?? PROVIDER_MAX_OUT),
+			provider,
+		};
+	}
+	if (await isOllama(baseUrl)) {
+		// Ollama's /v1/models lists every model it has, and a request names the
+		// one it loads: the model is the operator's choice, not the first entry.
+		const id = process.env.NERD_MODEL;
+		if (!id) throw new Error(`NERD_MODEL is not set: Ollama at ${baseUrl} serves many models, name one (ollama list)`);
+		return {
+			baseUrl,
+			ctx: Number(process.env.NERD_CTX || (await ollamaContext(baseUrl, id)) || 16384),
+			thinking: (process.env.NERD_THINKING ?? "off") as Thinking,
+			id,
+			verifyN: Number(process.env.NERD_VERIFY_N ?? 1),
+			server: "ollama",
+		};
+	}
 	const mlx = await mlxLoadedModel(baseUrl);
 	return {
 		baseUrl,
@@ -161,6 +272,32 @@ export async function plannerModel(env: Record<string, string | undefined> = pro
 
 /** Pi's model definition of the local server (models.json entry or registerProvider model). */
 export function modelDefinition(m: LocalModel) {
+	if (m.server === "provider")
+		return {
+			id: m.id,
+			name: m.id,
+			contextWindow: m.ctx,
+			maxTokens: m.maxOut ?? m.ctx,
+			// Not declared: Pi then sends no thinking fields, which each provider
+			// spells its own way, and the model thinks as its provider defaults.
+			reasoning: false,
+			thinkingLevelMap: undefined,
+			input: ["text"] as ("text" | "image")[],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			compat: {
+				supportsStore: false,
+				supportsDeveloperRole: false,
+				supportsReasoningEffort: false,
+				supportsUsageInStreaming: true,
+				supportsStrictMode: false,
+				// OpenAI's own API refuses max_tokens for its newer models ("Use
+				// 'max_completion_tokens' instead", gpt-5.4-nano, 2026-10-29); others
+				// that speak its dialect mostly know only max_tokens.
+				maxTokensField: m.provider === "api.openai.com" ? ("max_completion_tokens" as const) : ("max_tokens" as const),
+				// Unused without reasoning; declared so both definitions have one shape.
+				thinkingFormat: "openai" as const,
+			},
+		};
 	return {
 		id: m.id,
 		name: m.id,
@@ -177,17 +314,26 @@ export function modelDefinition(m: LocalModel) {
 		reasoning: true,
 		input: ["text"] as ("text" | "image")[],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		// Ollama ignores chat_template_kwargs and thinks by default; only
+		// reasoning_effort "none" turns it off (measured 2026-10-29, Ollama
+		// 0.40.12, qwen3.6: 1531 thinking tokens with the kwargs, none with it).
+		...(m.server === "ollama" ? { thinkingLevelMap: { off: "none" } } : {}),
 		// The same compat set Pi's own llama.cpp extension uses.
 		compat: {
 			supportsStore: false,
 			supportsDeveloperRole: false,
-			supportsReasoningEffort: false,
+			supportsReasoningEffort: m.server === "ollama",
 			supportsUsageInStreaming: true,
 			supportsStrictMode: false,
 			maxTokensField: "max_tokens" as const,
 			// mlx-vlm's server ignores chat_template_kwargs and reads a top-level
 			// enable_thinking, which is what Pi sends for "qwen".
-			thinkingFormat: m.server === "mlx" ? ("qwen" as const) : ("qwen-chat-template" as const),
+			thinkingFormat:
+				m.server === "ollama"
+					? ("openai" as const)
+					: m.server === "mlx"
+						? ("qwen" as const)
+						: ("qwen-chat-template" as const),
 		},
 	};
 }
@@ -210,6 +356,36 @@ export function modelDefinition(m: LocalModel) {
  * of transcript plus sections) and keeps its own tail (the last user turn,
  * or the last ~25K tokens when that turn is the whole task).
  */
+/** NERD_RETRIES: retries of a failed model request (default 8, about 2.5 min of backoff). */
+export function retries(env: Record<string, string | undefined> = process.env): number {
+	const n = Number(env.NERD_RETRIES);
+	return env.NERD_RETRIES && Number.isInteger(n) && n >= 0 ? n : 8;
+}
+
+// Process ticket 110: a cloud provider (free models through a gateway) breaks a streamed
+// reply off with finish_reason "error" after HTTP 200; Pi reports "Provider finish_reason:
+// error", which is not among the errors it retries, so one such break ended the run — 5 runs
+// of 6 of one model on the bench of process ticket 106, after 2 to 12 minutes.
+const PROVIDER_BREAK = /\bfinish_reason:\s*error\b/i;
+
+/** A reply the provider broke off with finish_reason "error": worth the same retries as a 5xx. */
+export function providerBreak(m: { stopReason?: string; errorMessage?: string }): boolean {
+	return m.stopReason === "error" && PROVIDER_BREAK.test(m.errorMessage ?? "");
+}
+
+/**
+ * Pi retries a failed reply when AgentSession's `_isRetryableError` says so (both of its
+ * call sites go through `this`); this session's also says so for a provider break. False
+ * when this Pi has no such method (a test pins it on the class: a bump must look again).
+ */
+export function widenRetry(session: object): boolean {
+	const s = session as { _isRetryableError?: (m: { stopReason?: string; errorMessage?: string }) => boolean };
+	if (typeof s._isRetryableError !== "function") return false;
+	const own = s._isRetryableError.bind(session);
+	s._isRetryableError = (m) => own(m) || providerBreak(m);
+	return true;
+}
+
 export function settingsFor(m: LocalModel) {
 	return {
 		compaction: {
@@ -217,7 +393,9 @@ export function settingsFor(m: LocalModel) {
 			reserveTokens: Math.floor((m.ctx * 5) / 16),
 			keepRecentTokens: Math.floor(m.ctx / 4),
 		},
-		retry: { enabled: true, maxRetries: 2 },
+		// A model server on another machine drops off with the network: 2 retries
+		// (6 s) ended a task on a 40 s outage (ticket 099); NERD_RETRIES, backoff to 30 s.
+		retry: { enabled: true, maxRetries: retries(), baseDelayMs: 2000, maxAgentDelayMs: 30_000 } as RetrySettings,
 		enableInstallTelemetry: false,
 	};
 }
@@ -231,6 +409,7 @@ export function withVerifier(base: StreamFn, m: LocalModel, logPath?: string): S
 		n: m.verifyN,
 		baseUrl: m.baseUrl,
 		model: m.id,
+		ollama: m.server === "ollama",
 		historyChars: Math.floor(m.ctx * 1.2), // ~0.3 of the window, at ~4 chars a token
 		logPath,
 		isAgentStep: leadingSystemPromptIs(SYSTEM_PROMPT.slice(0, 60)),

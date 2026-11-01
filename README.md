@@ -47,7 +47,8 @@ ssh -p 2222 nerd@<this machine>   # the agent's terminal (Pi); detach with Ctrl-
 
 Type the task. What the agent builds for a browser is served on port 8000.
 `./STATUS` says whether everything is up, `./DOWN` stops it (keeping the
-workspace and the conversation). Settings (ports, key, model variant, context,
+workspace and the conversation). `./SETTINGS` shows and changes every setting
+on one screen, `/nerd` in Pi the agent's (thinking, Ralph, limits). Settings (ports, key, model variant, context,
 the address you open the app at) go in `.env`: `cp env.example .env`. How to
 check it works and what to look at when it does not:
 [docs/INSTALL.md](docs/INSTALL.md#check-that-it-works).
@@ -58,7 +59,7 @@ check it works and what to look at when it does not:
 |---|---|
 | [docs/INSTALL.md](docs/INSTALL.md) | platforms (x86_64 + NVIDIA, WSL2, aarch64 GB10), VRAM/disk/RAM per model variant, prerequisites |
 | [docs/MACOS.md](docs/MACOS.md) | macOS on Apple silicon: the model on the Mac (llama-server with Metal, or MLX), the agent in its container — so far run on one Mac; what to send back (`tools/report.sh`) |
-| [docs/OPERATE.md](docs/OPERATE.md) | `./UP` `./DOWN` `./STATUS`, `.env`, connecting, keys, ports, the operator address, PuTTY, headless runs, `hold` under a session manager |
+| [docs/OPERATE.md](docs/OPERATE.md) | `./UP` `./DOWN` `./STATUS`, `./SETTINGS` and `/nerd`, `.env`, connecting, keys, ports, the operator address, PuTTY, headless runs, `hold` under a session manager |
 | [docs/MAINTAIN.md](docs/MAINTAIN.md) | updating the model, Pi, the llama.cpp fork, Node; rebuilding; troubleshooting |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | what runs where and why |
 | [AGENTS.md](AGENTS.md) | for an agent (or a person) maintaining this repository |
@@ -194,9 +195,13 @@ the operator answers; headless, `NERD_PLAN_ANSWER` answers (default «на тв�
 усмотрение»). Then the harness writes the plan to `PLAN.md`, commits it
 (in a directory that is not yet a repository, `git init` and a first commit
 "Project as given" before it), switches the work tools back on and the run
-continues. A new task is the first message of a conversation, or one sent with
-`/task <text>`; anything else is a remark within the task. `NERD_PLAN_STEP=0`
-skips the step. The loop guard ([`agent/src/loop-guard.ts`](agent/src/loop-guard.ts))
+continues. Headless, the task is a new task; in the TUI a conversation starts
+in talk and a task is one sent with `/task <text>` or `/plan [text]`, which stops
+at the plan ([`agent/src/mode.ts`](agent/src/mode.ts): talk, `/plan`, `/solve`,
+`/ralph`; docs/OPERATE.md, "Talking to the agent"); anything else is a remark
+within the mode, and after `/plan` a revision of the plan. In the plan mode (`/plan`,
+headless `NERD_MODE=plan`) a `PLAN.md` that is there (in the TUI, one made in this
+session) is revised to the task, not written anew, and committed as "Plan" on top. `NERD_PLAN_STEP=0` skips the step. The loop guard ([`agent/src/loop-guard.ts`](agent/src/loop-guard.ts))
 appends a note to a tool result when the same call with the same result has
 come `NERD_LOOP_GUARD_N` times (3; 0 = off) among the recent calls: the model is
 told it is repeating itself and must change approach. It does not stop the run.
@@ -351,10 +356,9 @@ Server defaults, each overridable in the server's environment (through
 `NERD_KV=q4_0`, `NERD_NGL=99` (all layers on the GPU), flash attention on,
 `NERD_SLOTS=1`, prompt cache in host RAM `NERD_CACHE_RAM=4096` MiB (a context
 that comes back after another one used the slot is not processed again; `0`
-turns it off), extra flags in `NERD_LLAMA_ARGS`. The agent's own variables
-(`NERD_THINKING`, `NERD_VERIFY_N`, `NERD_SPEC_CHECK`, `NERD_BASH_TIMEOUT`,
-`NERD_PLAN_STEP`, `NERD_PLAN_ANSWER`, `NERD_PLAN_LINT`, `NERD_PLAN_MAX_TOKENS`, `NERD_PLAN_MAX_MINUTES`, `NERD_WORK_MAX_MINUTES`, `NERD_CALC`, `NERD_PLAN_CALC`, `NERD_STEPS`, `NERD_REPEAT_GUARD`, `NERD_LOOP_GUARD_N`, `NERD_FETCH_GUARD`, `NERD_LINT`, `NERD_DONE_GATE`, `NERD_RALPH`, `NERD_BASH_MAX_CHARS`, `NERD_QUIET`, `NERD_ANCHORS`, `NERD_RULES_FILE`, `NERD_SUMMARY_GOAL`, `NERD_THINKING_KEEP`, `NERD_VCC_RECALL`, `NERD_WEB_NOTES`, `NERD_PI_VCC`, `NERD_WEB`, `NERD_SCOUT`, `NERD_AGORA_CHANNEL`) are described in
-[`agent/src/run.ts`](agent/src/run.ts). `HF_TOKEN` is sent to Hugging Face if
+turns it off), extra flags in `NERD_LLAMA_ARGS`. Every setting, the agent's
+own included, is in [docs/SETTINGS.md](docs/SETTINGS.md); `./SETTINGS` on the
+host and `/nerd` in Pi show and change them (docs/OPERATE.md). `HF_TOKEN` is sent to Hugging Face if
 set. Header comments of [`Dockerfile`](Dockerfile) and
 [`container/entrypoint.sh`](container/entrypoint.sh) list the rest.
 

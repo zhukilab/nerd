@@ -61,10 +61,35 @@ keys=$(nerd_keys_file) || die "no ssh public key: set NERD_AUTHORIZED_KEYS_FILE 
 grep -q '^\(ssh-\|ecdsa-\|sk-\)' "$keys" || die "'$keys' does not look like a public key (ssh-ed25519 ...)"
 
 case "$NERD_MODEL_VARIANT" in q1|q2) ;; *) die "NERD_MODEL_VARIANT must be q1 or q2" ;; esac
-case "$NERD_LLAMA" in container|host|mlx) ;; *) die "NERD_LLAMA must be auto, container, host or mlx" ;; esac
+case "$NERD_LLAMA" in container|host|mlx|remote|provider) ;; *) die "NERD_LLAMA must be auto, container, host, mlx, remote or provider" ;; esac
 # shellcheck source=container/model.sh
 . "$NERD_ROOT/container/model.sh"
-if [ "$NERD_LLAMA" != mlx ]; then msg=$(nerd_model_select) || die "$msg"; fi
+if [ "$NERD_LLAMA" = container ] || [ "$NERD_LLAMA" = host ]; then msg=$(nerd_model_select) || die "$msg"; fi
+# remote: the server is another machine's; only its address and, for Ollama, the model.
+if [ "$NERD_LLAMA" = remote ]; then
+  [ -n "${NERD_LLAMA_URL:-}" ] || die "NERD_LLAMA=remote: set NERD_LLAMA_URL to the server, e.g. http://<machine>:11434/v1 (Ollama) or http://<machine>:8080/v1 (llama-server)"
+  if [ -z "${NERD_MODEL:-}" ] && curl -sf -m 5 "${NERD_LLAMA_URL%/v1}/api/version" >/dev/null 2>&1; then
+    die "$NERD_LLAMA_URL is Ollama, which serves many models: set NERD_MODEL to one of them (ollama list)"
+  fi
+fi
+# provider: a cloud provider through the key proxy; the key a file of this
+# machine, readable by its owner only, mounted into the proxy and nowhere else.
+if [ "$NERD_LLAMA" = provider ]; then
+  [ -n "${NERD_PROVIDER_URL:-}" ] || die "NERD_LLAMA=provider: set NERD_PROVIDER_URL to the provider's OpenAI-compatible API, e.g. https://openrouter.ai/api/v1, or to a row of the key file's table"
+  [ -n "${NERD_MODEL:-}" ] || die "NERD_LLAMA=provider: set NERD_MODEL to the provider's model id"
+  [ -s "$NERD_PROVIDER_KEY_FILE" ] || die "NERD_LLAMA=provider: put the provider's API key into $NERD_PROVIDER_KEY_FILE (one line; chmod 600), or name another file in NERD_PROVIDER_KEY_FILE"
+  case "$(ls -l "$NERD_PROVIDER_KEY_FILE" | cut -c5-10)" in
+    ------) ;;
+    *) die "$NERD_PROVIDER_KEY_FILE is readable by others than its owner: chmod 600 $NERD_PROVIDER_KEY_FILE" ;;
+  esac
+  # A name, not a URL: a row "<name> <base> <key>" of the key file (keyproxy.ts); only the names of
+  # such rows are read here. A line of fewer fields is never shown: a file of one key is that key.
+  case "$NERD_PROVIDER_URL" in
+    http://*|https://*) ;;
+    *) awk -v n="$NERD_PROVIDER_URL" 'NF >= 3 && $1 == n { f = 1 } END { exit !f }' "$NERD_PROVIDER_KEY_FILE" ||
+         die "NERD_PROVIDER_URL=$NERD_PROVIDER_URL: no such row in $NERD_PROVIDER_KEY_FILE (a row is \"<name> <base URL> <key>\"; with a file of one key, NERD_PROVIDER_URL is the provider's URL); rows: $(awk '!/^[[:space:]]*#/ && NF >= 3 { printf "%s ", $1 }' "$NERD_PROVIDER_KEY_FILE")" ;;
+  esac
+fi
 if [ "$NERD_LLAMA" = mlx ] && [ "$(uname -s)" != Darwin ] && [ "$dry" = 0 ]; then
   die "NERD_LLAMA=mlx runs on a Mac with Apple silicon only (MLX); elsewhere: container"
 fi
@@ -86,6 +111,22 @@ if nerd_on_host; then
   [ "$build" = 2 ] && export NERD_REBUILD=1
   run "$(nerd_host_tool)" start \
     || die "the model server on this machine did not start (above; docs/MACOS.md, troubleshooting)"
+fi
+
+case "$NERD_KEYPROXY_AUTH" in
+  on|off) ;;
+  *) die "NERD_KEYPROXY_AUTH=$NERD_KEYPROXY_AUTH: on or off" ;;
+esac
+# A new token at each start, made before compose reads it; never printed (a dry run shows a stand-in).
+if [ "$NERD_LLAMA" = provider ] && [ "$NERD_KEYPROXY_AUTH" = on ]; then
+  if [ "$dry" = 1 ]; then NERD_KEYPROXY_TOKEN='<made at the start>'
+  else
+    mkdir -p "$(dirname "$NERD_KEYPROXY_TOKEN_FILE")"
+    NERD_KEYPROXY_TOKEN=$(od -An -tx1 -N24 /dev/urandom | tr -d ' \n')
+    (umask 077; printf '%s\n' "$NERD_KEYPROXY_TOKEN" > "$NERD_KEYPROXY_TOKEN_FILE")
+    say "key proxy token: $NERD_KEYPROXY_TOKEN_FILE (new at each start)"
+  fi
+  export NERD_KEYPROXY_TOKEN
 fi
 
 if [ "$dry" = 1 ]; then
@@ -115,7 +156,8 @@ done
 if [ -z "${NERD_NETWORK:-}" ]; then
   docker network inspect "$NERD_NAME-net" >/dev/null 2>&1 || docker network create "$NERD_NAME-net" >/dev/null
 fi
-for v in $(nerd_volumes) "$NERD_MODELS_VOLUME"; do
+models=$NERD_MODELS_VOLUME; nerd_elsewhere && models=
+for v in $(nerd_volumes) $models; do
   docker volume inspect "$v" >/dev/null 2>&1 || { docker volume create "$v" >/dev/null; say "volume $v created"; }
 done
 
@@ -136,7 +178,12 @@ if [ -z "${NERD_NETWORK:-}" ] && ! docker container inspect "$NERD_NAME" >/dev/n
   done
 fi
 
-if [ "$NERD_LLAMA" = container ]; then srv="$NERD_LLM_NAME, GPU $(nerd_gpu_mode)"; else srv="on this machine"; fi
+case "$NERD_LLAMA" in
+  container) srv="$NERD_LLM_NAME, GPU $(nerd_gpu_mode)" ;;
+  remote) srv="another machine's, model ${NERD_MODEL:-as it serves}" ;;
+  provider) srv="$NERD_PROVIDER_URL through $NERD_NAME-keyproxy, model $NERD_MODEL" ;;
+  *) srv="on this machine" ;;
+esac
 say "starting (server: $srv; agent: $NERD_NAME, the server at $NERD_LLAMA_URL)"
 nerd_compose up -d --no-build --pull never
 
@@ -161,6 +208,10 @@ connect() {
   if nerd_on_host; then
     echo "  status: ./STATUS    stop: ./DOWN    logs: docker logs -f $NERD_NAME"
     echo "  the model: tools/$(basename "$(nerd_host_tool)") status | logs (./DOWN stops it too, ./DOWN --agent keeps it)"
+  elif [ "$NERD_LLAMA" = remote ]; then
+    echo "  status: ./STATUS    stop: ./DOWN    logs: docker logs -f $NERD_NAME (the model server is $NERD_LLAMA_URL's machine's)"
+  elif [ "$NERD_LLAMA" = provider ]; then
+    echo "  status: ./STATUS    stop: ./DOWN    logs: docker logs -f $NERD_NAME (agent), $NERD_NAME-keyproxy (each request to the provider)"
   else
     echo "  status: ./STATUS    stop: ./DOWN    logs: docker logs -f $NERD_NAME (agent), $NERD_LLM_NAME (server)"
   fi
@@ -174,8 +225,13 @@ fi
 # Wait for "Pi in tmux session" in the agent's log: the server answers and the
 # agent runs. The entrypoints' own lines ("[nerd hh:mm:ss] ...") of both are
 # shown as they come; curl's progress meter (first start: 6-7 GB) once a minute.
-say "waiting for the model and the agent (first start downloads 6-7 GB; Ctrl-C stops waiting, not the containers)"
+if nerd_elsewhere; then
+  say "waiting for the agent and the model server at $NERD_LLAMA_URL (Ctrl-C stops waiting, not the container)"
+else
+  say "waiting for the model and the agent (first start downloads 6-7 GB; Ctrl-C stops waiting, not the containers)"
+fi
 watch=("$NERD_NAME"); [ "$NERD_LLAMA" = container ] && watch=("$NERD_LLM_NAME" "$NERD_NAME")
+[ "$NERD_LLAMA" = provider ] && watch=("$NERD_NAME-keyproxy" "$NERD_NAME")
 declare -A seen
 tick=0
 while :; do
