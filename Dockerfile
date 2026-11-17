@@ -40,18 +40,24 @@ ARG UBUNTU_VERSION=26.04
 FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${CUDA_UBUNTU_VERSION} AS llama
 ARG CUDA_ARCH=86
 ARG LLAMA_REPO=https://github.com/PrismML-Eng/llama.cpp
-ARG LLAMA_REF=prism-b10743-adfffbe
+ARG LLAMA_REF=prism-b12128-d7b2896
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git cmake ninja-build build-essential ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 RUN git clone --depth 1 -b "${LLAMA_REF}" "${LLAMA_REPO}" /src
 # Static llama/ggml libraries: one binary that needs only the CUDA runtime
 # libraries of the final image. GGML_NATIVE=OFF so the CPU code does not depend
-# on the build machine's CPU.
+# on the build machine's CPU. LLAMA_USE_PREBUILT_UI=OFF: no web UI in the
+# binary (the agent talks to the API only), and no network at build time.
+# From prism-b12128 on, the build otherwise downloads the UI from Hugging Face
+# (by build number, which a --depth 1 clone gets as 1, then a fallback), and
+# that download failed its asset check (scripts/ui-assets.cmake), failing the
+# build. Without a UI llama-server answers 404 on "/" and serves /health and
+# /v1 as before. Older tags honour the flag too.
 RUN cmake -S /src -B /src/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
         -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES="${CUDA_ARCH}" \
         -DGGML_NATIVE=OFF -DBUILD_SHARED_LIBS=OFF -DLLAMA_CURL=OFF \
-        -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF \
+        -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_USE_PREBUILT_UI=OFF \
  && cmake --build /src/build -j "$(nproc)" --target llama-server \
  && install -D /src/build/bin/llama-server /out/llama-server \
  && git -C /src rev-parse HEAD > /out/llama-ref

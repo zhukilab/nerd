@@ -97,9 +97,11 @@ build() {
   # Metal is on by default on macOS (the shaders embedded in the binary).
   # GGML_NATIVE: this machine's CPU, it is built where it runs. The full
   # output goes to the log (nerd_log), only the last lines to the screen.
+  # LLAMA_USE_PREBUILT_UI=OFF: no web UI and no download of it at build time,
+  # as in the Dockerfile (the agent uses the API only).
   say "building llama-server (a few minutes)"
   cmake -S "$src" -B "$src/build" -DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=OFF \
-    -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DBUILD_SHARED_LIBS=OFF \
+    -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DBUILD_SHARED_LIBS=OFF -DLLAMA_USE_PREBUILT_UI=OFF \
     -DCMAKE_C_COMPILER="$cc" -DCMAKE_CXX_COMPILER="$cxx" ${cmake_os[@]+"${cmake_os[@]}"} \
     > "$dir/cmake.log" 2>&1 || { tail -30 "$dir/cmake.log"; cat "$dir/cmake.log" >> "${NERD_LOG:-/dev/null}"; die "cmake configure failed (whole output in the log)"; }
   ncpu=$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)
