@@ -33,6 +33,7 @@ node --test acceptance/test/*.test.mjs
 shellcheck -x UP DOWN STATUS tools/*.sh                # clean; container/ and acceptance/ still carry
                                                        # a few notes (trap handlers read as unreachable)
 GUARD=container/pkill-guard.sh bash container/test-pkill-guard.sh
+bash container/test-model.sh                           # model variants, alias, MTP arguments
 acceptance/selftest.sh /tmp/selftest                   # docker
 tools/check-prerequisites.sh                           # reports MISSING without a GPU; that is fine
 ./UP --dry-run                                         # the docker commands UP would run

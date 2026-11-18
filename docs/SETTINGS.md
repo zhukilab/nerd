@@ -30,7 +30,9 @@ Read by `./UP`, `./DOWN`, `./STATUS` and the tools from `.env` (format in `env.e
 
 | Setting | Default | Values | Change | What it does |
 |---|---|---|---|---|
-| `NERD_MODEL_VARIANT` | `q1` | q1 / q2 | needs ./UP | The model variant: q1 (5.95 GB, fits 8 GB of VRAM at 64K context) or q2 (7.21 GB, 12 GB and up). Not used when NERD_MODEL_GGUF names another model. |
+| `NERD_MODEL_VARIANT` | `q1` | q1 / q2 / q1mtp | needs ./UP | The model variant: q1 (5.95 GB, fits 8 GB of VRAM at 64K context), q2 (7.21 GB, 12 GB and up) or q1mtp (q1 with a multi-token-prediction head, 6.30 GB: generation 1.4-2.2x faster, ~0.75 GB more VRAM, 64K still fits 8 GB but tight). Not used when NERD_MODEL_GGUF names another model. |
+| `NERD_MTP` (advanced) | `auto` | auto / on / off | needs ./UP | Speculative decoding with the model's MTP head: auto uses it when the variant has one (q1mtp), on asks for it with any model (a NERD_MODEL_GGUF that carries a head), off never. |
+| `NERD_MTP_DRAFT` (advanced) | `1` | 1–8 | needs ./UP | Tokens the MTP head drafts per step. 1 is best on an 8 GB Ampere card at long context; 2 was faster on GB10. Measure on yours. |
 | `NERD_MODEL_GGUF`, older `NERD_MODEL_FILE` | "" | text | needs ./UP | Another GGUF for llama-server instead of the variant: hf:<owner>/<repo>/<file>.gguf[@<revision>] (downloaded once, its sha256 checked), or the name of a .gguf already in the models volume. Empty: the variant. |
 | `NERD_MODEL_SHA256` (advanced) | "" | text | needs ./UP | Pins the sha256 of an hf: file named by NERD_MODEL_GGUF. Empty: checked against what Hugging Face publishes for it. |
 | `NERD_MODEL_ALIAS` (advanced) | "" | text | needs ./UP | The model's name on the server. Empty: bonsai2-<variant>, or the file's name without .gguf for NERD_MODEL_GGUF. |

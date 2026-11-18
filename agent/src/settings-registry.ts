@@ -180,12 +180,34 @@ export const SETTINGS: Setting[] = [
 		name: "NERD_MODEL_VARIANT",
 		owner: "host",
 		group: "model",
-		kind: { type: "choice", choices: ["q1", "q2"] },
+		kind: { type: "choice", choices: ["q1", "q2", "q1mtp"] },
 		default: "q1",
 		summary:
-			"The model variant: q1 (5.95 GB, fits 8 GB of VRAM at 64K context) or q2 (7.21 GB, 12 GB and up). Not used when NERD_MODEL_GGUF names another model.",
+			"The model variant: q1 (5.95 GB, fits 8 GB of VRAM at 64K context), q2 (7.21 GB, 12 GB and up) or q1mtp (q1 with a multi-token-prediction head, 6.30 GB: generation 1.4-2.2x faster, ~0.75 GB more VRAM, 64K still fits 8 GB but tight). Not used when NERD_MODEL_GGUF names another model.",
 		apply: "up",
 		level: "user",
+	},
+	{
+		name: "NERD_MTP",
+		owner: "host",
+		group: "model",
+		kind: { type: "choice", choices: ["auto", "on", "off"] },
+		default: "auto",
+		summary:
+			"Speculative decoding with the model's MTP head: auto uses it when the variant has one (q1mtp), on asks for it with any model (a NERD_MODEL_GGUF that carries a head), off never.",
+		apply: "up",
+		level: "advanced",
+	},
+	{
+		name: "NERD_MTP_DRAFT",
+		owner: "host",
+		group: "model",
+		kind: { type: "int", min: 1, max: 8 },
+		default: "1",
+		summary:
+			"Tokens the MTP head drafts per step. 1 is best on an 8 GB Ampere card at long context; 2 was faster on GB10. Measure on yours.",
+		apply: "up",
+		level: "advanced",
 	},
 	{
 		name: "NERD_MODEL_GGUF",

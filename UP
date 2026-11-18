@@ -60,7 +60,13 @@ keys=$(nerd_keys_file) || die "no ssh public key: set NERD_AUTHORIZED_KEYS_FILE 
 [ -s "$keys" ] || die "public key file '$keys' is missing or empty"
 grep -q '^\(ssh-\|ecdsa-\|sk-\)' "$keys" || die "'$keys' does not look like a public key (ssh-ed25519 ...)"
 
-case "$NERD_MODEL_VARIANT" in q1|q2) ;; *) die "NERD_MODEL_VARIANT must be q1 or q2" ;; esac
+case "$NERD_MODEL_VARIANT" in q1|q2|q1mtp) ;; *) die "NERD_MODEL_VARIANT must be q1, q2 or q1mtp" ;; esac
+case "${NERD_MTP:-auto}" in auto|on|off) ;; *) die "NERD_MTP must be auto, on or off" ;; esac
+# a pinned variant either has a head (q1mtp) or not: on with q1/q2 would only make llama-server refuse to start
+if [ "${NERD_MTP:-auto}" = on ] && [ -z "${NERD_MODEL_GGUF:-${NERD_MODEL_FILE:-}}" ] && [ "$NERD_MODEL_VARIANT" != q1mtp ]; then
+  die "NERD_MTP=on: NERD_MODEL_VARIANT=$NERD_MODEL_VARIANT has no MTP head; use q1mtp, or a NERD_MODEL_GGUF that carries one"
+fi
+[[ "${NERD_MTP_DRAFT:-1}" =~ ^[1-8]$ ]] || die "NERD_MTP_DRAFT must be 1 to 8"
 case "$NERD_LLAMA" in container|host|mlx|remote|provider) ;; *) die "NERD_LLAMA must be auto, container, host, mlx, remote or provider" ;; esac
 # shellcheck source=container/model.sh
 . "$NERD_ROOT/container/model.sh"

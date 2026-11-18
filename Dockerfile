@@ -16,7 +16,7 @@
 #                 or 12.9 (sm_121), and the host driver must support the version
 # The CPU architecture is the build machine's (or docker build --platform):
 # every stage's base image and the Node tarball exist for amd64 and arm64.
-# The model variant (q1 | q2) is chosen at run time: NERD_MODEL_VARIANT.
+# The model variant (q1 | q2 | q1mtp) is chosen at run time: NERD_MODEL_VARIANT.
 # Tested: x86_64 + sm_86 + CUDA 12.4.1, and aarch64 + sm_121 + CUDA 13.0.1.
 #
 #   docker build -t nerd:agent .

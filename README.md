@@ -325,12 +325,12 @@ checks it in the image (`docker run --rm --entrypoint /opt/nerd/test-browse.sh n
 
 ### Variants
 
-| | `q1` (default) | `q2` |
-|---|---|---|
-| file | `Ternary-Bonsai-2-27B-PTQ1_0.gguf` | `Ternary-Bonsai-2-27B-PQ2_0.gguf` |
-| first-start download | 5.95 GB | 7.21 GB |
-| VRAM, KV `q4_0` | 64K (default): 7.2 GiB at server start on the RTX 3080 Laptop; a long agent run on 8 GB not yet measured. 32K: 6.5 GiB (6605 MiB peak during an agent run) | weights alone 6.7 GiB: not with context on 8 GB; meant for 12 GB and up, untested |
-| tested | yes: RTX 3080 Laptop 8 GB, x86_64 (13 t/s, power-saving mode); DGX Spark GB10, aarch64 (31 t/s generation, 830 t/s prompt) | no |
+| | `q1` (default) | `q2` | `q1mtp` |
+|---|---|---|---|
+| file | `Ternary-Bonsai-2-27B-PTQ1_0.gguf` | `Ternary-Bonsai-2-27B-PQ2_0.gguf` | `Ternary-Bonsai-2-27B-PTQ1_0-mtp-lean.gguf`: q1 byte for byte plus Qwen 3.8's multi-token-prediction head (a community graft, `container/model.sh`) |
+| first-start download | 5.95 GB | 7.21 GB | 6.30 GB |
+| VRAM, KV `q4_0` | 64K (default): 7.2 GiB at server start on the RTX 3080 Laptop; a long agent run on 8 GB not yet measured. 32K: 6.5 GiB (6605 MiB peak during an agent run) | weights alone 6.7 GiB: not with context on 8 GB; meant for 12 GB and up, untested | about 750 MiB more than q1: 64K fits 8 GB, tightly (8005 of 8192 MiB with the desktop) |
+| tested | yes: RTX 3080 Laptop 8 GB, x86_64 (13 t/s, power-saving mode); DGX Spark GB10, aarch64 (31 t/s generation, 830 t/s prompt) | no | RTX 3080 Laptop: generation 1.4-2.2x q1's (36 t/s at 30K of context against 16); GB10: 1.4-2.0x. Served as `bonsai2-q1`; `NERD_MTP=off` serves it exactly as q1 |
 
 The variant is the server's: `NERD_MODEL_VARIANT=q2` in `.env` and `./UP`
 (it replaces the server's container), or by hand:
@@ -339,7 +339,7 @@ The variant is the server's: `NERD_MODEL_VARIANT=q2` in `.env` and `./UP`
 docker run -d --name nerd-llm --network nerd-net --gpus all -e NERD_MODEL_VARIANT=q2 -v nerd-models:/models nerd:server
 ```
 
-Both variants need the fork; stock llama.cpp rejects these quantizations or
+All variants need the fork; stock llama.cpp rejects these quantizations or
 loads them and produces garbage.
 
 Another model: `NERD_MODEL_GGUF=hf:<owner>/<repo>/<file>.gguf` in `.env`

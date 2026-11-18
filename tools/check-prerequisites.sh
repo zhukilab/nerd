@@ -146,7 +146,9 @@ elif [ "$NERD_LLAMA" = host ]; then
   else row WARN llama-host "not built yet" "./UP builds it, downloads the model and starts it"; fi
   # Unified memory: the model and its KV cache come out of RAM, and macOS lets
   # the GPU have about two thirds of it.
-  case "$NERD_MODEL_VARIANT" in q2) base=7200 ;; *) base=5900 ;; esac
+  base=5900; [ "$NERD_MODEL_VARIANT" = q2 ] && base=7200
+# the MTP head costs ~750 MiB when it is used; q1mtp with NERD_MTP=off measured as q1 (7176 MiB both, GB10)
+case "${NERD_MTP:-auto}:$NERD_MODEL_VARIANT" in on:*|auto:q1mtp) base=$((base + 750)) ;; esac
   need_mib=$(( base + NERD_CTX * 23 / 1024 ))
   mem=$(sysctl -n hw.memsize 2>/dev/null || echo 0)
   gpu_mib=$(( mem / 1024 / 1024 * 2 / 3 ))
@@ -212,9 +214,12 @@ fi
 # --- VRAM against the variant and context --------------------------------------------
 # Measured with KV cache q4_0, one slot: Q1 needs 6.5 GiB at 32K and 7.2 GiB at
 # 64K (about 23 KiB per token of context on top of ~5.8 GiB); Q2's weights are
-# 6.7 GiB alone. Overflow is silent on some drivers (WSL2/WDDM: no error, 3-8x
+# 6.7 GiB alone; q1mtp (Q1 with the MTP head on) takes ~750 MiB more than Q1
+# (8 GB card under WSL, 64K: 8005 against 7252 MiB for the whole device). Overflow is silent on some drivers (WSL2/WDDM: no error, 3-8x
 # slower), so it is better caught here.
-case "$NERD_MODEL_VARIANT" in q2) base=7200 ;; *) base=5900 ;; esac
+base=5900; [ "$NERD_MODEL_VARIANT" = q2 ] && base=7200
+# the MTP head costs ~750 MiB when it is used; q1mtp with NERD_MTP=off measured as q1 (7176 MiB both, GB10)
+case "${NERD_MTP:-auto}:$NERD_MODEL_VARIANT" in on:*|auto:q1mtp) base=$((base + 750)) ;; esac
 need_mib=$(( base + NERD_CTX * 23 / 1024 ))
 if [ $gpu_ok = 1 ]; then
   if [ -z "$vram_mib" ]; then
@@ -225,7 +230,11 @@ if [ $gpu_ok = 1 ]; then
   elif [ "$need_mib" -le "$vram_mib" ]; then
     row WARN vram "$vram_mib MiB; $NERD_MODEL_VARIANT at context $NERD_CTX needs about $need_mib MiB: tight" "close other GPU users (a desktop takes 200-500 MiB) or set NERD_CTX=32768 in .env"
   else
-    if [ "$NERD_MODEL_VARIANT" = q2 ]; then h="NERD_MODEL_VARIANT=q1 in .env"; else h="NERD_CTX=32768 in .env (Q1 at 32K: about 6.6 GiB)"; fi
+    case "$NERD_MODEL_VARIANT" in
+      q2) h="NERD_MODEL_VARIANT=q1 in .env" ;;
+      q1mtp) h="NERD_MTP=off in .env (the head unused: ~750 MiB less, measured), or NERD_CTX=32768" ;;
+      *) h="NERD_CTX=32768 in .env (Q1 at 32K: about 6.6 GiB)" ;;
+    esac
     row MISSING vram "$vram_mib MiB; $NERD_MODEL_VARIANT at context $NERD_CTX needs about $need_mib MiB" "$h"
   fi
 fi
