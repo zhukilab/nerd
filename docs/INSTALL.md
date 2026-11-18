@@ -222,7 +222,8 @@ Things that behave differently on WSL2:
 - `wsl --terminate <distribution>` restarts the distribution but not WSL's
   kernel; if services inside fail to start afterwards, `wsl --shutdown`.
 - Laptops: the vendor's power mode matters. On the tested laptop a quiet
-  power mode halved generation speed (13 against about 24 tokens/s).
+  power mode halved generation speed (13 against about 24 tokens/s, q1 on an
+  older fork tag).
 - Docker Desktop for Windows (its WSL integration) instead of Docker Engine
   inside the distribution: untested. `tools/install-prerequisites.sh` leaves
   an integration that works alone; Desktop's Windows `docker` on the Windows

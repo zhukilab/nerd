@@ -55,6 +55,12 @@ image was larger and the agent could see the server's processes.
 **Model.** Bonsai 2 27B by PrismML, a ternary-quantized 27B model (PTQ1_0,
 5.95 GB; PQ2_0, 7.21 GB). It needs PrismML's fork of llama.cpp: stock
 llama.cpp rejects these quantizations or loads them and produces garbage.
+The default variant, q1mtp (6.30 GB), is the PTQ1_0 file byte for byte with
+Qwen 3.8 27B's multi-token-prediction head grafted on as one more block (a
+community graft, pinned like the others): the server runs speculative decoding
+with it (`--spec-type draft-mtp`), the head drafts the next token and the model
+verifies it in the same step, 1.4-2.2x faster generation for ~750 MiB of GPU
+memory. Without the head (`NERD_MTP=off`) it answers exactly as PTQ1_0.
 The weights are not in the image; the server's entrypoint downloads them on
 first start into `/models`, resumably, and checks size and sha256 against
 values pinned in `container/model.sh`.

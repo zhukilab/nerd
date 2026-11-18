@@ -13,8 +13,9 @@
 #                                 one running with other settings is restarted
 #   tools/llama-host.sh stop | status | logs      (./DOWN runs stop too)
 #
-# Settings from .env (env.example): NERD_MODEL_VARIANT or NERD_MODEL_GGUF
-# (container/model.sh), NERD_CTX, NERD_LLAMA_PORT, and here only:
+# Settings from .env (env.example): NERD_MODEL_VARIANT (default q1 here: the MTP
+# head of q1mtp is not tested with Metal yet) or NERD_MODEL_GGUF, NERD_MTP,
+# NERD_MTP_DRAFT (container/model.sh), NERD_CTX, NERD_LLAMA_PORT, and here only:
 #   NERD_HOST_DIR     where the source, build, model and log go (~/.nerd)
 #   NERD_LLAMA_HOST   address the server listens on (127.0.0.1)
 #   NERD_LLAMA_ARGS   extra llama-server arguments, word-split

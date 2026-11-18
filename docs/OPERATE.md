@@ -29,8 +29,10 @@ restart, and stay down after `./DOWN` or `docker stop`. `./UP` on a running
 instance replaces only a container whose image or settings changed: after
 `./UP --build` the agent's container is new, the volumes stay, the
 conversation continues, processes the agent started (a web server) do not.
-The model is not reloaded unless the server's variant, context or image
-changed.
+The model is not reloaded unless the server's variant, context, MTP settings
+(`NERD_MTP`, `NERD_MTP_DRAFT`) or image changed. An `.env` made from an older
+`env.example` pins `NERD_MODEL_VARIANT=q1`, which stays q1; empty the line (or
+set `q1mtp`) to get the current default, q1 with its MTP head.
 
 ## What lives outside the containers
 

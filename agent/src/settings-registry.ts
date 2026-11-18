@@ -239,7 +239,7 @@ export const SETTINGS: Setting[] = [
 		kind: { type: "text" },
 		default: "",
 		summary:
-			"The model's name on the server. Empty: bonsai2-<variant>, or the file's name without .gguf for NERD_MODEL_GGUF.",
+			"The model's name on the server. Empty: bonsai2-<variant> (q1mtp is served as bonsai2-q1: the same weights), or the file's name without .gguf for NERD_MODEL_GGUF.",
 		apply: "up",
 		level: "advanced",
 	},

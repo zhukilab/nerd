@@ -330,7 +330,7 @@ checks it in the image (`docker run --rm --entrypoint /opt/nerd/test-browse.sh n
 | file | `Ternary-Bonsai-2-27B-PTQ1_0.gguf` | `Ternary-Bonsai-2-27B-PQ2_0.gguf` | `Ternary-Bonsai-2-27B-PTQ1_0-mtp-lean.gguf`: q1 byte for byte plus Qwen 3.8's multi-token-prediction head (a community graft, `container/model.sh`) |
 | first-start download | 5.95 GB | 7.21 GB | 6.30 GB |
 | VRAM, KV `q4_0` | 64K (default): 7.2 GiB at server start on the RTX 3080 Laptop; a long agent run on 8 GB not yet measured. 32K: 6.5 GiB (6605 MiB peak during an agent run) | weights alone 6.7 GiB: not with context on 8 GB; meant for 12 GB and up, untested | about 750 MiB more than q1: 64K fits 8 GB, tightly (8005 of 8192 MiB with the desktop) |
-| tested | yes: RTX 3080 Laptop 8 GB, x86_64 (13 t/s, power-saving mode); DGX Spark GB10, aarch64 (31 t/s generation, 830 t/s prompt) | no | RTX 3080 Laptop: generation 1.4-2.2x q1's (36 t/s at 30K of context against 16); GB10: 1.4-2.0x. Served as `bonsai2-q1`; `NERD_MTP=off` serves it exactly as q1 |
+| tested | yes: RTX 3080 Laptop 8 GB, x86_64 (server at 64K, Performance mode, fork prism-b12128: generation 25-29 t/s after a short prompt, 16 t/s with 30K tokens in the context; 13 t/s in a power-saving mode on an older tag); DGX Spark GB10, aarch64 (generation 37 t/s short, 34 t/s at 30K; prompt 850 t/s) | no | RTX 3080 Laptop, same setup: generation 37-47 t/s after a short prompt, 36 t/s at 30K (1.4-2.25x q1); GB10: 1.4-2.0x. Served as `bonsai2-q1`; `NERD_MTP=off` serves it exactly as q1 |
 
 The variant is the server's: `NERD_MODEL_VARIANT=q2` in `.env` and `./UP`
 (it replaces the server's container), or by hand:
@@ -351,12 +351,15 @@ MLX format: `NERD_LLAMA=mlx` ([docs/MACOS.md](docs/MACOS.md)).
 ### Settings
 
 Server defaults, each overridable in the server's environment (through
-`./UP`: `NERD_CTX`, `NERD_MODEL_VARIANT` in `.env`, the rest in
-`compose.override.yaml`, docs/OPERATE.md): context `NERD_CTX=65536`, KV cache
-`NERD_KV=q4_0`, `NERD_NGL=99` (all layers on the GPU), flash attention on,
-`NERD_SLOTS=1`, prompt cache in host RAM `NERD_CACHE_RAM=4096` MiB (a context
+`./UP`: `NERD_CTX`, `NERD_MODEL_VARIANT`, `NERD_MTP`, `NERD_MTP_DRAFT` in `.env`,
+the rest in `compose.override.yaml`, docs/OPERATE.md): context `NERD_CTX=65536`,
+KV cache `NERD_KV=q4_0`, `NERD_NGL=99` (all layers on the GPU), flash attention
+on, `NERD_SLOTS=1`, prompt cache in host RAM `NERD_CACHE_RAM=4096` MiB (a context
 that comes back after another one used the slot is not processed again; `0`
-turns it off), extra flags in `NERD_LLAMA_ARGS`. Every setting, the agent's
+turns it off), speculative decoding with the model's MTP head `NERD_MTP=auto`
+(on for q1mtp) drafting `NERD_MTP_DRAFT=1` token per step, extra flags in
+`NERD_LLAMA_ARGS`. The variant q1mtp is served as `bonsai2-q1` (the same
+weights), so clients that name the model need no change. Every setting, the agent's
 own included, is in [docs/SETTINGS.md](docs/SETTINGS.md); `./SETTINGS` on the
 host and `/nerd` in Pi show and change them (docs/OPERATE.md). `HF_TOKEN` is sent to Hugging Face if
 set. Header comments of [`Dockerfile`](Dockerfile) and

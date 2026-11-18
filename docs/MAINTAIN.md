@@ -14,7 +14,7 @@ then a rebuild and the checks below. Nothing updates itself.
 | Node.js | `Dockerfile`: `NODE_VERSION` | official tarball, hash checked |
 | Pi, Pi packages, Playwright, undici | `agent/package.json` (exact) + `agent/package-lock.json` | Pi packages: `@sting8k/pi-vcc`, `@juicesharp/rpiv-web-tools` (`agent/src/packages.ts`) |
 | Chromium for `browse` | follows `playwright-core` | installed by Playwright's own installer |
-| the model | `container/model.sh`: `repo`, file, `size`, `sha` per variant; llama-server's arguments | used by the image and by `tools/llama-host.sh` |
+| the model | `container/model.sh`: `repo`, `rev`, file, `size`, `sha`, `mtp` per variant; llama-server's arguments | used by the image and by `tools/llama-host.sh` |
 | ruff, biome (linters) | `Dockerfile`: `RUFF_VERSION`, `BIOME_VERSION`, sha256 per architecture | |
 | `nerd-get` (go, rust, uv in the home) | `container/nerd-get.sh`: `GO_VERSION`, `RUSTUP_VERSION`, `UV_VERSION`, sha256 per architecture | rustup installs Rust's current stable, not a pinned one |
 | SearXNG (web search) | `Dockerfile`: `SEARXNG_REPO`, `SEARXNG_REF` (a commit); its Python requirements are pinned by SearXNG itself | settings: `container/searxng.yml`; runs on the agent image's python3 |
@@ -59,9 +59,18 @@ The model files and their hashes are in `container/model.sh`. For a new
 upload of Bonsai 2, or another model in the same format:
 
 1. Read the file list with sizes and hashes from the Hugging Face API:
-   `curl -s https://huggingface.co/api/models/<repo>/tree/main` — `size` and
+   `curl -s https://huggingface.co/api/models/<repo>/tree/<rev>` (`main` unless
+   the variant pins a revision) — `size` and
    `lfs.oid` (the sha256) of each `.gguf`. Not the web page.
-2. Change `repo`, the file name, `size` and `sha` of the variant.
+2. Change `repo`, the file name, `size` and `sha` of the variant, and `rev`
+   when it is pinned to a revision (q1mtp is: a graft by a third party, so a
+   rewritten upstream repo is noticed). `mtp=1` marks a file that carries an
+   MTP head; then `NERD_MTP=auto` serves it with speculative decoding. For a
+   graft, check its model card, and its GGUF metadata (e.g. with the `gguf`
+   Python package): `<arch>.block_count` one more than the base file's and
+   `<arch>.nextn_predict_layers` set. That the base tensors are byte for byte
+   the PrismML file's only a comparison of their data shows; in practice:
+   greedy answers without `--spec-type` equal the base file's.
 3. A new architecture or quantization may need a newer fork (below) and a
    different chat template; the agent relies on llama-server's `--jinja`
    template for tool calls (Qwen3 XML format for Bonsai 2).
@@ -157,14 +166,19 @@ its version, rebuild and run `test-browse.sh` in the image.
 git ls-remote --tags https://github.com/PrismML-Eng/llama.cpp | tail
 ```
 
-Set `LLAMA_REF` in the Dockerfile to the new tag, rebuild, and check:
+Set `LLAMA_REF` in the Dockerfile to the new tag, rebuild, and check (the
+build has no network beyond the clone: `LLAMA_USE_PREBUILT_UI=OFF` keeps the
+server's web UI out, which newer tags would otherwise download by build number
+and fail on a `--depth 1` clone; the agent needs the API only):
 
 - the server starts and `/health` answers (`./STATUS`);
 - answers are sane: a broken quantization kernel does not fail, it produces
   garbage. Ask something with a checkable answer (17·23 = 391; a short
   function) through the TUI or `curl http://127.0.0.1:8080/v1/chat/completions`
   inside the server's container (`docker exec <name>-llm curl ...`);
-- speed and GPU memory against the numbers in INSTALL.md / README.
+- speed and GPU memory against the numbers in INSTALL.md / README, with the
+  MTP head and without (`NERD_MTP=off`): the drafts count in the answer's
+  `timings` (`draft_n`, `draft_n_accepted`).
 
 The fork's CMake turns `CUDA_ARCH=12X` into `12Xa`; `GGML_NATIVE=OFF` keeps the
 CPU code portable. Never substitute stock llama.cpp for this model.
@@ -193,7 +207,7 @@ GPUs need 12.8 or later.
 | `REMOTE HOST IDENTIFICATION HAS CHANGED` | `./DOWN --purge` deleted the host keys | `ssh-keygen -R "[<host>]:<port>"` |
 | download stops or repeats | network; the download resumes on restart | `docker logs <name>-llm`; behind a proxy: `HTTPS_PROXY` for the `llm` service in `compose.override.yaml` (docs/OPERATE.md) |
 | `sha256 mismatch` | corrupted download or the file changed upstream | the partial file is removed; restart. If it repeats, the upstream file changed: update the pin (above) |
-| `llama-server exited during startup`, `cudaMalloc failed: out of memory` | not enough GPU memory | smaller `NERD_CTX`, `q1`, close other GPU users |
+| `llama-server exited during startup`, `cudaMalloc failed: out of memory` | not enough GPU memory | `NERD_MTP=off` (q1mtp without its head: ~750 MiB less), smaller `NERD_CTX`, `q1`, close other GPU users |
 | `CUDA driver version is insufficient` / `no kernel image is available` | the image's CUDA is newer than the driver, or built for another GPU | update the driver, or set `NERD_CUDA_VERSION`/`NERD_CUDA_ARCH` and `./UP --build` |
 | everything works but 3-8× slower than expected | **silent GPU memory overflow** (below), or a quiet laptop power mode | below |
 | the model answers nonsense | stock llama.cpp, or a fork version with a broken kernel | rebuild from the pinned `LLAMA_REF` |
@@ -208,9 +222,10 @@ memory, and llama-server runs 3-8 times slower with no error. Signs:
 `nvidia-smi` shows `memory.used` within ~250 MiB of the card's total; in
 Windows' Task Manager the GPU's "Shared GPU memory" grows; `dmesg` in WSL may
 show `dxgkio_make_resident: Ioctl failed: -12`. Only when shared memory is
-exhausted too does it fail (`cudaMalloc failed`). Fix: a smaller context
-(`NERD_CTX=32768`), close other programs that use the GPU (browsers, a second
-nerd). If the overflow comes with the prompt cache (`NERD_CACHE_RAM`, 4096 MiB by
+exhausted too does it fail (`cudaMalloc failed`). Fix: with q1mtp (the
+default), `NERD_MTP=off` first (the head unused: ~750 MiB less, the same
+answers); a smaller context (`NERD_CTX=32768`); close other programs that use
+the GPU (browsers, a second nerd). If the overflow comes with the prompt cache (`NERD_CACHE_RAM`, 4096 MiB by
 default; today's build keeps its snapshots in host RAM, an older one put them on
 the card), `NERD_CACHE_RAM=0` turns it off.
 `tools/check-prerequisites.sh` estimates the need for the configured variant

@@ -31,7 +31,8 @@
 #                       (downloaded into /models, sha256 checked) or <file>.gguf
 #                       already in /models (no download; NERD_MODEL_FILE, the older name)
 #   NERD_MODEL_SHA256   pins the hf: file's sha256 (default: what Hugging Face publishes)
-#   NERD_MODEL_ALIAS    the model's name on the server (bonsai2-<variant>, or the file's)
+#   NERD_MODEL_ALIAS    the model's name on the server (bonsai2-<variant>, q1mtp as
+#                       bonsai2-q1; or the file's)
 #   NERD_CTX            context tokens (65536)        NERD_KV     KV cache type (q4_0)
 #   NERD_NGL            layers on the GPU (99)        NERD_SLOTS  parallel slots (1)
 #   NERD_CACHE_RAM      prompt cache in host RAM, MiB (4096; 0 turns it off)

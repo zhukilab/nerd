@@ -19,14 +19,14 @@ says otherwise.
 | | llama-server, Metal (`NERD_LLAMA=host`, the default) | MLX (`NERD_LLAMA=mlx`) |
 |---|---|---|
 | what runs | PrismML's llama.cpp fork, built on the Mac (same tag as the Linux image) | mlx-vlm's server in a Python venv, nothing to compile |
-| the model | the same GGUF as on Linux, 5.95 GB | the same weights in MLX 2-bit, 8.6 GB |
+| the model | q1, the PTQ1_0 GGUF, 5.95 GB. Linux defaults to q1mtp, the same file with a multi-token-prediction head; on the Mac it is not tested with Metal yet, so q1 stays the default here (`NERD_MODEL_VARIANT=q1mtp` to try it) | the same weights in MLX 2-bit, 8.6 GB |
 | memory | 16 GB works (tight), 24 GB+ comfortable | 24 GB+ recommended; on 16 GB `tools/check-prerequisites.sh` flags 64K as too much: `NERD_CTX=32768` |
-| speed, M1 Pro 16 GB | writing 4.6 tokens/s; reading the prompt 70–90 tokens/s; each turn reads only what is new (100–200 tokens), the rest is kept | writing about 11 tokens/s; reading the prompt about 50 tokens/s. mlx-vlm keeps nothing by default: every turn read the whole prompt again (52 s for 2.5K tokens, minutes at 30K). nerd now turns on its prefix cache (`NERD_MLX_APC`, on) — checked on Linux's CPU mlx, not yet on a Mac |
+| speed, M1 Pro 16 GB | writing 4.6 tokens/s; reading the prompt 70–90 tokens/s (an older fork tag; the current one is not measured on a Mac); each turn reads only what is new (100–200 tokens), the rest is kept | writing about 11 tokens/s; reading the prompt about 50 tokens/s. mlx-vlm keeps nothing by default: every turn read the whole prompt again (52 s for 2.5K tokens, minutes at 30K). nerd now turns on its prefix cache (`NERD_MLX_APC`, on) — checked on Linux's CPU mlx, not yet on a Mac |
 | needs | Command Line Tools, Homebrew `bash` and `cmake` | Homebrew `bash`, Python 3.12 or 3.13, macOS 14+ |
-| what is proven | the same server and model file run every tested Linux setup; served the agent on the Mac above | served the agent on the Mac above; tool calls; the prefix cache on Linux's CPU mlx only |
+| what is proven | the same server, q1 file and arguments as Linux with `NERD_MODEL_VARIANT=q1` (Linux defaults to q1mtp); served the agent on the Mac above | served the agent on the Mac above; tool calls; the prefix cache on Linux's CPU mlx only |
 
 **Start with llama-server** (the default): it is the engine every tested
-setup uses, with the same file, checksum and arguments, it fits a 16 GB Mac,
+setup uses, with q1's file, checksum and arguments as on Linux, it fits a 16 GB Mac,
 and on a long conversation it is the faster of the two because it reads only
 what is new each turn. MLX writes faster (11 against 4.6 tokens/s on an M1
 Pro) and is worth trying on 24 GB or more, now with its prefix cache on; tell
