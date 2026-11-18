@@ -19,7 +19,7 @@ says otherwise.
 | | llama-server, Metal (`NERD_LLAMA=host`, the default) | MLX (`NERD_LLAMA=mlx`) |
 |---|---|---|
 | what runs | PrismML's llama.cpp fork, built on the Mac (same tag as the Linux image) | mlx-vlm's server in a Python venv, nothing to compile |
-| the model | q1, the PTQ1_0 GGUF, 5.95 GB. Linux defaults to q1mtp, the same file with a multi-token-prediction head; on the Mac it is not tested with Metal yet, so q1 stays the default here (`NERD_MODEL_VARIANT=q1mtp` to try it) | the same weights in MLX 2-bit, 8.6 GB |
+| the model | q1, the PTQ1_0 GGUF, 5.95 GB. Linux defaults to q1mtp, the same file with a multi-token-prediction head; on the Mac it is not tested with Metal yet, so q1 stays the default here ([Trying the MTP head](#trying-the-mtp-head-q1mtp)) | the same weights in MLX 2-bit, 8.6 GB |
 | memory | 16 GB works (tight), 24 GB+ comfortable | 24 GB+ recommended; on 16 GB `tools/check-prerequisites.sh` flags 64K as too much: `NERD_CTX=32768` |
 | speed, M1 Pro 16 GB | writing 4.6 tokens/s; reading the prompt 70–90 tokens/s (an older fork tag; the current one is not measured on a Mac); each turn reads only what is new (100–200 tokens), the rest is kept | writing about 11 tokens/s; reading the prompt about 50 tokens/s. mlx-vlm keeps nothing by default: every turn read the whole prompt again (52 s for 2.5K tokens, minutes at 30K). nerd now turns on its prefix cache (`NERD_MLX_APC`, on) — checked on Linux's CPU mlx, not yet on a Mac |
 | needs | Command Line Tools, Homebrew `bash` and `cmake` | Homebrew `bash`, Python 3.12 or 3.13, macOS 14+ |
@@ -137,6 +137,59 @@ files printed); send that file plus items 6 and 7 in words. By hand:
    `eval time` lines from `~/.nerd/llama-server.log` (MLX: the request lines of
    `~/.nerd/mlx-server.log`), and memory pressure in Activity Monitor;
 7. whether the agent finished the small task above.
+
+## Trying the MTP head (q1mtp)
+
+On Linux the default model is q1mtp: q1's file with a multi-token-prediction
+head grafted on. llama-server lets the head draft the next token and the model
+check it in the same step (`--spec-type draft-mtp`); every drafted token is
+verified, so the answers stay the model's own. With CUDA it made generation
+1.4-2.2x faster for ~750 MiB more memory. With Metal it has not been run yet —
+it may be faster, slower, or refuse to start. That is what this section finds
+out; the Mac keeps q1 by default until it has.
+
+1. Get it working with q1 first (above), then add to `.env`:
+
+   ```sh
+   NERD_MODEL_VARIANT=q1mtp
+   ```
+
+   and run `./UP`. It downloads the q1mtp file (6.30 GB, next to q1's in
+   `~/.nerd/models`, sha256 checked) and restarts the server with the head on:
+   its "starting:" line, and `~/.nerd/llama-server.args`, contain
+   `--spec-type draft-mtp --spec-draft-n-max 1`. The model keeps its name,
+   `bonsai2-q1`.
+   `tools/check-prerequisites.sh` counts the extra memory; on 16 GB, if it says
+   too much, add `NERD_CTX=32768`.
+2. Check that the head drafts: one request on the Mac (8080, or your
+   `NERD_LLAMA_PORT`),
+
+   ```sh
+   curl -s http://127.0.0.1:8080/v1/chat/completions -H 'Content-Type: application/json' \
+     -d '{"messages":[{"role":"user","content":"Write a Python function that reverses a string."}],
+          "max_tokens":128,"temperature":0,"chat_template_kwargs":{"enable_thinking":false}}' \
+     | grep -oE '"(predicted_per_second|draft_n|draft_n_accepted)":[0-9.]+'
+   ```
+
+   `draft_n` above 0 means the head runs; `draft_n_accepted / draft_n` is the
+   share of drafts the model kept (on CUDA 0.85-0.95 for code, 0.5-0.7 for
+   prose). `predicted_per_second` is the generation speed.
+3. The same request with the head off, for the comparison: `NERD_MTP=off` in
+   `.env`, `./UP` (the server restarts with the same file, no drafting; it
+   answers exactly as q1), the same `curl`: now only `predicted_per_second`
+   appears, the draft counts are there only with the head on. Then remove the `NERD_MTP=off`
+   line and `./UP` again. Optionally `NERD_MTP_DRAFT=2` (two drafts per step:
+   on one CUDA card faster, on another not; measure).
+4. Give the agent a real task with the head on, as in "Check that it works".
+
+**Back to q1:** remove the `NERD_MODEL_VARIANT=q1mtp` line (or set `q1`) and
+`./UP`; `NERD_MTP=off` alone also turns the head off.
+
+**What to send back**, in addition to the list above: `predicted_per_second`
+with the head on and off (the same request, two or three times each) and
+`draft_n_accepted`/`draft_n` with it on, `NERD_MTP_DRAFT` if you tried 2, memory pressure in
+Activity Monitor with the head on, and, if the server did not start or answered
+garbage, the end of `~/.nerd/llama-server.log`.
 
 ## Day to day
 
