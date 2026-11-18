@@ -228,7 +228,10 @@ if [ $gpu_ok = 1 ]; then
   elif [ "$need_mib" -le $((vram_mib - 512)) ]; then
     row OK vram "$vram_mib MiB; $NERD_MODEL_VARIANT at context $NERD_CTX needs about $need_mib MiB"
   elif [ "$need_mib" -le "$vram_mib" ]; then
-    row WARN vram "$vram_mib MiB; $NERD_MODEL_VARIANT at context $NERD_CTX needs about $need_mib MiB: tight" "close other GPU users (a desktop takes 200-500 MiB) or set NERD_CTX=32768 in .env"
+    h="close other GPU users (a desktop takes 200-500 MiB) or set NERD_CTX=32768 in .env"
+    [ "$base" -gt 7200 ] || case "${NERD_MTP:-auto}:$NERD_MODEL_VARIANT" in on:*|auto:q1mtp)
+      h="it fit on an 8 GB laptop card at 64K with the desktop on (8005 MiB); if the server is slow or fails to start: NERD_MTP=off in .env (~750 MiB less), or $h" ;; esac
+    row WARN vram "$vram_mib MiB; $NERD_MODEL_VARIANT at context $NERD_CTX needs about $need_mib MiB: tight" "$h"
   else
     case "$NERD_MODEL_VARIANT" in
       q2) h="NERD_MODEL_VARIANT=q1 in .env" ;;

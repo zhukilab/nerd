@@ -81,7 +81,7 @@ nerd_keys_file() {
 # Fill in every derived setting. Call after nerd_load_env.
 nerd_settings() {
   NERD_NAME=${NERD_NAME:-nerd}
-  NERD_MODEL_VARIANT=${NERD_MODEL_VARIANT:-q1}
+  # NERD_MODEL_VARIANT's default is set below, once NERD_LLAMA is known.
   # A provider's window is its model's (agent/src/local.ts); only one set here overrides it.
   NERD_CTX_GIVEN=${NERD_CTX:-}
   NERD_CTX=${NERD_CTX:-65536}
@@ -111,6 +111,11 @@ nerd_settings() {
   if [ "$NERD_LLAMA" = auto ]; then
     if [ "$(uname -s)" = Darwin ]; then NERD_LLAMA=host; else NERD_LLAMA=container; fi
   fi
+  # q1mtp (q1 with its MTP head) by default: measured 1.4-2.2x faster generation
+  # with CUDA (operator, 2026-11-18). Not on the Mac's llama-server (host): the
+  # head is not tested with Metal there yet, so q1 stays its default.
+  if [ "$NERD_LLAMA" = host ]; then NERD_MODEL_VARIANT=${NERD_MODEL_VARIANT:-q1}
+  else NERD_MODEL_VARIANT=${NERD_MODEL_VARIANT:-q1mtp}; fi
   # mlx-vlm's server decodes greedily unless a request names its sampling;
   # these are the model card's values for non-thinking use (Bonsai 2). The
   # agent adds them to requests that do not set them (agent/src/sampling.ts).

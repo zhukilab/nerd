@@ -180,10 +180,10 @@ export const SETTINGS: Setting[] = [
 		name: "NERD_MODEL_VARIANT",
 		owner: "host",
 		group: "model",
-		kind: { type: "choice", choices: ["q1", "q2", "q1mtp"] },
-		default: "q1",
+		kind: { type: "choice", choices: ["q1mtp", "q1", "q2"] },
+		default: "q1mtp",
 		summary:
-			"The model variant: q1 (5.95 GB, fits 8 GB of VRAM at 64K context), q2 (7.21 GB, 12 GB and up) or q1mtp (q1 with a multi-token-prediction head, 6.30 GB: generation 1.4-2.2x faster, ~0.75 GB more VRAM, 64K still fits 8 GB but tight). Not used when NERD_MODEL_GGUF names another model.",
+			"The model variant: q1mtp (q1 with a multi-token-prediction head, 6.30 GB: generation 1.4-2.2x faster, ~0.75 GB more VRAM, 64K still fits 8 GB but tight), q1 (5.95 GB, fits 8 GB of VRAM at 64K context) or q2 (7.21 GB, 12 GB and up). Unset, it is q1mtp, but q1 for the Mac's own llama-server (NERD_LLAMA=host: the head is not tested with Metal yet). Not used when NERD_MODEL_GGUF names another model.",
 		apply: "up",
 		level: "user",
 	},

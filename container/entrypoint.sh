@@ -23,8 +23,8 @@
 #
 # Environment (all optional unless said):
 #   server:
-#   NERD_MODEL_VARIANT  q1 (Bonsai 2 PTQ1_0, 5.95 GB, default) | q2 (PQ2_0, 7.21 GB)
-#                       | q1mtp (q1 with an MTP head, 6.30 GB; container/model.sh)
+#   NERD_MODEL_VARIANT  q1mtp (Bonsai 2 PTQ1_0 with an MTP head, 6.30 GB, default;
+#                       container/model.sh) | q1 (PTQ1_0, 5.95 GB) | q2 (PQ2_0, 7.21 GB)
 #   NERD_MTP            auto (the head when the variant has one) | on | off
 #   NERD_MTP_DRAFT      tokens the head drafts per step (1)
 #   NERD_MODEL_GGUF     another GGUF instead of a variant: hf:<owner>/<repo>/<file>.gguf[@rev]

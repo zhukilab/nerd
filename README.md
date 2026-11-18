@@ -325,7 +325,7 @@ checks it in the image (`docker run --rm --entrypoint /opt/nerd/test-browse.sh n
 
 ### Variants
 
-| | `q1` (default) | `q2` | `q1mtp` |
+| | `q1` (default on a Mac's own server) | `q2` | `q1mtp` (default) |
 |---|---|---|---|
 | file | `Ternary-Bonsai-2-27B-PTQ1_0.gguf` | `Ternary-Bonsai-2-27B-PQ2_0.gguf` | `Ternary-Bonsai-2-27B-PTQ1_0-mtp-lean.gguf`: q1 byte for byte plus Qwen 3.8's multi-token-prediction head (a community graft, `container/model.sh`) |
 | first-start download | 5.95 GB | 7.21 GB | 6.30 GB |

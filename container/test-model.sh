@@ -18,6 +18,18 @@ sel() { unset NERD_MODEL_GGUF NERD_MODEL_FILE NERD_MODEL_ALIAS NERD_MTP NERD_MTP
 sel q1;    eq "q1 repo" "$repo" prism-ml/Ternary-Bonsai-2-27B-gguf; eq "q1 rev" "$rev" main; eq "q1 mtp" "$mtp" 0
            eq "q1 alias" "$alias" bonsai2-q1; has "q1 no head" "$(nerd_server_args)" draft-mtp 0
 sel q2;    eq "q2 alias" "$alias" bonsai2-q2; eq "q2 mtp" "$mtp" 0
+sel "";    eq "default variant is q1mtp" "$file" Ternary-Bonsai-2-27B-PTQ1_0-mtp-lean.gguf; eq "default mtp" "$mtp" 1
+           eq "default alias" "$alias" bonsai2-q1
+# tools/lib.sh's default: q1mtp, but q1 on the Mac's own server (NERD_LLAMA=host)
+# shellcheck source=tools/lib.sh
+. "$here/../tools/lib.sh"
+for case_ in container:q1mtp host:q1 remote:q1mtp; do
+  ( unset NERD_MODEL_VARIANT; NERD_LLAMA=${case_%%:*}; nerd_settings >/dev/null 2>&1
+    [ "$NERD_MODEL_VARIANT" = "${case_#*:}" ] ) && echo "ok   lib default with NERD_LLAMA=${case_%%:*}" \
+    || { echo "FAIL lib default with NERD_LLAMA=${case_%%:*}: want ${case_#*:}"; fail=1; }
+done
+( NERD_MODEL_VARIANT=q2; NERD_LLAMA=host; nerd_settings >/dev/null 2>&1; [ "$NERD_MODEL_VARIANT" = q2 ] ) \
+  && echo "ok   lib keeps an explicit variant" || { echo "FAIL lib keeps an explicit variant"; fail=1; }
 sel q1mtp; eq "q1mtp repo" "$repo" sudoingx/Ternary-Bonsai-2-27B-PTQ1_0-MTP-GGUF
            eq "q1mtp rev pinned" "${#rev}" 40; eq "q1mtp sha" "${#sha}" 64; eq "q1mtp size" "$size" 6297658848
            eq "q1mtp alias is q1's" "$alias" bonsai2-q1; eq "q1mtp mtp" "$mtp" 1

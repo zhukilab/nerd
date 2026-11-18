@@ -80,7 +80,7 @@ RUN useradd -m -u 1000 -s /bin/bash nerd \
  && mkdir -p /models /logs && chown nerd:nerd /models /logs
 # 0.0.0.0: the agent is another container. ./UP publishes no port for it; with
 # a shared network namespace (NERD_NETWORK=container:...) it passes 127.0.0.1.
-ENV PATH=/opt/llama:$PATH NERD_MODEL_VARIANT=q1 NERD_HOST=0.0.0.0 LANG=C.UTF-8
+ENV PATH=/opt/llama:$PATH NERD_MODEL_VARIANT=q1mtp NERD_HOST=0.0.0.0 LANG=C.UTF-8
 USER nerd
 VOLUME ["/models"]
 EXPOSE 8080

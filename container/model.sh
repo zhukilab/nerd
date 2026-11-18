@@ -16,7 +16,7 @@
 # 64K context still fits 8 GB.
 nerd_model() {
   repo=prism-ml/Ternary-Bonsai-2-27B-gguf rev=main mtp=0
-  case "${1:-q1}" in
+  case "${1:-q1mtp}" in
     q1) file=Ternary-Bonsai-2-27B-PTQ1_0.gguf; size=5946648928
         sha=53107f530aa52eb00912263ab1ee29bd199261c87cd7b4ad4ca1318c1fe33ee3 ;;
     q2) file=Ternary-Bonsai-2-27B-PQ2_0.gguf; size=7206168928
@@ -47,7 +47,7 @@ nerd_model() {
 # Prints why and returns 1 on a bad setting.
 # shellcheck disable=SC2034  # as_is, name, alias, mtp: read by the callers
 nerd_model_select() {
-  local spec=${NERD_MODEL_GGUF:-${NERD_MODEL_FILE:-}} path v=${NERD_MODEL_VARIANT:-q1}
+  local spec=${NERD_MODEL_GGUF:-${NERD_MODEL_FILE:-}} path v=${NERD_MODEL_VARIANT:-q1mtp}
   rev=main as_is=0 mtp=0
   if [ -z "$spec" ]; then
     nerd_model "$v" || { echo "NERD_MODEL_VARIANT must be q1, q2 or q1mtp, not '${NERD_MODEL_VARIANT}'"; return 1; }
@@ -113,7 +113,7 @@ nerd_server_args() {
     on) spec=on ;;
   esac
   [ -n "$spec" ] && spec=" --spec-type draft-mtp --spec-draft-n-max ${NERD_MTP_DRAFT:-1}"
-  local v=${NERD_MODEL_VARIANT:-q1}
+  local v=${NERD_MODEL_VARIANT:-q1mtp}
   echo "--alias ${alias:-bonsai2-${v%mtp}} -c ${NERD_CTX:-65536} -ctk ${NERD_KV:-q4_0} -ctv ${NERD_KV:-q4_0}" \
     "-ngl ${NERD_NGL:-99} -fa on -np ${NERD_SLOTS:-1} --cache-ram ${NERD_CACHE_RAM:-4096} --jinja$spec"
 }

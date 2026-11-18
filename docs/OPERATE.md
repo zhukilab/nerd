@@ -93,7 +93,7 @@ the line that is there keeps the file readable.
 | `NERD_GPU` | `auto` | `cdi`, `gpus` or `auto` |
 | `NERD_LLAMA` | `auto` | `container` (Linux), `host` (macOS: llama-server on the machine, MACOS.md), `mlx` (macOS: mlx-vlm's server, the model in MLX format, MACOS.md) or `remote` (a server on another machine, below) |
 | `NERD_MODEL` | what the server serves | the model the agent asks for; required with Ollama, which serves many (`ollama list`) |
-| `NERD_MODEL_VARIANT` | `q1` | `q1`, `q2` or `q1mtp` (q1 with a multi-token-prediction head: generation 1.4-2.2x faster, ~750 MiB more VRAM; 64K fits 8 GB, tightly) |
+| `NERD_MODEL_VARIANT` | `q1mtp` (`q1` with `NERD_LLAMA=host`) | `q1mtp` (q1 with a multi-token-prediction head: generation 1.4-2.2x faster, ~750 MiB more VRAM; 64K fits 8 GB, tightly; `NERD_MTP=off` if it does not), `q1` or `q2` |
 | `NERD_MTP` | `auto` | speculative decoding with the model's MTP head: `auto` (when the variant has one), `on` (any model; a `NERD_MODEL_GGUF` with a head), `off`; `NERD_MTP_DRAFT` tokens per step (1) |
 | `NERD_MODEL_GGUF` | none | another GGUF: `hf:<owner>/<repo>/<file>.gguf[@rev]` (downloaded, sha256 checked; `NERD_MODEL_SHA256` pins it) or a file already in the models volume; named `NERD_MODEL_ALIAS` |
 | `NERD_MLX_MODEL` | Bonsai 2, MLX 2-bit, pinned | `NERD_LLAMA=mlx`: `<owner>/<repo>[@rev]` or a directory; `NERD_MLX_APC=0` turns off the server's prefix cache |

@@ -37,17 +37,19 @@ reports a mismatch.
 
 ## What the machine needs
 
-| | q1 (default) | q2 |
-|---|---|---|
-| model download (first start) | 5.95 GB | 7.21 GB |
-| GPU memory, context 64K (default), KV cache q4_0 | about 7.2 GiB | weights alone 6.7 GiB: 12 GB card and up (untested) |
-| GPU memory, context 32K | about 6.5 GiB | |
-| context 128K | does not fit 8 GB | |
-| tested | yes | no |
+| | q1mtp (default) | q1 (default on a Mac's own server) | q2 |
+|---|---|---|---|
+| model download (first start) | 6.30 GB | 5.95 GB | 7.21 GB |
+| GPU memory, context 64K (default), KV cache q4_0 | about 7.9 GiB: fits 8 GB, tightly | about 7.2 GiB | weights alone 6.7 GiB: 12 GB card and up (untested) |
+| GPU memory, context 32K | about 7.2 GiB | about 6.5 GiB | |
+| context 128K | does not fit 8 GB | does not fit 8 GB | |
+| tested | yes (generation 1.4-2.2x q1's) | yes | no |
 
 - **GPU memory** grows by about 23 KiB per token of context (KV cache q4_0).
-  On an 8 GB card Q1 at 64K leaves about 0.7 GiB; a desktop session on the same
-  card takes 200-500 MiB of that. If 64K does not fit, set `NERD_CTX=32768`.
+  q1mtp is q1 with a multi-token-prediction head that drafts tokens for the
+  model to check, ~750 MiB more. On an 8 GB card it measured 8005 of 8192 MiB at
+  64K with the desktop on; if the server is slow or does not start, set
+  `NERD_MTP=off` (it then runs exactly as q1) or `NERD_CTX=32768`.
   On GB10 the GPU uses the system's unified memory; there is no separate total.
 - **Disk:** the two images together are 4-6 GB (aarch64: the server 2.6 GB,
   the agent 1.45 GB; x86_64 somewhat more); the build pulls the CUDA devel
