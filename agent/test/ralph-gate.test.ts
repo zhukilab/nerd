@@ -69,7 +69,7 @@ test("askGate: an error exit and a gate that does not answer in time are pauses"
 
 const fail = (f: string[], tree?: string): RoundCheck => ({ failures: f, items: [], notes: [], planned: true, tree });
 
-test("decide, progress work: the same failures go on while the tree changes; two rounds with neither changed stop", () => {
+test("decide, progress work: the same failures go on while the tree changes; two rounds with neither changed pause", () => {
 	const o = { ...ralphOptions({ NERD_RALPH_PROGRESS: "work", NERD_RALPH_ROUNDS: "100" }) };
 	assert.equal(o.progress, "work");
 	const st = newState(0);
@@ -77,9 +77,15 @@ test("decide, progress work: the same failures go on while the tree changes; two
 	assert.equal(decide(st, fail(["b", "a"], "t2"), "t", undefined, o, 2).kind, "next", "the code moved on");
 	assert.equal(decide(st, fail(["a", "b"], "t3"), "t", undefined, o, 3).kind, "next");
 	assert.equal(decide(st, fail(["a", "b"], "t3"), "t", undefined, o, 4).kind, "next", "one round without a change is not yet a stall");
+	const before = st.round;
 	const d = decide(st, fail(["a", "b"], "t3"), "t", undefined, o, 5);
-	assert.equal(d.kind, "stop");
-	if (d.kind === "stop") assert.match(d.report, /two rounds in a row changed neither the failing checks nor the committed code/);
+	assert.equal(d.kind, "pause", "a stall of a long run is a pause for the operator, not the end");
+	if (d.kind === "pause") {
+		assert.equal(d.stalled, true);
+		assert.match(d.report, /two rounds in a row changed neither the failing checks nor the committed code \(a stall/);
+		assert.match(d.message ?? "", new RegExp(`\\[ralph round ${before + 1}/100\\]`), "the round to send on a resume");
+	}
+	assert.equal(st.stalls, 0, "a resume starts counting again");
 	const st2 = newState(0);
 	decide(st2, fail(["a"], "t1"), "t", undefined, o, 1);
 	decide(st2, fail(["a"], "t1"), "t", undefined, o, 2);
@@ -100,6 +106,50 @@ test("decide, progress work: no amend round while the code moves on; only when i
 	assert.equal(still.kind, "next");
 	assert.equal(st.amendUsed, true, "same red checks and the same code: the checks may be wrong");
 	if (still.kind === "next") assert.match(still.message, /A check can be wrong about the code/);
+});
+
+test("decide, progress work: one correction per check, not per task", () => {
+	const o = { maxRounds: 100, maxMs: 0, progress: "work" as const };
+	const st = newState(0, o);
+	assert.equal(st.perClaim, true);
+	const item = (claim: string) => ({ claim, cmd: `node ${claim}.js`, ok: false, why: "exited with 1", rc: 1 });
+	const c = (claims: string[], tree: string): RoundCheck => ({
+		failures: claims.map((x) => `Done when "${x}" — \`node ${x}.js\`: exited with 1`),
+		gate: [],
+		items: claims.map(item),
+		notes: [],
+		planned: true,
+		tree,
+	});
+	decide(st, c(["a"], "t1"), "t", undefined, o, 1);
+	const first = decide(st, c(["a"], "t1"), "t", undefined, o, 2);
+	assert.equal(first.kind, "next");
+	assert.deepEqual([...(st.amendable ?? [])], ["a"]);
+	if (first.kind === "next") assert.match(first.message, /Only these checks may be corrected now, each once in the task: "a"/);
+	st.amendable = undefined; // checkRound takes (or drops) the correction
+	decide(st, c(["b"], "t2"), "t", undefined, o, 3);
+	const second = decide(st, c(["b"], "t2"), "t", undefined, o, 4);
+	assert.equal(second.kind, "next");
+	assert.deepEqual([...(st.amendable ?? [])], ["b"], "another check gets its own correction");
+	st.amendable = undefined;
+	decide(st, c(["a"], "t3"), "t", undefined, o, 5);
+	const again = decide(st, c(["a"], "t3"), "t", undefined, o, 6);
+	const offered = st.amendable as Set<string> | undefined;
+	assert.ok(again.kind !== "next" || !offered?.has("a"), "a check corrected once is not offered again");
+	const ds = newState(0);
+	assert.equal(ds.perClaim, undefined, "the default stays one per task");
+});
+
+test("runRalphHeadless, progress work: a stall is saved as a pause with its round, marked stalled", async () => {
+	const session = { compact: async () => {}, prompt: async () => {} };
+	const paused: { reason: string; next: string; stalled?: boolean }[] = [];
+	const o = { maxRounds: 100, maxMs: 0, progress: "work" as const };
+	const d = await runRalphHeadless(session, "/nowhere", "t", o, () => {}, async () => fail(["x"], "same-tree"), { state: newState(0, o), onPause: (p) => paused.push(p) });
+	assert.equal(d.kind, "pause");
+	assert.equal(paused.length, 1);
+	assert.equal(paused[0].stalled, true);
+	assert.match(paused[0].reason, /^Paused after round \d+: two rounds in a row/);
+	assert.match(paused[0].next, /\[ralph round \d+\/100\]/);
 });
 
 test("decide, default progress: the same failures twice still stop at once", () => {

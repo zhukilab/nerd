@@ -82,10 +82,36 @@ export interface RalphState {
 	stalls?: number;
 	/** How long the first delivery and each round took (ralph-gate.ts tells the gate). */
 	roundsMs?: number[];
+	/**
+	 * A long task (progress "work", #978 addendum, the operator 2026-11-20): one correction per check
+	 * instead of one per task. On the live check a task's one amend went to an early correction; a
+	 * second wrong check then stayed red for good and the loop ended "not done" on code the hidden
+	 * checks passed 82/82 — over a day of work, one wrong check could end the run on its first night.
+	 */
+	perClaim?: boolean;
+	/** With perClaim: the claims that have had their correction (offered in an amend round, or taken early). */
+	amendOffered?: Set<string>;
 }
 
-export function newState(now = Date.now(), opts?: Pick<RalphOptions, "amendGuard">): RalphState {
-	return { round: 0, started: now, failedHash: new Map(), amended: new Map(), amendGuard: opts?.amendGuard };
+export function newState(now = Date.now(), opts?: Pick<RalphOptions, "amendGuard" | "progress">): RalphState {
+	const s: RalphState = { round: 0, started: now, failedHash: new Map(), amended: new Map(), amendGuard: opts?.amendGuard };
+	if (opts?.progress === "work") {
+		s.perClaim = true;
+		s.amendOffered = new Set();
+	}
+	return s;
+}
+
+/** Whether `claim`'s check may still be corrected: once per task, or once per check (perClaim). */
+export function canAmend(s: RalphState, claim: string): boolean {
+	return s.perClaim ? !s.amendOffered?.has(claim) : !s.amendUsed;
+}
+
+function useAmend(s: RalphState, claims: string[]) {
+	if (s.perClaim) {
+		s.amendOffered ??= new Set();
+		for (const c of claims) s.amendOffered.add(c);
+	} else s.amendUsed = true;
 }
 
 export interface RoundCheck {
@@ -194,10 +220,10 @@ export async function checkRound(cwd: string, state: RalphState, run = runDoneWh
 	// 2.5 h there. Taken on the amend round's own terms: the tests and the gate pass, the committed
 	// command failed in an earlier check, the claim's words are kept, the new command passes on
 	// this commit (and, with the guard, on the code of the first "done"). It uses the task's one amend.
-	if (!state.amendUsed && gate.length === 0) {
+	if ((state.perClaim || !state.amendUsed) && gate.length === 0) {
 		for (let k = 0; k < items.length; k++) {
 			const r = items[k];
-			if (r.ok || r.unusable || !r.cmd || !failedBefore.has(r.cmd)) continue;
+			if (r.ok || r.unusable || !r.cmd || !failedBefore.has(r.cmd) || !canAmend(state, r.claim)) continue;
 			const to = current.find((c) => c.claim === r.claim && c.cmd && c.cmd !== r.cmd)?.cmd;
 			const f = frozen.find((x) => x.claim === r.claim);
 			if (!to || !f) continue;
@@ -213,7 +239,7 @@ export async function checkRound(cwd: string, state: RalphState, run = runDoneWh
 			state.amended.set(r.claim, { from: r.cmd, to });
 			notes.push(`"${r.claim}": its check was corrected by the model after the tests passed — was \`${r.cmd}\`, now \`${to}\`.`);
 			items[k] = now;
-			state.amendUsed = true;
+			useAmend(state, [r.claim]);
 		}
 	}
 	// A check that is unusable itself (no command, cannot fail, does not parse)
@@ -231,17 +257,23 @@ export async function checkRound(cwd: string, state: RalphState, run = runDoneWh
 	return { failures, gate, items, notes, planned: frozen.length > 0, plan: committed !== undefined, search, head, tree };
 }
 
-export function amendMessage(task: string, round: number, max: number, check: RoundCheck): string {
+export function amendMessage(task: string, round: number, max: number, check: RoundCheck, only?: string[]): string {
+	// perClaim (a long run): each check has its one correction; those that had theirs are not offered.
+	const allowed = only?.length ? `\nOnly these checks may be corrected now, each once in the task: ${only.map((c) => `"${c}"`).join("; ")}.` : "";
 	return `[ralph round ${round}/${max}] The project's tests and the gate pass, but these Done when checks failed twice in a row:
 ${check.failures.map((f) => `- ${f}`).join("\n")}
 The task in the operator's words: ${task}
 A check can be wrong about the code rather than the code wrong: the module's path or the shape of its export, a value compared the wrong way (=== between arrays or objects is always false), words a test runner does not print (node --test prints "# pass", not "passing"), an expectation the task does not ask for or contradicts (the task outranks the check). Run each check and read its output. Then, for each:
 - if its claim is false, fix the code;
 - if the check is wrong, correct its command in ${PLAN_FILE}: keep the claim's words exactly and change only the command, so that it passes on correct code and still fails when the claim is false. This is allowed once, in this round only; the old and the new command go to the operator.
-Commit, and say in one line per corrected check why it was wrong.`;
+Commit, and say in one line per corrected check why it was wrong.${allowed}`;
 }
 
-export type Decision = { kind: "done" | "stop" | "pause"; report: string } | { kind: "next"; message: string };
+export type Decision =
+	| { kind: "done" | "stop"; report: string }
+	/** A pause: by the gate, or (stalled) a long run's stall; `message` is the round to send on a resume. */
+	| { kind: "pause"; report: string; message?: string; stalled?: boolean }
+	| { kind: "next"; message: string };
 
 export function roundMessage(task: string, remark: string | undefined, round: number, max: number, check: RoundCheck, fresh = false): string {
 	const before = fresh
@@ -298,22 +330,33 @@ export function decide(state: RalphState, check: RoundCheck, task: string, remar
 	// In a long task (progress "work") the same red checks with the code moving on are the work going
 	// on, not a sign the checks are wrong: the amend round only when the code did not move either.
 	const amendWhen = sameFailures && (opts.progress !== "work" || (check.tree !== undefined && check.tree === state.lastTree));
-	if (amendWhen && !state.amendUsed && check.gate?.length === 0 && wrong.length && inBudget) {
-		state.amendUsed = true;
-		state.amendable = new Set(wrong.map((i) => i.claim));
+	const eligible = wrong.filter((i) => canAmend(state, i.claim));
+	if (amendWhen && eligible.length && check.gate?.length === 0 && inBudget) {
+		const claims = eligible.map((i) => i.claim);
+		useAmend(state, claims);
+		state.amendable = new Set(claims);
 		state.round += 1;
 		state.lastTree = check.tree;
-		return { kind: "next", message: amendMessage(task, state.round, opts.maxRounds, check) };
+		return { kind: "next", message: amendMessage(task, state.round, opts.maxRounds, check, state.perClaim ? claims : undefined) };
 	}
 	if (opts.progress === "work") {
 		// #978: a long task keeps the same red checks for many rounds while the code moves on.
 		const stalled = sameFailures && check.tree !== undefined && check.tree === state.lastTree;
 		state.stalls = stalled ? (state.stalls ?? 0) + 1 : 0;
-		if (state.stalls >= 2)
+		// #978 addendum (the operator, 2026-11-20): a stall in a long run is a pause for the operator, not
+		// the end — the run is saved with the round it would have started, and goes on only when resumed.
+		if (state.stalls >= 2) {
+			state.stalls = 0;
+			state.round += 1;
+			state.lastKey = key;
+			state.lastTree = check.tree;
 			return {
-				kind: "stop",
-				report: `[ralph] Stopped after round ${state.round}: two rounds in a row changed neither the failing checks nor the committed code (no progress).${left}${checkedReport(check)}`,
+				kind: "pause",
+				stalled: true,
+				report: `[ralph] Paused after round ${state.round - 1}: two rounds in a row changed neither the failing checks nor the committed code (a stall; the operator decides whether it goes on).${left}${checkedReport(check)}`,
+				message: roundMessage(task, remark, state.round, opts.maxRounds, check, opts.fresh),
 			};
+		}
 	} else if (sameFailures) return { kind: "stop", report: `[ralph] Stopped after round ${state.round}: the same checks failed twice in a row (no progress).${left}${checkedReport(check)}` };
 	if (state.round >= opts.maxRounds) return { kind: "stop", report: `[ralph] Stopped: ${opts.maxRounds} round(s) used.${left}${checkedReport(check)}` };
 	if (opts.maxMs && now - state.started > opts.maxMs) return { kind: "stop", report: `[ralph] Stopped: ${Math.round(opts.maxMs / 60_000)} min used.${left}${checkedReport(check)}` };
@@ -336,7 +379,7 @@ export interface RalphControl {
 	/** The next turn's work clock as the gate set it; undefined: back to NERD_WORK_MAX_MINUTES. */
 	setWorkMinutes?: (minutes: number | undefined) => void;
 	/** On a pause, before the loop returns: the round that was about to start and who takes it. */
-	onPause?: (p: { reason: string; next: string; role: Role }) => void;
+	onPause?: (p: { reason: string; next: string; role: Role; stalled?: boolean }) => void;
 	now?: () => number;
 }
 
@@ -383,6 +426,8 @@ export async function runRalphHeadless(
 		const d = decide(state, c, task, undefined, d0, now());
 		if (d.kind !== "next") {
 			log({ round: state.round, kind: d.kind, failures: c.failures.map(firstLine), notes: c.notes });
+			// A long run's stall (decide): saved like the gate's pause, with the round it would have started.
+			if (d.kind === "pause") ctl.onPause?.({ reason: firstLine(d.report).replace(/^\[ralph\] /, ""), next: d.message ?? "", role: "worker", stalled: d.stalled });
 			await session.role?.("worker");
 			return d;
 		}

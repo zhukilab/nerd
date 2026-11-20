@@ -748,7 +748,7 @@ export const SETTINGS: Setting[] = [
 		kind: { type: "choice", choices: ["failures", "work"] },
 		default: "failures",
 		summary:
-			"When the Ralph loop sees no progress. failures: the same checks failed twice in a row. work (a long task): two rounds in a row changed neither the failing checks nor the committed code.",
+			"When the Ralph loop sees no progress. failures: the same checks failed twice in a row. work (a long task): two rounds in a row changed neither the failing checks nor the committed code, and then the run pauses (exit 75, marked stalled) instead of ending; each check's command may be corrected once.",
 		apply: "reload",
 		level: "advanced",
 	},

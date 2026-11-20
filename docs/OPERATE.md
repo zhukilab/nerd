@@ -420,8 +420,12 @@ The gate shipped with the agent works by the clock, in the window's time zone:
 Each turn gets the minutes left in the window less a reserve (the clock's
 15-minute grace and 10 for the checks); with less than 20 minutes left it
 pauses. `NERD_RALPH_PROGRESS=work` keeps a long task's loop going while the
-same checks stay red but the code moves on: it stops only after two rounds in a
-row that changed neither the failing checks nor the committed code.
+same checks stay red but the code moves on. Two rounds in a row that changed
+neither the failing checks nor the committed code are a stall: the run
+**pauses** (exit 75, the state marked `stalled`) for you to look at, and goes
+on only when you resume it. In this mode each Done when check may have its
+command corrected once (not once per task): one wrong check in a frozen plan
+must not end a run of days.
 
 [`acceptance/check.sh`](../acceptance/check.sh) checks a result against the
 acceptance criteria of the reference task; see the README.

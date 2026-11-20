@@ -114,6 +114,8 @@ export function askGate(cmd: string, info: GateInfo, env: Record<string, string 
 export interface SavedRun {
 	version: 1;
 	status: "paused" | "ended";
+	/** Paused by a stall of a long run, not by the gate: for the operator to look at before a resume. */
+	stalled?: boolean;
 	/** The task in the operator's words. */
 	task: string;
 	/** Why it paused (the gate's reason, or the signal). */
@@ -130,6 +132,8 @@ export interface SavedRun {
 		lastKey?: string;
 		lastTree?: string;
 		stalls?: number;
+		perClaim?: boolean;
+		amendOffered?: string[];
 		failedHash: [string, string][];
 		amendable?: string[];
 		amendUsed?: boolean;
@@ -150,11 +154,12 @@ export function statePath(cwd: string, env: Record<string, string | undefined> =
 
 export function toSaved(
 	state: RalphState,
-	run: { task: string; reason: string; status: SavedRun["status"]; activeMs: number; roundsMs: number[]; next?: string; role?: "worker" | "planner"; now?: Date },
+	run: { task: string; reason: string; status: SavedRun["status"]; activeMs: number; roundsMs: number[]; next?: string; role?: "worker" | "planner"; stalled?: boolean; now?: Date },
 ): SavedRun {
 	return {
 		version: 1,
 		status: run.status,
+		stalled: run.stalled || undefined,
 		task: run.task,
 		reason: run.reason,
 		pausedAt: (run.now ?? new Date()).toISOString(),
@@ -167,6 +172,8 @@ export function toSaved(
 			lastKey: state.lastKey,
 			lastTree: state.lastTree,
 			stalls: state.stalls,
+			perClaim: state.perClaim,
+			amendOffered: state.amendOffered ? [...state.amendOffered] : undefined,
 			failedHash: [...state.failedHash],
 			amendable: state.amendable ? [...state.amendable] : undefined,
 			amendUsed: state.amendUsed,
@@ -186,6 +193,8 @@ export function fromSaved(s: SavedRun, now = Date.now()): RalphState {
 		lastKey: st.lastKey,
 		lastTree: st.lastTree,
 		stalls: st.stalls,
+		perClaim: st.perClaim,
+		amendOffered: st.amendOffered ? new Set(st.amendOffered) : undefined,
 		failedHash: new Map(st.failedHash),
 		amendable: st.amendable ? new Set(st.amendable) : undefined,
 		amendUsed: st.amendUsed,
@@ -221,7 +230,7 @@ export function loadRun(path: string): SavedRun | { error: string } {
 export function resumeMessage(s: SavedRun): string {
 	// The turns' sum: activeMs is the loop's clock, which starts after the first delivery.
 	const worked = s.roundsMs.reduce((a, b) => a + b, 0);
-	const head = `[ralph: resumed] The run was paused at ${s.pausedAt} (${s.reason}) after ${minutes(worked)} min of active work, and goes on now in a new session: nothing of the earlier conversation is here, and the files are what counts — the code, PLAN.md (its Done when items are the checks), notes/, git log. Read them first.`;
+	const head = `[ralph: resumed] The run was paused at ${s.pausedAt} (${s.reason})${s.stalled ? "; the operator looked at the stall and lets it go on — try another way than the last rounds did" : ""} after ${minutes(worked)} min of active work, and goes on now in a new session: nothing of the earlier conversation is here, and the files are what counts — the code, PLAN.md (its Done when items are the checks), notes/, git log. Read them first.`;
 	return s.next
 		? `${head}\nThe round that was about to start when it paused:\n\n${s.next}`
 		: `${head}\nIt stopped in the middle of a turn; what was not committed is committed now by the harness if it was there. Carry on with the task: ${s.task}`;

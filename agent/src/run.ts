@@ -278,11 +278,11 @@ async function main() {
 	// The state's last word is said (ended, or paused by the gate with its round): a signal after it saves nothing.
 	let finalSaved = false;
 	/** Saves the loop's state; a failure is reported, never thrown (the exit code must survive it). */
-	const save = (s: RalphState, run: { reason: string; status: SavedRun["status"]; next?: string; role?: Role; partialMs?: number }) => {
+	const save = (s: RalphState, run: { reason: string; status: SavedRun["status"]; next?: string; role?: Role; partialMs?: number; stalled?: boolean }) => {
 		try {
 			const path = statePath(cwd);
 			const roundsMs = [...(s.roundsMs ?? []), ...(run.partialMs !== undefined ? [run.partialMs] : [])];
-			saveRun(path, toSaved(s, { task, reason: run.reason, status: run.status, activeMs: Date.now() - s.started, roundsMs, next: run.next, role: run.role }));
+			saveRun(path, toSaved(s, { task, reason: run.reason, status: run.status, activeMs: Date.now() - s.started, roundsMs, next: run.next, role: run.role, stalled: run.stalled }));
 			return path;
 		} catch (e) {
 			process.stdout.write(`\n[the loop's state NOT saved (${run.status}): ${(e as Error).message}]\n`);
@@ -439,7 +439,7 @@ async function main() {
 						try {
 							sha = commitWork(cwd, 0, `Work in progress at a pause of the run (${p.reason}), committed by the harness`);
 						} catch {}
-						const path = save(st, { reason: p.reason, status: "paused", next: p.next, role: p.role });
+						const path = save(st, { reason: p.reason, status: "paused", next: p.next, role: p.role, stalled: p.stalled });
 						finalSaved = !!path;
 						if (path) process.stdout.write(`\n[pause: the loop's state saved to ${path}${sha ? `, the work committed as ${sha}` : ""}]\n`);
 					},
