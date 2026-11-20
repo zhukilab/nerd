@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 import { test } from "node:test";
-import { minuteOfDay, parseHhmm, windowDecision, windowOptions } from "../src/gate-window.ts";
+import { minutesUntil, minuteOfDay, parseHhmm, windowDecision, windowOptions } from "../src/gate-window.ts";
 
 const night = { start: 23 * 60, end: 7 * 60, tz: "Europe/Berlin", reserve: 25, minTurn: 20 };
 // 2026-11-20 is CET, UTC+1.
@@ -24,6 +24,15 @@ test("gate-window: inside a window over midnight, a turn of the minutes left les
 	assert.equal(windowDecision(at("05:15"), night).decision, "continue", "45 min left: a turn of 20");
 	assert.match(windowDecision(at("08:00"), night).reason, /09:00 Europe\/Berlin is outside the window 23:00-07:00/);
 	assert.equal(windowDecision(at("21:59"), night).decision, "pause", "22:59 local");
+});
+
+test("gate-window: the minutes left are real minutes on the nights the clocks change", () => {
+	// 2026-03-29, Europe/Berlin: 02:00 CET becomes 03:00 CEST. 01:30 local is 00:30Z; 07:00 CEST is 05:00Z.
+	assert.equal(minutesUntil(new Date("2026-03-29T00:30:00Z"), 7 * 60, "Europe/Berlin"), 270);
+	// 2026-10-25: 03:00 CEST becomes 02:00 CET. 01:30 CEST is 23:30Z the day before; 07:00 CET is 06:00Z.
+	assert.equal(minutesUntil(new Date("2026-10-24T23:30:00Z"), 7 * 60, "Europe/Berlin"), 390);
+	const a = windowDecision(new Date("2026-03-29T00:30:00Z"), night);
+	assert.equal(a.decision === "continue" && a.workMinutes, 245);
 });
 
 test("gate-window: a window within one day", () => {

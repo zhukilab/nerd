@@ -295,7 +295,10 @@ export function decide(state: RalphState, check: RoundCheck, task: string, remar
 	const wrong = check.items.filter((i) => !i.ok && !i.unusable && i.cmd);
 	const inBudget = state.round < opts.maxRounds && !(opts.maxMs && now - state.started > opts.maxMs);
 	const sameFailures = key === state.lastKey;
-	if (sameFailures && !state.amendUsed && check.gate?.length === 0 && wrong.length && inBudget) {
+	// In a long task (progress "work") the same red checks with the code moving on are the work going
+	// on, not a sign the checks are wrong: the amend round only when the code did not move either.
+	const amendWhen = sameFailures && (opts.progress !== "work" || (check.tree !== undefined && check.tree === state.lastTree));
+	if (amendWhen && !state.amendUsed && check.gate?.length === 0 && wrong.length && inBudget) {
 		state.amendUsed = true;
 		state.amendable = new Set(wrong.map((i) => i.claim));
 		state.round += 1;
@@ -326,6 +329,8 @@ export interface RalphControl {
 	state?: RalphState;
 	/** When the delivery before the first check started (default: state.started). */
 	turnStarted?: number;
+	/** Called once a turn's time is in state.roundsMs (a signal's save must not count it again). */
+	turnRecorded?: () => void;
 	/** Asked before each next round (ralph-gate.ts askGate). */
 	gate?: (info: GateInfo) => GateAnswer;
 	/** The next turn's work clock as the gate set it; undefined: back to NERD_WORK_MAX_MINUTES. */
@@ -373,6 +378,7 @@ export async function runRalphHeadless(
 			return { kind: "stop", report: `[ralph] Stopped after round ${state.round}: the model request failed (${err}); the work was not checked again.` };
 		}
 		state.roundsMs.push(Math.max(0, now() - turnStarted));
+		ctl.turnRecorded?.();
 		const c = await check(cwd, state);
 		const d = decide(state, c, task, undefined, d0, now());
 		if (d.kind !== "next") {
@@ -385,7 +391,7 @@ export async function runRalphHeadless(
 		if (ctl.gate) {
 			const a = ctl.gate({
 				round: state.round,
-				activeMs: now() - state.started,
+				activeMs: state.roundsMs.reduce((x, y) => x + y, 0),
 				roundsMs: state.roundsMs,
 				budgetMs: opts.maxMs,
 				failing: c.failures.length,

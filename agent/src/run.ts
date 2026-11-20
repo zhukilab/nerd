@@ -272,26 +272,36 @@ async function main() {
 	let session = await makeSession(withPlanStep);
 	// The Ralph loop's state: a resumed run's from the start, a new run's once the loop starts.
 	let loopState: RalphState | undefined = saved ? fromSaved(saved) : undefined;
-	// When the current turn of work started (the opening, then each round's prompt).
-	let turnStartedAt = Date.now();
+	// When the current turn of work started (the opening, then each round's prompt); undefined once the
+	// loop has counted the turn in its roundsMs.
+	let turnStartedAt: number | undefined = Date.now();
+	// The state's last word is said (ended, or paused by the gate with its round): a signal after it saves nothing.
+	let finalSaved = false;
+	/** Saves the loop's state; a failure is reported, never thrown (the exit code must survive it). */
 	const save = (s: RalphState, run: { reason: string; status: SavedRun["status"]; next?: string; role?: Role; partialMs?: number }) => {
-		const path = statePath(cwd);
-		const roundsMs = [...(s.roundsMs ?? []), ...(run.partialMs !== undefined ? [run.partialMs] : [])];
-		saveRun(path, toSaved(s, { task, reason: run.reason, status: run.status, activeMs: Date.now() - s.started, roundsMs, next: run.next, role: run.role }));
-		return path;
+		try {
+			const path = statePath(cwd);
+			const roundsMs = [...(s.roundsMs ?? []), ...(run.partialMs !== undefined ? [run.partialMs] : [])];
+			saveRun(path, toSaved(s, { task, reason: run.reason, status: run.status, activeMs: Date.now() - s.started, roundsMs, next: run.next, role: run.role }));
+			return path;
+		} catch (e) {
+			process.stdout.write(`\n[the loop's state NOT saved (${run.status}): ${(e as Error).message}]\n`);
+			return undefined;
+		}
 	};
 	// #978: with the gate or a resume, a signal saves the loop's state, so the run can go on. A new run
 	// stopped before its plan was committed is not saved: a new start makes the plan again.
 	const saveOnSignal = (sig: NodeJS.Signals) => {
-		if (!(gate || resume) || !looping) return;
+		if (!(gate || resume) || !looping || finalSaved) return;
 		if (!loopState && !planCommit(cwd)) return;
+		let sha: string | undefined;
 		try {
-			const sha = commitWork(cwd, 0, `Work in progress at ${sig}, committed by the harness`);
-			const path = save(loopState ?? newState(turnStartedAt), { reason: `stopped by ${sig}`, status: "paused", partialMs: Date.now() - turnStartedAt });
-			process.stdout.write(`[${sig}: the loop's state saved to ${path}${sha ? `, the work committed as ${sha}` : ""}; NERD_RALPH_RESUME=1 goes on]\n`);
-		} catch (e) {
-			process.stdout.write(`[${sig}: the loop's state not saved: ${(e as Error).message}]\n`);
-		}
+			sha = commitWork(cwd, 0, `Work in progress at ${sig}, committed by the harness`);
+		} catch {}
+		const st = loopState ?? newState(turnStartedAt ?? Date.now(), ralphOptions());
+		const partialMs = turnStartedAt !== undefined ? Date.now() - turnStartedAt : undefined;
+		const path = save(st, { reason: `stopped by ${sig}`, status: "paused", role: st.amendable ? "planner" : "worker", partialMs });
+		if (path) process.stdout.write(`[${sig}: the loop's state saved to ${path}${sha ? `, the work committed as ${sha}` : ""}; NERD_RALPH_RESUME=1 goes on]\n`);
 	};
 	// SIGINT/SIGTERM (a manager stopping the run, docker stop): the turn is aborted and the
 	// run ends as the finally below would, not with Node's default death mid-turn.
@@ -421,10 +431,17 @@ async function main() {
 					setWorkMinutes: (m) => {
 						hooks.turnMinutes = m;
 					},
+					turnRecorded: () => {
+						turnStartedAt = undefined;
+					},
 					onPause: (p) => {
-						const sha = commitWork(cwd, 0, `Work in progress at a pause of the run (${p.reason}), committed by the harness`);
+						let sha: string | undefined;
+						try {
+							sha = commitWork(cwd, 0, `Work in progress at a pause of the run (${p.reason}), committed by the harness`);
+						} catch {}
 						const path = save(st, { reason: p.reason, status: "paused", next: p.next, role: p.role });
-						process.stdout.write(`\n[pause: the loop's state saved to ${path}${sha ? `, the work committed as ${sha}` : ""}]\n`);
+						finalSaved = !!path;
+						if (path) process.stdout.write(`\n[pause: the loop's state saved to ${path}${sha ? `, the work committed as ${sha}` : ""}]\n`);
 					},
 				},
 			);
@@ -435,7 +452,7 @@ async function main() {
 				return;
 			}
 			// A run that may have been paused before ends its saved state, so it is not resumed again.
-			if ((gate || resume) && d.kind !== "next") save(st, { reason: d.kind === "done" ? "done" : d.report.split("\n")[0], status: "ended" });
+			if ((gate || resume) && d.kind !== "next") finalSaved = !!save(st, { reason: d.kind === "done" ? "done" : d.report.split("\n")[0], status: "ended" });
 			ralphDone = d.kind === "done";
 			ralphStopped = !ralphDone;
 		}

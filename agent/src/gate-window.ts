@@ -37,12 +37,23 @@ export function minuteOfDay(now: Date, tz?: string): number {
 	return get("hour") * 60 + get("minute");
 }
 
+/**
+ * Real minutes from `now` to the next time the wall clock in `tz` shows `end`. Not the wall-clock
+ * difference: on the night the clocks go forward, 01:30 to 07:00 is 270 minutes, not 330 (review of
+ * #978). Stepped a minute at a time; at most a day and an hour of steps.
+ */
+export function minutesUntil(now: Date, end: number, tz?: string): number {
+	const t0 = Math.floor(now.getTime() / 60_000) * 60_000;
+	for (let k = 1; k <= 1500; k++) if (minuteOfDay(new Date(t0 + k * 60_000), tz) === end) return k;
+	return (end - minuteOfDay(now, tz) + 1440) % 1440; // a zone that skips `end` that day: the wall clock's
+}
+
 export function windowDecision(now: Date, o: WindowOptions): WindowAnswer {
 	const m = minuteOfDay(now, o.tz);
 	const at = `${hhmm(m)}${o.tz ? ` ${o.tz}` : ""}`;
 	const inside = o.start <= o.end ? m >= o.start && m < o.end : m >= o.start || m < o.end;
 	if (!inside) return { decision: "pause", reason: `${at} is outside the window ${hhmm(o.start)}-${hhmm(o.end)}` };
-	const left = (o.end - m + 1440) % 1440;
+	const left = minutesUntil(now, o.end, o.tz);
 	const turn = left - o.reserve;
 	if (turn < o.minTurn) return { decision: "pause", reason: `${at}: ${left} min to ${hhmm(o.end)}, less than a turn of ${o.minTurn} min and the reserve of ${o.reserve}` };
 	return { decision: "continue", workMinutes: turn, reason: `${at}: ${left} min to ${hhmm(o.end)}, a turn of ${turn} min` };

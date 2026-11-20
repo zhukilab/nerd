@@ -87,6 +87,21 @@ test("decide, progress work: the same failures go on while the tree changes; two
 	assert.equal(st2.stalls, 0);
 });
 
+test("decide, progress work: no amend round while the code moves on; only when it stalls", () => {
+	const o = { maxRounds: 100, maxMs: 0, progress: "work" as const };
+	const items = [{ claim: "sorted", cmd: "node s.js", ok: false, why: "exited with 1", rc: 1 }];
+	const c = (tree: string): RoundCheck => ({ failures: ['Done when "sorted" — `node s.js`: exited with 1'], gate: [], items, notes: [], planned: true, tree });
+	const st = newState(0);
+	decide(st, c("t1"), "t", undefined, o, 1);
+	const moved = decide(st, c("t2"), "t", undefined, o, 2);
+	assert.equal(moved.kind, "next");
+	assert.equal(st.amendUsed, undefined, "same red checks, new code: a plain round");
+	const still = decide(st, c("t2"), "t", undefined, o, 3);
+	assert.equal(still.kind, "next");
+	assert.equal(st.amendUsed, true, "same red checks and the same code: the checks may be wrong");
+	if (still.kind === "next") assert.match(still.message, /A check can be wrong about the code/);
+});
+
 test("decide, default progress: the same failures twice still stop at once", () => {
 	const st = newState(0);
 	decide(st, fail(["a"], "t1"), "t", undefined, { maxRounds: 9, maxMs: 0 }, 1);

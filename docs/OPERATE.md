@@ -405,7 +405,10 @@ workspace's `.git` unless `NERD_RALPH_STATE` says where) and the run exits
 session: no plan step, the round that was about to start, the loop's budget in
 active time. With the gate or a resume, SIGTERM saves the state too. A run
 that ends (done, or stopped by the loop) marks the state ended, so it is not
-resumed again.
+resumed again. A new run the gate pauses before its first turn has done
+nothing and saved nothing (exit 75 all the same): start it again as new, not
+with `NERD_RALPH_RESUME=1`. In the TUI the gate is asked too, and a pause only
+stops the rounds; the TUI waits for the gate's answer (up to 60 s).
 
 The gate shipped with the agent works by the clock, in the window's time zone:
 
