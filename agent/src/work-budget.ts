@@ -59,13 +59,13 @@ export function timeUpSteer(minutes: number, committed?: string): string {
  * untracked too, node_modules and target/ left out, as the plan step's first commit). Returns
  * the short sha, or undefined: not a repository, nothing to commit, or the commit failed.
  */
-export function commitWork(cwd: string, minutes: number): string | undefined {
+export function commitWork(cwd: string, minutes: number, message?: string): string | undefined {
 	const git = (...a: string[]) => spawnSync("git", a, { cwd, encoding: "utf8", timeout: 30_000 });
 	if (git("rev-parse", "--is-inside-work-tree").status !== 0) return undefined;
 	if (!git("status", "--porcelain").stdout.trim()) return undefined;
 	git("add", "-A", "--", ".", ":!node_modules", ":!target");
 	const who = git("config", "user.name").stdout.trim() ? [] : ["-c", "user.name=nerd harness", "-c", "user.email=harness@localhost"];
-	const msg = `Work in progress at the work's time budget (${minutes} min), committed by the harness`;
+	const msg = message ?? `Work in progress at the work's time budget (${minutes} min), committed by the harness`;
 	if (git(...who, "commit", "-q", "--no-verify", "-m", msg).status !== 0) return undefined;
 	return git("rev-parse", "--short", "HEAD").stdout.trim() || undefined;
 }
@@ -73,7 +73,8 @@ export function commitWork(cwd: string, minutes: number): string | undefined {
 export function workBudget(
 	pi: ExtensionAPI,
 	opts: {
-		maxMinutes: number;
+		/** A number, or read at each new turn (#978: the round gate may set the next turn's minutes); 0: no clock this turn. */
+		maxMinutes: number | (() => number);
 		workTools: string[];
 		graceMinutes?: number;
 		now?: () => number;
@@ -85,6 +86,8 @@ export function workBudget(
 	const now = opts.now ?? Date.now;
 	const commit = opts.commit ?? commitWork;
 	const grace = opts.graceMinutes ?? WORK_GRACE_MINUTES;
+	const limit = () => (typeof opts.maxMinutes === "function" ? opts.maxMinutes() : opts.maxMinutes);
+	let max = limit();
 	let startedAt: number | undefined;
 	let noted = false;
 	let closed = false;
@@ -106,20 +109,21 @@ export function workBudget(
 		startedAt = undefined;
 		noted = false;
 		cut = false;
+		max = limit();
 		if (closed) pi.setActiveTools(opts.workTools);
 		closed = false;
 	});
 
 	pi.on("tool_result", (event, ctx) => {
-		if (closed || !working()) return; // the plan step, or closed
+		if (closed || !working() || !(max > 0)) return; // the plan step, closed, or no clock this turn
 		const t = now();
 		startedAt ??= t;
 		const minutes = (t - startedAt) / 60_000;
 		let note: string | undefined;
-		if (!noted && minutes >= opts.maxMinutes) {
+		if (!noted && minutes >= max) {
 			noted = true;
-			note = wrapUpNote(opts.maxMinutes);
-		} else if (noted && minutes >= opts.maxMinutes + grace) {
+			note = wrapUpNote(max);
+		} else if (noted && minutes >= max + grace) {
 			close();
 			note = toolsAwayNote(Math.round(minutes), commit(ctx?.cwd || process.cwd(), Math.round(minutes)));
 		}
@@ -135,9 +139,9 @@ export function workBudget(
 	});
 
 	pi.on("message_update", (_event, ctx) => {
-		if (cut || closed || startedAt === undefined) return;
+		if (cut || closed || startedAt === undefined || !(max > 0)) return;
 		const minutes = (now() - startedAt) / 60_000;
-		if (minutes < opts.maxMinutes + grace) return;
+		if (minutes < max + grace) return;
 		cut = true;
 		close();
 		const sha = commit(ctx?.cwd || process.cwd(), Math.round(minutes));

@@ -23,6 +23,8 @@ import { changedItems, type DoneItem, filesOf, frozenPlan, hashFiles, type ItemR
 import { checkedMode, type ModeState } from "./mode.ts";
 import { searchesInputs, searchTask } from "./plan-lint.ts";
 import { PLAN_FILE, planTask } from "./plan-step.ts";
+import { askGate, type GateAnswer, type GateInfo, gateCommand } from "./ralph-gate.ts";
+import { WORK_GRACE_MINUTES } from "./work-budget.ts";
 
 export function ralphOn(env = process.env): boolean {
 	return env.NERD_RALPH !== "0";
@@ -36,17 +38,26 @@ export interface RalphOptions {
 	amendGuard?: boolean;
 	/** NERD_RALPH_FRESH=1 (headless): each round in a new session instead of the compacted one. */
 	fresh?: boolean;
+	/**
+	 * NERD_RALPH_PROGRESS=work (#978, a long run): "no progress" is a round that changed neither the
+	 * failing checks nor the committed tree, twice in a row. The default, failures: the same failing
+	 * checks twice in a row stop the loop — right for a task of hours, wrong for a task of a day,
+	 * where every Done when item stays red for many rounds while the work goes on.
+	 */
+	progress?: "failures" | "work";
 }
 
 export function ralphOptions(env = process.env): RalphOptions {
 	const n = Number(env.NERD_RALPH_ROUNDS ?? 3);
 	const m = Number(env.NERD_RALPH_MINUTES ?? 0);
-	return {
+	const o: RalphOptions = {
 		maxRounds: Number.isFinite(n) && n >= 0 ? n : 3,
 		maxMs: Number.isFinite(m) && m > 0 ? m * 60_000 : 0,
 		amendGuard: env.NERD_RALPH_AMEND_GUARD === "1",
 		fresh: env.NERD_RALPH_FRESH === "1",
 	};
+	if (env.NERD_RALPH_PROGRESS?.trim() === "work") o.progress = "work";
+	return o;
 }
 
 export interface RalphState {
@@ -65,6 +76,12 @@ export interface RalphState {
 	entryHead?: string;
 	/** See RalphOptions.amendGuard. */
 	amendGuard?: boolean;
+	/** The committed tree at the last check that started a round (RalphOptions.progress "work"). */
+	lastTree?: string;
+	/** Rounds in a row that changed neither the failures nor the tree (RalphOptions.progress "work"). */
+	stalls?: number;
+	/** How long the first delivery and each round took (ralph-gate.ts tells the gate). */
+	roundsMs?: number[];
 }
 
 export function newState(now = Date.now(), opts?: Pick<RalphOptions, "amendGuard">): RalphState {
@@ -87,6 +104,8 @@ export interface RoundCheck {
 	search?: boolean;
 	/** The commit the checks ran on. */
 	head?: string;
+	/** Its tree: a commit that changed nothing has the tree of the one before. */
+	tree?: string;
 }
 
 /**
@@ -206,9 +225,10 @@ export async function checkRound(cwd: string, state: RalphState, run = runDoneWh
 	if (unusable.length) notes.push(`Not demonstrated, the check itself is unusable (not a reason for another round): ${unusable.map((r) => `"${r.claim}" — ${firstLine(r.why)}`).join("; ")}`);
 	const failures = [...gate, ...items.filter((r) => !r.ok && !r.unusable).map((r) => `Done when "${r.claim}"${r.cmd ? ` — \`${r.cmd}\`` : ""}: ${r.why}`)];
 	const head = (await sh("git", ["rev-parse", "HEAD"], cwd, 30_000)).out.trim() || undefined;
+	const tree = head ? (await sh("git", ["rev-parse", "HEAD^{tree}"], cwd, 30_000)).out.trim() || undefined : undefined;
 	state.entryHead ??= head;
 	const search = committed !== undefined && searchTask(planTask(committed));
-	return { failures, gate, items, notes, planned: frozen.length > 0, plan: committed !== undefined, search, head };
+	return { failures, gate, items, notes, planned: frozen.length > 0, plan: committed !== undefined, search, head, tree };
 }
 
 export function amendMessage(task: string, round: number, max: number, check: RoundCheck): string {
@@ -221,7 +241,7 @@ A check can be wrong about the code rather than the code wrong: the module's pat
 Commit, and say in one line per corrected check why it was wrong.`;
 }
 
-export type Decision = { kind: "done" | "stop"; report: string } | { kind: "next"; message: string };
+export type Decision = { kind: "done" | "stop" | "pause"; report: string } | { kind: "next"; message: string };
 
 export function roundMessage(task: string, remark: string | undefined, round: number, max: number, check: RoundCheck, fresh = false): string {
 	const before = fresh
@@ -274,18 +294,45 @@ export function decide(state: RalphState, check: RoundCheck, task: string, remar
 	// (decision 0014, addendum of 2026-10-11); the change goes to the operator.
 	const wrong = check.items.filter((i) => !i.ok && !i.unusable && i.cmd);
 	const inBudget = state.round < opts.maxRounds && !(opts.maxMs && now - state.started > opts.maxMs);
-	if (key === state.lastKey && !state.amendUsed && check.gate?.length === 0 && wrong.length && inBudget) {
+	const sameFailures = key === state.lastKey;
+	if (sameFailures && !state.amendUsed && check.gate?.length === 0 && wrong.length && inBudget) {
 		state.amendUsed = true;
 		state.amendable = new Set(wrong.map((i) => i.claim));
 		state.round += 1;
+		state.lastTree = check.tree;
 		return { kind: "next", message: amendMessage(task, state.round, opts.maxRounds, check) };
 	}
-	if (key === state.lastKey) return { kind: "stop", report: `[ralph] Stopped after round ${state.round}: the same checks failed twice in a row (no progress).${left}${checkedReport(check)}` };
+	if (opts.progress === "work") {
+		// #978: a long task keeps the same red checks for many rounds while the code moves on.
+		const stalled = sameFailures && check.tree !== undefined && check.tree === state.lastTree;
+		state.stalls = stalled ? (state.stalls ?? 0) + 1 : 0;
+		if (state.stalls >= 2)
+			return {
+				kind: "stop",
+				report: `[ralph] Stopped after round ${state.round}: two rounds in a row changed neither the failing checks nor the committed code (no progress).${left}${checkedReport(check)}`,
+			};
+	} else if (sameFailures) return { kind: "stop", report: `[ralph] Stopped after round ${state.round}: the same checks failed twice in a row (no progress).${left}${checkedReport(check)}` };
 	if (state.round >= opts.maxRounds) return { kind: "stop", report: `[ralph] Stopped: ${opts.maxRounds} round(s) used.${left}${checkedReport(check)}` };
 	if (opts.maxMs && now - state.started > opts.maxMs) return { kind: "stop", report: `[ralph] Stopped: ${Math.round(opts.maxMs / 60_000)} min used.${left}${checkedReport(check)}` };
 	state.round += 1;
 	state.lastKey = key;
+	state.lastTree = check.tree;
 	return { kind: "next", message: roundMessage(task, remark, state.round, opts.maxRounds, check, opts.fresh) };
+}
+
+/** What run.ts gives the headless loop beyond the session (#978: the gate and the pause). */
+export interface RalphControl {
+	/** The loop's state, from outside: a resumed run's, or one run.ts keeps to save on a signal. */
+	state?: RalphState;
+	/** When the delivery before the first check started (default: state.started). */
+	turnStarted?: number;
+	/** Asked before each next round (ralph-gate.ts askGate). */
+	gate?: (info: GateInfo) => GateAnswer;
+	/** The next turn's work clock as the gate set it; undefined: back to NERD_WORK_MAX_MINUTES. */
+	setWorkMinutes?: (minutes: number | undefined) => void;
+	/** On a pause, before the loop returns: the round that was about to start and who takes it. */
+	onPause?: (p: { reason: string; next: string; role: Role }) => void;
+	now?: () => number;
 }
 
 /**
@@ -307,12 +354,16 @@ export async function runRalphHeadless(
 	cwd: string,
 	task: string,
 	opts: RalphOptions,
-	log: (r: { round: number; kind: string; failures: string[]; notes: string[] }) => void = () => {},
+	log: (r: { round: number; kind: string; failures: string[]; notes: string[]; gate?: string }) => void = () => {},
 	check = checkRound,
+	ctl: RalphControl = {},
 ): Promise<Decision> {
-	const state = newState(Date.now(), opts);
+	const now = ctl.now ?? Date.now;
+	const state = ctl.state ?? newState(now(), opts);
+	state.roundsMs ??= [];
 	const fresh = opts.fresh && session.fresh ? session.fresh.bind(session) : undefined;
 	const d0 = { ...opts, fresh: !!fresh };
+	let turnStarted = ctl.turnStarted ?? state.started;
 	for (;;) {
 		// A round the model server failed made no move at all: its checks fail as
 		// before, and "no progress" would blame the work for the network (ticket 099).
@@ -321,13 +372,36 @@ export async function runRalphHeadless(
 			await session.role?.("worker");
 			return { kind: "stop", report: `[ralph] Stopped after round ${state.round}: the model request failed (${err}); the work was not checked again.` };
 		}
+		state.roundsMs.push(Math.max(0, now() - turnStarted));
 		const c = await check(cwd, state);
-		const d = decide(state, c, task, undefined, d0);
-		log({ round: state.round, kind: d.kind, failures: c.failures.map(firstLine), notes: c.notes });
+		const d = decide(state, c, task, undefined, d0, now());
 		if (d.kind !== "next") {
+			log({ round: state.round, kind: d.kind, failures: c.failures.map(firstLine), notes: c.notes });
 			await session.role?.("worker");
 			return d;
 		}
+		// #978: something outside the agent may say the next round is not to start now.
+		const role: Role = state.amendable ? "planner" : "worker";
+		if (ctl.gate) {
+			const a = ctl.gate({
+				round: state.round,
+				activeMs: now() - state.started,
+				roundsMs: state.roundsMs,
+				budgetMs: opts.maxMs,
+				failing: c.failures.length,
+				cwd,
+				graceMinutes: WORK_GRACE_MINUTES,
+			});
+			const said = a.decision === "pause" ? `pause: ${a.reason}` : `continue${a.workMinutes ? `, ${a.workMinutes} min` : ""}${a.reason ? `: ${a.reason}` : ""}`;
+			log({ round: state.round, kind: a.decision === "pause" ? "pause" : d.kind, failures: c.failures.map(firstLine), notes: c.notes, gate: said });
+			if (a.decision === "pause") {
+				ctl.onPause?.({ reason: a.reason, next: d.message, role });
+				await session.role?.("worker");
+				return { kind: "pause", report: `[ralph] Paused by the gate before round ${state.round}: ${a.reason}.` };
+			}
+			ctl.setWorkMinutes?.(a.workMinutes);
+		} else log({ round: state.round, kind: d.kind, failures: c.failures.map(firstLine), notes: c.notes });
+		turnStarted = now();
 		// A new session starts on the worker's model, so the role comes after it.
 		if (fresh) await fresh();
 		else {
@@ -390,11 +464,23 @@ export function ralph(pi: ExtensionAPI, opts: RalphOptions, check = checkRound, 
 		busy = true;
 		try {
 			// The TUI keeps its one session: rounds compact it (NERD_RALPH_FRESH is headless only).
-			const d = decide(state, await check(cwd, state), task, remark, { ...opts, fresh: false });
+			const c = await check(cwd, state);
+			const d = decide(state, c, task, remark, { ...opts, fresh: false });
 			await role?.(d.kind === "next" && state.amendable ? "planner" : "worker", ctx);
 			if (d.kind !== "next") {
 				pi.sendMessage({ customType: "nerd-ralph", content: d.report, display: true });
 				return;
+			}
+			// #978: the gate is asked in the TUI too; a pause here only stops the rounds (the operator is
+			// there and goes on with a message); the work clock it may set is the headless run's.
+			const cmd = gateCommand();
+			if (cmd) {
+				const a = askGate(cmd, { round: state.round, activeMs: Date.now() - state.started, roundsMs: [], budgetMs: opts.maxMs, failing: c.failures.length, cwd, graceMinutes: WORK_GRACE_MINUTES });
+				if (a.decision === "pause") {
+					await role?.("worker", ctx);
+					pi.sendMessage({ customType: "nerd-ralph", content: `[ralph] Paused by the gate before round ${state.round}: ${a.reason}. A message of yours goes on with the task.`, display: true });
+					return;
+				}
 			}
 			const send = () => {
 				ownTurn = true;

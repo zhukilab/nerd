@@ -38,6 +38,7 @@ import { rules } from "./rules.ts";
 import { SCOUT_TOOL, scoutOn } from "./scout.ts";
 import { stepLog, stepsOn } from "./step-log.ts";
 import { parseSampling, sampling } from "./sampling.ts";
+import { gateCommand } from "./ralph-gate.ts";
 import { summaryGoal, summaryGoalOn } from "./summary-goal.ts";
 import { thinkingKeep, thinkingKeepExtension } from "./thinking-keep.ts";
 import { RUNS_TOOL, runsToolOn } from "./tmux-runs.ts";
@@ -82,6 +83,8 @@ export function allTools(env = process.env, headless = false): string[] {
 export interface HarnessHooks {
 	/** The steer after a cut reply, once: the repeat guard's (repeat-guard.ts) or the work clock's (work-budget.ts). */
 	takeSteer?: () => string | undefined;
+	/** The next turn's work clock as the round gate set it (#978, ralph-gate.ts); the smaller of it and NERD_WORK_MAX_MINUTES counts. */
+	turnMinutes?: number;
 }
 
 /** `operator`: a person answers in this session (TUI), or not (headless). */
@@ -121,7 +124,12 @@ export function harness(operator: boolean, env = process.env, hooks: HarnessHook
 		rules(pi, env);
 		// Before the plan step, so that a new task's plan tools come after the work's tools are given back.
 		const workMinutes = workMaxMinutes(env);
-		if (workMinutes > 0) steers.push(workBudget(pi, { maxMinutes: workMinutes, workTools: work, operator }).takeSteer);
+		// With a round gate (#978) the clock is there even without NERD_WORK_MAX_MINUTES: the gate may set a turn's minutes.
+		const turnMinutes = () => {
+			const g = hooks.turnMinutes;
+			return g && g > 0 ? (workMinutes > 0 ? Math.min(g, workMinutes) : g) : workMinutes;
+		};
+		if (workMinutes > 0 || (!operator && gateCommand(env))) steers.push(workBudget(pi, { maxMinutes: turnMinutes, workTools: work, operator }).takeSteer);
 		// After the work clock, which gives the work's tools back on a turn; before the Ralph loop, which reads
 		// the turn's mode, and the plan step, which takes the tools for a new task.
 		if (operator) modes(pi, mode, { planTools: reading, workTools: work, step });

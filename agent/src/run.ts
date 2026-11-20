@@ -58,7 +58,14 @@
 //   NERD_RALPH=0   no Ralph loop (on by default; src/ralph.ts, decision 0014): the plan's DONE
 //                  WHEN items carry check commands; after the work they run in a
 //                  clean clone, and failures start a new round from the files
-//                  (NERD_RALPH_ROUNDS, default 3; NERD_RALPH_MINUTES, default none)
+//                  (NERD_RALPH_ROUNDS, default 3; NERD_RALPH_MINUTES, default none);
+//                  NERD_RALPH_PROGRESS=work: "no progress" is two rounds in a row with the same
+//                  failures and the same committed tree (a long task; default: same failures once)
+//   NERD_RALPH_GATE  a command asked before each next round and before the first turn (src/ralph-gate.ts,
+//                  #978): it may say continue, continue with a turn of N minutes, or pause; a pause
+//                  commits the work, saves the loop's state (NERD_RALPH_STATE, default inside .git)
+//                  and exits 75. NERD_RALPH_RESUME=1 goes on from the saved state: no plan step,
+//                  a new session, the round that was about to start. With either set, SIGTERM saves too
 //   NERD_BASH_MAX_CHARS  a longer bash output reaches the model as head and tail,
 //                  the whole of it in a file (default 8000, 0 = off; src/output-cap.ts)
 //   NERD_QUIET=0   no quiet defaults (NO_COLOR, npm fund/audit, ...) for the
@@ -109,9 +116,11 @@ import { CARRY_OUT, commitAll, commitPlan, headlessMode, type Mode, planCommit, 
 import { PLANNER, type Role } from "./pair.ts";
 import { PLAN_FILE, planTask } from "./plan-step.ts";
 import { enabledPackages } from "./packages.ts";
-import { ralphOn, ralphOptions, runRalphHeadless } from "./ralph.ts";
+import { newState, type RalphState, ralphOn, ralphOptions, runRalphHeadless } from "./ralph.ts";
+import { askGate, fromSaved, gateCommand, loadRun, PAUSE_EXIT, resumeMessage, type SavedRun, saveRun, statePath, toSaved } from "./ralph-gate.ts";
 import { RUN_USAGE, runArgs } from "./run-args.ts";
 import { runSpecCheck } from "./spec-check.ts";
+import { commitWork, WORK_GRACE_MINUTES } from "./work-budget.ts";
 
 stayOffline();
 
@@ -145,9 +154,29 @@ async function main() {
 		process.exit(2);
 	}
 	const explicitRalph = mode === "ralph" && !!process.env.NERD_MODE?.trim();
+	// #978: the round gate and the resume of a paused run (ralph-gate.ts).
+	const looping = mode === "ralph" && ralphOn();
+	const gate = looping ? gateCommand() : undefined;
+	const resume = process.env.NERD_RALPH_RESUME === "1";
+	let saved: SavedRun | undefined;
+	if (resume) {
+		if (!looping) {
+			console.error("NERD_RALPH_RESUME=1 needs the Ralph loop: NERD_MODE unset or ralph, NERD_RALPH not 0");
+			process.exit(2);
+		}
+		const s = loadRun(statePath(cwd));
+		if ("error" in s) {
+			console.error(s.error);
+			process.exit(2);
+		}
+		saved = s;
+		if (task.trim() && task.trim() !== s.task.trim()) console.log("[resume: the task given is ignored; the saved run's task goes on]");
+		task = s.task;
+		opening = resumeMessage(s);
+	}
 	// ralph with a plan there: the plan is carried out, not made again; plan: the plan step always.
-	const carryOut = explicitRalph && existsSync(join(cwd, PLAN_FILE));
-	const withPlanStep = mode === "plan" || (mode === "ralph" && !carryOut && process.env.NERD_PLAN_STEP !== "0");
+	const carryOut = !resume && explicitRalph && existsSync(join(cwd, PLAN_FILE));
+	const withPlanStep = mode === "plan" || (mode === "ralph" && !resume && !carryOut && process.env.NERD_PLAN_STEP !== "0");
 	if (carryOut) {
 		const warning = await commitPlan(cwd);
 		if (warning) console.log(`[${warning}]`);
@@ -241,10 +270,34 @@ async function main() {
 		}
 	};
 	let session = await makeSession(withPlanStep);
+	// The Ralph loop's state: a resumed run's from the start, a new run's once the loop starts.
+	let loopState: RalphState | undefined = saved ? fromSaved(saved) : undefined;
+	// When the current turn of work started (the opening, then each round's prompt).
+	let turnStartedAt = Date.now();
+	const save = (s: RalphState, run: { reason: string; status: SavedRun["status"]; next?: string; role?: Role; partialMs?: number }) => {
+		const path = statePath(cwd);
+		const roundsMs = [...(s.roundsMs ?? []), ...(run.partialMs !== undefined ? [run.partialMs] : [])];
+		saveRun(path, toSaved(s, { task, reason: run.reason, status: run.status, activeMs: Date.now() - s.started, roundsMs, next: run.next, role: run.role }));
+		return path;
+	};
+	// #978: with the gate or a resume, a signal saves the loop's state, so the run can go on. A new run
+	// stopped before its plan was committed is not saved: a new start makes the plan again.
+	const saveOnSignal = (sig: NodeJS.Signals) => {
+		if (!(gate || resume) || !looping) return;
+		if (!loopState && !planCommit(cwd)) return;
+		try {
+			const sha = commitWork(cwd, 0, `Work in progress at ${sig}, committed by the harness`);
+			const path = save(loopState ?? newState(turnStartedAt), { reason: `stopped by ${sig}`, status: "paused", partialMs: Date.now() - turnStartedAt });
+			process.stdout.write(`[${sig}: the loop's state saved to ${path}${sha ? `, the work committed as ${sha}` : ""}; NERD_RALPH_RESUME=1 goes on]\n`);
+		} catch (e) {
+			process.stdout.write(`[${sig}: the loop's state not saved: ${(e as Error).message}]\n`);
+		}
+	};
 	// SIGINT/SIGTERM (a manager stopping the run, docker stop): the turn is aborted and the
 	// run ends as the finally below would, not with Node's default death mid-turn.
 	const stop = (sig: NodeJS.Signals, code: number) => {
 		process.stdout.write(`\n[${sig}: the run is stopped]\n`);
+		saveOnSignal(sig);
 		void session
 			.abort()
 			.catch(() => {})
@@ -261,6 +314,7 @@ async function main() {
 	// A reply the repeat guard or the work clock cut ends Pi's run; its steer goes on
 	// as the next prompt (repeat-guard.ts: at most twice per task; work-budget.ts).
 	const prompt = async (text: string) => {
+		turnStartedAt = Date.now();
 		await session.prompt(text);
 		for (let s = hooks.takeSteer?.(); s; s = hooks.takeSteer?.()) {
 			process.stdout.write(`\n[harness: the reply was cut — ${s.slice(10, 60)}…]\n`);
@@ -274,10 +328,45 @@ async function main() {
 			if (r.committed) console.log(`\n[solve: committed "${r.committed}"]`);
 			if (r.error) console.log(`\n[solve: not committed (${r.error})]`);
 		};
+		// The pair: the amend round goes to the checks' author (pair.ts).
+		const role = plannerAt
+			? async (r: Role) => {
+					const m = r === "planner" ? plannerAt : model;
+					if (session.model?.provider === m.provider) return;
+					process.stdout.write(`\n[pair: ${r === "planner" ? `the planner (${m.id}) corrects the checks` : `back to the worker (${m.id})`}]\n`);
+					await session.setModel(m);
+				}
+			: undefined;
+		// #978: the gate is asked before the first turn too — a run started (or resumed) outside its
+		// window does nothing and says so; the saved state, if any, stays as it was.
+		if (gate) {
+			const roundsMs = loopState?.roundsMs ?? [];
+			const a = askGate(gate, {
+				round: loopState?.round ?? 0,
+				activeMs: roundsMs.reduce((x, y) => x + y, 0),
+				roundsMs,
+				budgetMs: ralphOptions().maxMs,
+				failing: 0,
+				cwd,
+				graceMinutes: WORK_GRACE_MINUTES,
+			});
+			if (a.decision === "pause") {
+				console.log(`\n[ralph] Paused by the gate before the run's first turn: ${a.reason}. Nothing was done.`);
+				process.exitCode = PAUSE_EXIT;
+				return;
+			}
+			hooks.turnMinutes = a.workMinutes;
+			console.log(`[gate: continue${a.workMinutes ? `, the first turn ${a.workMinutes} min` : ""}${a.reason ? ` — ${a.reason}` : ""}]`);
+		}
+		if (saved) {
+			console.log(`[resume: ${saved.reason} at ${saved.pausedAt}; round ${saved.state.round}, ${saved.next ? "the pending round goes on" : "the interrupted turn goes on"}]`);
+			if (saved.role === "planner") await role?.("planner");
+		}
 		if (mode === "solve") commit("Before solve");
 		const planBefore = planCommit(cwd);
 		const planAt = join(cwd, PLAN_FILE);
 		const writtenBefore = existsSync(planAt) ? statSync(planAt).mtimeMs : -1;
+		const openingStarted = Date.now();
 		await prompt(opening);
 		if (mode === "solve") commit(solveSubject(task));
 		if (mode === "plan") {
@@ -302,15 +391,6 @@ async function main() {
 		let ralphStopped = false;
 		if (mode === "ralph" && ralphOn()) {
 			const opts = ralphOptions();
-			// The pair: the amend round goes to the checks' author (pair.ts).
-			const role = plannerAt
-				? async (r: Role) => {
-						const m = r === "planner" ? plannerAt : model;
-						if (session.model?.provider === m.provider) return;
-						process.stdout.write(`\n[pair: ${r === "planner" ? `the planner (${m.id}) corrects the checks` : `back to the worker (${m.id})`}]\n`);
-						await session.setModel(m);
-					}
-				: undefined;
 			const fresh = async () => {
 				const old = session;
 				session = await makeSession(false);
@@ -322,11 +402,40 @@ async function main() {
 				return last?.role === "assistant" && last.stopReason === "error" ? last.errorMessage || "error" : undefined;
 			};
 			const guarded = { compact: (i?: string) => session.compact(i), prompt, role, fresh, failed };
-			const d = await runRalphHeadless(guarded, cwd, task, opts, (r) => {
-				if (logPath) appendFileSync(logPath, `${JSON.stringify({ t: Date.now() - t0, type: "ralph_round", ...r })}\n`);
-				process.stdout.write(`\n[ralph round ${r.round}/${opts.maxRounds}: ${r.kind}, ${r.failures.length} failing]\n`);
-			});
+			const st = loopState ?? newState(Date.now(), opts);
+			loopState = st;
+			const d = await runRalphHeadless(
+				guarded,
+				cwd,
+				task,
+				opts,
+				(r) => {
+					if (logPath) appendFileSync(logPath, `${JSON.stringify({ t: Date.now() - t0, type: "ralph_round", ...r })}\n`);
+					process.stdout.write(`\n[ralph round ${r.round}/${opts.maxRounds}: ${r.kind}, ${r.failures.length} failing${r.gate ? `; gate: ${r.gate}` : ""}]\n`);
+				},
+				undefined,
+				{
+					state: st,
+					turnStarted: openingStarted,
+					gate: gate ? (i) => askGate(gate, i) : undefined,
+					setWorkMinutes: (m) => {
+						hooks.turnMinutes = m;
+					},
+					onPause: (p) => {
+						const sha = commitWork(cwd, 0, `Work in progress at a pause of the run (${p.reason}), committed by the harness`);
+						const path = save(st, { reason: p.reason, status: "paused", next: p.next, role: p.role });
+						process.stdout.write(`\n[pause: the loop's state saved to ${path}${sha ? `, the work committed as ${sha}` : ""}]\n`);
+					},
+				},
+			);
 			process.stdout.write(`\n${d.kind === "next" ? "" : d.report}\n`);
+			if (d.kind === "pause") {
+				console.log("[paused: NERD_RALPH_RESUME=1 goes on from here]");
+				process.exitCode = PAUSE_EXIT;
+				return;
+			}
+			// A run that may have been paused before ends its saved state, so it is not resumed again.
+			if ((gate || resume) && d.kind !== "next") save(st, { reason: d.kind === "done" ? "done" : d.report.split("\n")[0], status: "ended" });
 			ralphDone = d.kind === "done";
 			ralphStopped = !ralphDone;
 		}

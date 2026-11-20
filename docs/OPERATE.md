@@ -366,7 +366,7 @@ hand".
 
 The exit code is 0 when the agent finished with a final answer and, under the
 checks, the plan's Done when showed it done (at least one check run and none
-failing); 1 when it did not, 2 for bad arguments; SIGTERM (`docker stop`) and SIGINT abort the turn and
+failing); 1 when it did not, 2 for bad arguments, 75 when the round gate paused it (below); SIGTERM (`docker stop`) and SIGINT abort the turn and
 end the run cleanly, 143 and 130. Questions in
 the plan step are answered with `NERD_PLAN_ANSWER` (default «на твоё
 усмотрение», Russian for "your call").
@@ -386,6 +386,40 @@ For a plan you shape before any work: write `PROBLEM.md`, run with
 `NERD_MODE=plan`, read `PLAN.md`, change `PROBLEM.md`, run again (the plan is
 revised and committed on top, beside your change), and when it is right run
 with `NERD_MODE=ralph`.
+
+### A long run in a time window: the round gate
+
+A task of a day or more can run in nightly windows on a shared machine.
+`NERD_RALPH_GATE` is a command (run with `sh -c` in the agent's container)
+that the run asks before its first turn and before each next round of the
+check loop. It prints `decision=continue` or `decision=pause`, optionally
+`work_minutes=N` (the next turn of work gets N minutes, then the work clock's
+note, grace and cut as with `NERD_WORK_MAX_MINUTES`) and `reason=…`; it is told
+the round, the active minutes, the last, mean and longest round
+(`NERD_GATE_*`, see `agent/src/ralph-gate.ts`). A gate that fails (exit code
+not 0, no answer in 60 s, an unknown answer) is a pause.
+
+On a pause the harness commits the work, saves the loop's state (inside the
+workspace's `.git` unless `NERD_RALPH_STATE` says where) and the run exits
+**75**. `NERD_RALPH_RESUME=1` (no task needed) goes on from it in a new
+session: no plan step, the round that was about to start, the loop's budget in
+active time. With the gate or a resume, SIGTERM saves the state too. A run
+that ends (done, or stopped by the loop) marks the state ended, so it is not
+resumed again.
+
+The gate shipped with the agent works by the clock, in the window's time zone:
+
+```sh
+-e NERD_RALPH_GATE="node /opt/nerd/agent/src/gate-window.ts --start 23:00 --end 07:00 --tz Europe/Berlin" \
+-e NERD_RALPH_PROGRESS=work -e NERD_RALPH_ROUNDS=1000 -e NERD_RALPH_FRESH=1 -e NERD_WORK_MAX_MINUTES=90
+```
+
+Each turn gets the minutes left in the window less a reserve (the clock's
+15-minute grace and 10 for the checks); with less than 20 minutes left it
+pauses. `NERD_RALPH_PROGRESS=work` keeps a long task's loop going while the
+same checks stay red but the code moves on: it stops only after two rounds in a
+row that changed neither the failing checks nor the committed code.
+
 [`acceptance/check.sh`](../acceptance/check.sh) checks a result against the
 acceptance criteria of the reference task; see the README.
 

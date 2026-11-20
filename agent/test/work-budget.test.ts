@@ -10,7 +10,7 @@ import { tempDir } from "./tmp.ts";
 
 type Handler = (event: unknown, ctx?: unknown) => unknown;
 
-function setup(maxMinutes: number, operator = false) {
+function setup(maxMinutes: number | (() => number), operator = false) {
 	const handlers = new Map<string, Handler>();
 	let active = ["read", "write", "bash"];
 	let t = 0;
@@ -154,6 +154,20 @@ test("work budget: a guard's steer after its cut does not restart the clock", ()
 	s.request(0);
 	s.turn("[harness] Your reply was cut: you were computing by hand (\"2 * 3 = 6\").");
 	assert.match(s.at(90)?.content[1].text ?? "", /time budget/, "the clock of the turn goes on");
+});
+
+test("work budget: minutes read at each new turn (the round gate's, #978); 0 is no clock that turn", () => {
+	let m = 0;
+	const s = setup(() => m);
+	s.turn("the first turn");
+	assert.equal(s.at(500), undefined, "no clock with 0");
+	m = 30;
+	s.turn("a round");
+	s.request(600);
+	assert.equal(s.at(629), undefined);
+	assert.match(s.at(630)?.content[1].text ?? "", /30 minutes, its time budget/);
+	m = 90;
+	assert.equal(s.at(640), undefined, "the turn keeps its minutes; the change counts from the next turn");
 });
 
 test("commitWork: commits what changed (untracked too, not target/ or node_modules), nothing when clean", () => {

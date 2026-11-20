@@ -234,7 +234,9 @@ each carry a command, and the harness runs them in a clean clone after the
 work ([`agent/src/ralph.ts`](agent/src/ralph.ts), decision 0014 in nerd-doc):
 if any fails, the conversation is compacted and a new round starts from the
 files with the failures, until all pass, the same failures come back twice, or
-`NERD_RALPH_ROUNDS` (3) / `NERD_RALPH_MINUTES` are used. The checks are the
+`NERD_RALPH_ROUNDS` (3) / `NERD_RALPH_MINUTES` are used (a task of a day: `NERD_RALPH_PROGRESS=work`,
+and a round gate, `NERD_RALPH_GATE`, that pauses the run outside a time window and resumes it
+later — docs/OPERATE.md, "A long run in a time window"). The checks are the
 plan as committed; an edit of them, or a check that passes after its own files
 changed, is reported, not hidden. Because they cannot be changed later, the
 final plan is checked before it is committed

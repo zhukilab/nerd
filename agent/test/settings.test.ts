@@ -29,6 +29,16 @@ const NOT_SETTINGS = [
 	"NERD_SERVER_DOCKER_ARGS", // the same
 	"NERD_WSL_CONF", // a constant in tools/lib.sh: the /etc/wsl.conf settings install-prerequisites makes
 	"NERD_KEYPROXY_TOKEN_FILE", // a constant in tools/lib.sh: var/keyproxy.token, where ./UP keeps the token
+	// What the Ralph round gate is told (ralph-gate.ts gateEnv), not what it is set by.
+	"NERD_GATE_ROUND",
+	"NERD_GATE_ACTIVE_MINUTES",
+	"NERD_GATE_LAST_ROUND_MINUTES",
+	"NERD_GATE_MEAN_ROUND_MINUTES",
+	"NERD_GATE_LONGEST_ROUND_MINUTES",
+	"NERD_GATE_BUDGET_MINUTES",
+	"NERD_GATE_FAILING",
+	"NERD_GATE_GRACE_MINUTES",
+	"NERD_GATE_WORKSPACE",
 ];
 
 test("settings registry: every NERD_* in the code, the compose files and the tools is listed", async () => {
