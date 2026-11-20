@@ -167,7 +167,7 @@ test("saved run: state round-trips; the clock counts the active time; an ended r
 	st.amended.set("sorted", { from: "node a.js", to: "node b.js" });
 	st.amendable = new Set(["sorted"]);
 	const path = join(d, "sub", "state.json");
-	saveRun(path, toSaved(st, { task: "build it", reason: "07:00", status: "paused", activeMs: 3_600_000, roundsMs: [5, 6], next: "[ralph round 4/9] go", role: "planner", now: new Date("2026-11-20T06:00:00Z") }));
+	saveRun(path, toSaved(st, { task: "build it", reason: "07:00", status: "paused", activeMs: 3_600_000, roundsMs: [2_400_000, 3_000_000], next: "[ralph round 4/9] go", role: "planner", now: new Date("2026-11-20T06:00:00Z") }));
 	const s = loadRun(path);
 	assert.ok(!("error" in s));
 	if ("error" in s) return;
@@ -180,9 +180,9 @@ test("saved run: state round-trips; the clock counts the active time; an ended r
 	assert.equal(back.failedHash.get("npm test"), "h1");
 	assert.deepEqual(back.amended.get("sorted"), { from: "node a.js", to: "node b.js" });
 	assert.deepEqual([...(back.amendable ?? [])], ["sorted"]);
-	assert.deepEqual(back.roundsMs, [5, 6]);
+	assert.deepEqual(back.roundsMs, [2_400_000, 3_000_000]);
 	const m = resumeMessage(s);
-	assert.match(m, /^\[ralph: resumed\] The run was paused at 2026-11-20T06:00:00.000Z \(07:00\) after 60.0 min/);
+	assert.match(m, /^\[ralph: resumed\] The run was paused at 2026-11-20T06:00:00.000Z \(07:00\) after 90.0 min of active work/, "the turns' sum, not the loop's clock");
 	assert.match(m, /\[ralph round 4\/9\] go$/);
 	assert.match(resumeMessage({ ...s, next: undefined }), /Carry on with the task: build it$/);
 	saveRun(path, { ...s, status: "ended", reason: "done" });

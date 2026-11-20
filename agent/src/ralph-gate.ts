@@ -219,7 +219,9 @@ export function loadRun(path: string): SavedRun | { error: string } {
 
 /** The first prompt of a resumed run. */
 export function resumeMessage(s: SavedRun): string {
-	const head = `[ralph: resumed] The run was paused at ${s.pausedAt} (${s.reason}) after ${minutes(s.activeMs)} min of active work, and goes on now in a new session: nothing of the earlier conversation is here, and the files are what counts — the code, PLAN.md (its Done when items are the checks), notes/, git log. Read them first.`;
+	// The turns' sum: activeMs is the loop's clock, which starts after the first delivery.
+	const worked = s.roundsMs.reduce((a, b) => a + b, 0);
+	const head = `[ralph: resumed] The run was paused at ${s.pausedAt} (${s.reason}) after ${minutes(worked)} min of active work, and goes on now in a new session: nothing of the earlier conversation is here, and the files are what counts — the code, PLAN.md (its Done when items are the checks), notes/, git log. Read them first.`;
 	return s.next
 		? `${head}\nThe round that was about to start when it paused:\n\n${s.next}`
 		: `${head}\nIt stopped in the middle of a turn; what was not committed is committed now by the harness if it was there. Carry on with the task: ${s.task}`;
