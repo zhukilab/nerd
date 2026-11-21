@@ -384,7 +384,11 @@ usage and its `message.responseId`. The last line is the session's summary:
 
 The model's time, speed and MTP acceptance come from llama-server's `timings`;
 with a server that sends none they are `null`. `complete` is false when a
-signal or an error ended the run; a hard kill writes no summary. In the TUI the
+signal or an error ended the run (`end` says which; a gate's pause is complete,
+`end: "paused"`); a hard kill writes no summary. The numbers are this
+process's; only `ralph_rounds` is the loop's count across resumed runs.
+`tool_s` sums the tools' time (parallel calls add up, a scout's model time is in
+it), so `wait_s` is a remainder, not a measurement. In the TUI the
 same numbers make the footer's status line, `ctx 41K/256K 16% (peak 198K) ·
 22 t/s · MTP 71% · 2h10m`; the agora channel's `context` event carries `peak`,
 `tps_gen`, `mtp_accept` and `uptime_s` besides tokens, window and percent.

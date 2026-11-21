@@ -2,8 +2,8 @@
 // summary line and status line made from them; then run.ts end to end against a server that sends
 // llama-server's `timings` in its last chunk.
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { createReadStream } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { createReadStream, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
@@ -138,6 +138,55 @@ test("run.ts: the events log ends with a session_summary; its message lines carr
 		assert.match(String(end.ts), /Z$/);
 		assert.ok(end.message.responseId, "the dedup key: the message's responseId");
 		assert.ok(!lines.some((l) => l.type === "message_update" && "ts" in l), "per-token updates stay as they were");
+	} finally {
+		srv.close();
+	}
+});
+
+test("run.ts: a gate's pause (exit 75) is a complete session, end \"paused\" — the nightly run's usual end (#993 review)", async () => {
+	const srv = await timedServer();
+	const tmp = tempDir("nerd-stats-tmp-");
+	const ws = tempDir("nerd-stats-ws-");
+	const sessions = tempDir("nerd-stats-sessions-");
+	const dir = tempDir("nerd-stats-log-");
+	const log = join(dir, "events.jsonl");
+	const gate = join(dir, "gate.sh");
+	writeFileSync(gate, 'echo "decision=pause"\necho "reason=the window is over"\n');
+	const git = (...a: string[]) => execFileSync("git", ["-C", ws, ...a], { stdio: "ignore" });
+	git("init", "-q");
+	git("config", "user.email", "t@t");
+	git("config", "user.name", "t");
+	writeFileSync(join(ws, "PLAN.md"), "# Plan\n\n## Steps\n1. write out.txt\n\n## Done when\n- the file exists — check: `test -f out.txt`\n");
+	git("add", "PLAN.md");
+	git("commit", "-q", "-m", "Plan");
+	try {
+		const child = spawn(process.execPath, [RUN, ws, "Carry out PLAN.md", "--log", log], {
+			env: {
+				...process.env,
+				TMPDIR: tmp,
+				NERD_BASE_URL: srv.url,
+				NERD_MODEL: "fake",
+				NERD_CTX: "32768",
+				NERD_MODE: "ralph",
+				NERD_PLAN_STEP: "0",
+				NERD_DONE_GATE: "0",
+				NERD_RALPH_GATE: `sh ${gate}`,
+				NERD_SESSION_DIR: sessions,
+			},
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		let out = "";
+		child.stdout.on("data", (d) => (out += d));
+		child.stderr.on("data", (d) => (out += d));
+		const code = await new Promise<number | null>((ok) => child.on("exit", (c) => ok(c)));
+		assert.equal(code, 75, out.slice(-2000));
+		const lines: Record<string, unknown>[] = [];
+		for await (const line of createInterface({ input: createReadStream(log) })) if (line.trim()) lines.push(JSON.parse(line));
+		const last = lines.at(-1) as Record<string, unknown>;
+		assert.equal(last.type, "session_summary");
+		assert.equal(last.complete, true);
+		assert.equal(last.end, "paused");
+		assert.equal(last.exit, 75);
 	} finally {
 		srv.close();
 	}

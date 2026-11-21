@@ -327,11 +327,12 @@ async function main() {
 	const stop = (sig: NodeJS.Signals, code: number) => {
 		process.stdout.write(`\n[${sig}: the run is stopped]\n`);
 		saveOnSignal(sig);
-		summarise(false, { end: `stopped by ${sig}`, exit: code });
 		void session
 			.abort()
 			.catch(() => {})
 			.finally(() => {
+				// After the abort, so the summary is the log's last line (the aborted reply's events come first).
+				summarise(false, { end: `stopped by ${sig}`, exit: code });
 				session.dispose();
 				if (process.env.NERD_SESSION_DIR) rmSync(agentDir, { recursive: true, force: true });
 				else console.log(`[agent dir kept, the session is in it: ${agentDir}]`);
@@ -359,7 +360,7 @@ async function main() {
 		endedByGuard = hooks.takeEnded?.() ?? false;
 		if (endedByGuard) process.stdout.write("\n[harness: the loop guard ended the turn (the same call again after two notes)]\n");
 	};
-	let ranThrough = false;
+	let threw = false;
 	try {
 		// solve: what is there is committed before the work and after it (mode.ts commitAll).
 		const commit = (subject: string) => {
@@ -536,9 +537,14 @@ async function main() {
 			const cut = why ? `; the checks passed, though the ${why}` : "";
 			console.log(`\n[done in ${secs} s, ${session.messages.length} messages${extra}${cut}]`);
 		}
-		ranThrough = true;
+	} catch (e) {
+		threw = true;
+		throw e;
 	} finally {
-		summarise(ranThrough, { end: ranThrough ? "finished" : "error", exit: process.exitCode ?? (ranThrough ? 0 : 1) });
+		// Complete unless an error ends the run: a gate's pause (exit 75) and the plan mode return early
+		// from the try, and are complete runs all the same (review of #993).
+		const exit = threw ? 1 : (process.exitCode ?? 0);
+		summarise(!threw, { end: threw ? "error" : exit === PAUSE_EXIT ? "paused" : "finished", exit: typeof exit === "number" ? exit : Number(exit) });
 		session.dispose();
 		// The open socket would keep the process alive.
 		closeProcessChannel();
