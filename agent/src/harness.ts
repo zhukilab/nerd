@@ -83,6 +83,9 @@ export function allTools(env = process.env, headless = false): string[] {
 export interface HarnessHooks {
 	/** The steer after a cut reply, once: the repeat guard's (repeat-guard.ts) or the work clock's (work-budget.ts). */
 	takeSteer?: () => string | undefined;
+	/** Whether a guard ended the last turn on purpose with no steer (loop-guard.ts, the third loop), once:
+	 * the reply's "aborted" error is then the guard's, not the model server's (#1013). */
+	takeEnded?: () => boolean;
 	/** The next turn's work clock as the round gate set it (#978, ralph-gate.ts); the smaller of it and NERD_WORK_MAX_MINUTES counts. */
 	turnMinutes?: number;
 }
@@ -104,7 +107,9 @@ export function harness(operator: boolean, env = process.env, hooks: HarnessHook
 		// declares its own tools alone, as before.
 		const work = workTools(env, !operator);
 		pi.on("session_start", () => pi.setActiveTools(work));
-		steers.push(loopGuard(pi, { operator, hard: loopGuardHard(env) }).takeSteer);
+		const lg = loopGuard(pi, { operator, hard: loopGuardHard(env) });
+		steers.push(lg.takeSteer);
+		hooks.takeEnded = lg.takeEnded;
 		if (work.includes("web_search")) pinWebSearchProvider(pi);
 		if (work.includes("web_fetch") && fetchGuardOn(env)) fetchGuard(pi);
 		if (work.includes("web_fetch") && webNotesOn(env)) webNotes(pi);

@@ -323,13 +323,21 @@ async function main() {
 
 	// A reply the repeat guard or the work clock cut ends Pi's run; its steer goes on
 	// as the next prompt (repeat-guard.ts: at most twice per task; work-budget.ts).
+	// A turn the loop guard ended with no steer (its third loop) stops with Pi's "aborted" error:
+	// that is the guard's end of the turn, not the model server failing (#1013), so Ralph checks
+	// the work and goes on, as loop-guard.ts says.
+	let endedByGuard = false;
 	const prompt = async (text: string) => {
 		turnStartedAt = Date.now();
+		endedByGuard = false;
+		hooks.takeEnded?.();
 		await session.prompt(text);
 		for (let s = hooks.takeSteer?.(); s; s = hooks.takeSteer?.()) {
 			process.stdout.write(`\n[harness: the reply was cut — ${s.slice(10, 60)}…]\n`);
 			await session.prompt(s);
 		}
+		endedByGuard = hooks.takeEnded?.() ?? false;
+		if (endedByGuard) process.stdout.write("\n[harness: the loop guard ended the turn (the same call again after two notes)]\n");
 	};
 	try {
 		// solve: what is there is committed before the work and after it (mode.ts commitAll).
@@ -408,6 +416,7 @@ async function main() {
 				process.stdout.write("\n[ralph: the round starts in a new session]\n");
 			};
 			const failed = () => {
+				if (endedByGuard) return undefined;
 				const last = session.messages.at(-1) as { role?: string; stopReason?: string; errorMessage?: string };
 				return last?.role === "assistant" && last.stopReason === "error" ? last.errorMessage || "error" : undefined;
 			};

@@ -130,6 +130,9 @@ export function loopGuard(pi: ExtensionAPI, opts: { operator?: boolean; n?: numb
 	let guard = new LoopGuard(n, hard);
 	let steers = 0;
 	let pending: string | undefined;
+	// The turn was ended here with no steer after it (the third loop): the reply then stops with
+	// Pi's "aborted" error, which run.ts must not read as the model server failing (#1013).
+	let ended = false;
 	pi.on("session_start", () => {
 		guard = new LoopGuard(n, hard);
 	});
@@ -146,6 +149,7 @@ export function loopGuard(pi: ExtensionAPI, opts: { operator?: boolean; n?: numb
 			steers += 1;
 			pi.appendEntry("nerd-loop-guard", { tool: stuck.tool, times: stuck.times, steer: steers <= MAX_LOOP_STEERS ? steers : 0 });
 			if (steers <= MAX_LOOP_STEERS) pending = loopSteer(steers, stuck.tool, stuck.args, stuck.times);
+			else ended = true;
 			ctx.abort();
 			return;
 		}
@@ -167,6 +171,12 @@ export function loopGuard(pi: ExtensionAPI, opts: { operator?: boolean; n?: numb
 			const s = pending;
 			pending = undefined;
 			return s;
+		},
+		/** Headless: whether the guard ended the last turn with no steer (its "aborted" is no failure), once. */
+		takeEnded(): boolean {
+			const e = ended;
+			ended = false;
+			return e;
 		},
 	};
 }

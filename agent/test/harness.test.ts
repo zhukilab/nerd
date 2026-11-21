@@ -163,6 +163,7 @@ test("loop guard, hard step: the reply is cut, the steer handed over twice per t
 	assert.equal(aborts, 1);
 	assert.match(g.takeSteer() ?? "", /cut by the loop guard: you made this exact call 7 times[\s\S]*bash t\.sh/);
 	assert.equal(g.takeSteer(), undefined, "once");
+	assert.equal(g.takeEnded(), false, "a cut with a steer is not the end of the turn");
 	handlers.get("before_agent_start")?.({ prompt: "[harness] Your reply was cut by the loop guard: …" }, ctx);
 	loop();
 	assert.equal(aborts, 2);
@@ -170,6 +171,8 @@ test("loop guard, hard step: the reply is cut, the steer handed over twice per t
 	loop();
 	assert.equal(aborts, 3, "a third loop is cut too");
 	assert.equal(g.takeSteer(), undefined, "but with no message: the turn ends");
+	assert.equal(g.takeEnded(), true, "and run.ts is told the guard ended it (#1013)");
+	assert.equal(g.takeEnded(), false, "once");
 	// The count is the task's whole: 3 loops of 7.
 	assert.deepEqual(entries.at(-1), { tool: "bash", times: 21, steer: 0 });
 	handlers.get("before_agent_start")?.({ prompt: "a new message of the operator" }, ctx);
