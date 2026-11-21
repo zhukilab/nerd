@@ -24,6 +24,7 @@ import { completeSimple } from "@earendil-works/pi-ai/compat";
 import { defineTool, type ExtensionContext, type ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { type Act, injectText, TRIAGE_SYSTEM, triagedAct, triagePrompt, wayOf } from "./letter-delivery.ts";
 import { letterPrompt, taskSubject } from "./plan-step.ts";
+import { sessionStats } from "./session-stats.ts";
 
 export const SEND_LETTER_TOOL = "send_letter";
 /** A longer line breaks the wire (PI-CHANNEL §1). */
@@ -288,7 +289,8 @@ export function agoraChannel(mode: Mode, path: string, opts?: ChannelOptions): E
 		};
 		const context = () => {
 			const u = ctx?.getContextUsage();
-			if (u && mine()) ch.send({ t: "context", tokens: u.tokens, window: u.contextWindow, percent: u.percent });
+			// #993: the session's peak, the last reply's speed and MTP acceptance, the uptime (session-stats.ts).
+			if (u && mine()) ch.send({ t: "context", tokens: u.tokens, window: u.contextWindow, percent: u.percent, ...sessionStats().contextEvent() });
 		};
 		// The triage's one request: the session's model, its plain stream, no tools, thinking off.
 		const triage = async (m: Msg, c: ExtensionContext): Promise<Act> => {

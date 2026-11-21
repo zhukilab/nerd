@@ -370,7 +370,24 @@ failing); 1 when it did not, 2 for bad arguments, 75 when the round gate paused 
 end the run cleanly, 143 and 130. Questions in
 the plan step are answered with `NERD_PLAN_ANSWER` (default «на твоё
 усмотрение», Russian for "your call").
-The event log goes to `/logs` (mount it to keep it).
+The event log goes to `/logs` (mount it to keep it). One JSON line per Pi event;
+every line but the per-token `message_update` also carries `ts` (UTC) and
+`session` (Pi's session id), and an assistant `message_end` carries the reply's
+usage and its `message.responseId`. The last line is the session's summary:
+
+```json
+{"type": "session_summary", "v": 1, "ts": "…Z", "complete": true, "session": "…", "model": "…", "server": "…",
+ "wall_s": 0, "messages": 0, "tokens": {"in": 0, "out": 0, "cache_read": 0, "cache_write": 0, "server_cache_n": 0, "hit_ratio": 0},
+ "ctx": {"peak": 0, "window": 0}, "model_s": {"prompt": 0, "gen": 0}, "tool_s": 0, "wait_s": 0,
+ "tps": {"prompt": 0, "gen": 0}, "mtp_accept": 0, "draft_n": 0, "ralph_rounds": 0, "compactions": 0, "end": "finished", "exit": 0}
+```
+
+The model's time, speed and MTP acceptance come from llama-server's `timings`;
+with a server that sends none they are `null`. `complete` is false when a
+signal or an error ended the run; a hard kill writes no summary. In the TUI the
+same numbers make the footer's status line, `ctx 41K/256K 16% (peak 198K) ·
+22 t/s · MTP 71% · 2h10m`; the agora channel's `context` event carries `peak`,
+`tps_gen`, `mtp_accept` and `uptime_s` besides tokens, window and percent.
 
 The task can also be a file in the workspace: `-e NERD_PROBLEM_FILE=PROBLEM.md`
 and no task argument. `NERD_MODE` picks what the run does with it:

@@ -27,6 +27,7 @@ import { fetchGuard, fetchGuardOn } from "./fetch-guard.ts";
 import { lintCheck, lintOn } from "./lint-check.ts";
 import { calcOn, TOOLS } from "./local.ts";
 import { loopGuard, loopGuardHard } from "./loop-guard.ts";
+import { sessionStatsExtension } from "./session-stats.ts";
 import { checkedMode, modes, newModeState, type PlanStepHandle } from "./mode.ts";
 import { outputCap } from "./output-cap.ts";
 import { packageReadOnlyTools, packageTools, pinWebSearchProvider } from "./packages.ts";
@@ -107,6 +108,8 @@ export function harness(operator: boolean, env = process.env, hooks: HarnessHook
 		// declares its own tools alone, as before.
 		const work = workTools(env, !operator);
 		pi.on("session_start", () => pi.setActiveTools(work));
+		// Session statistics (#993): fed by every session, the TUI's status line from it.
+		sessionStatsExtension(pi, { operator });
 		const lg = loopGuard(pi, { operator, hard: loopGuardHard(env) });
 		steers.push(lg.takeSteer);
 		hooks.takeEnded = lg.takeEnded;

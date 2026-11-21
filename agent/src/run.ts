@@ -109,6 +109,7 @@ import { join, resolve } from "node:path";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { agoraChannel, agoraChannelPath, closeProcessChannel } from "./agora-channel.ts";
 import { logged } from "./event-log.ts";
+import { sessionStats } from "./session-stats.ts";
 import { type HarnessHooks, harness } from "./harness.ts";
 import { headlessSession } from "./headless.ts";
 import { localModel, modelApiKey, modelDefinition, plannerModel, settingsFor, stayOffline, withVerifier } from "./local.ts";
@@ -251,7 +252,12 @@ async function main() {
 	console.log(`[model ${modelId}, context ${ctx}, thinking ${thinking}, verify N=${verifyN}, spec check ${process.env.NERD_SPEC_CHECK === "1" ? "on" : "off"}, packages ${enabledPackages().map((p) => p.name).join(" ") || "none"}]`);
 	if (planner) console.log(`[pair: the plan and its checks by ${planner.id} (context ${planner.ctx}), the code by ${modelId}]`);
 	const onEvent = (event: Parameters<Parameters<Awaited<ReturnType<typeof headlessSession>>["subscribe"]>[0]>[0]) => {
-		if (logPath) appendFileSync(logPath, `${JSON.stringify({ t: Date.now() - t0, ...logged(event) })}\n`);
+		// `ts` (UTC) and the Pi session's id on every line but the per-token updates (#993, agora's collector
+		// #983: it dedups messages by message.responseId and needs the session on the line).
+		if (logPath) {
+			const stamp = event.type === "message_update" ? {} : { ts: new Date().toISOString(), session: sessionStats().session ?? null };
+			appendFileSync(logPath, `${JSON.stringify({ t: Date.now() - t0, ...stamp, ...logged(event) })}\n`);
+		}
 		const ev = event as { type: string; errorMessage?: string };
 		// "Nothing to compact (session too small)" is not a failure: the Ralph loop
 		// compacts before each round, and a short round leaves nothing to summarise.
@@ -303,11 +309,25 @@ async function main() {
 		const path = save(st, { reason: `stopped by ${sig}`, status: "paused", role: st.amendable ? "planner" : "worker", partialMs });
 		if (path) process.stdout.write(`[${sig}: the loop's state saved to ${path}${sha ? `, the work committed as ${sha}` : ""}; NERD_RALPH_RESUME=1 goes on]\n`);
 	};
+	// #993: the session's one summary line, last in the events log — at the end of the run, or
+	// "complete": false when a signal or an error ends it (agora's collector then rebuilds what it
+	// can from the message lines; a hard kill writes none).
+	let summarised = false;
+	const summarise = (complete: boolean, end: Record<string, unknown>) => {
+		if (summarised || !logPath) return;
+		summarised = true;
+		const st = sessionStats();
+		st.ralphRounds = loopState?.round ?? 0;
+		try {
+			appendFileSync(logPath, `${JSON.stringify({ t: Date.now() - t0, ...st.summary(complete, end) })}\n`);
+		} catch {}
+	};
 	// SIGINT/SIGTERM (a manager stopping the run, docker stop): the turn is aborted and the
 	// run ends as the finally below would, not with Node's default death mid-turn.
 	const stop = (sig: NodeJS.Signals, code: number) => {
 		process.stdout.write(`\n[${sig}: the run is stopped]\n`);
 		saveOnSignal(sig);
+		summarise(false, { end: `stopped by ${sig}`, exit: code });
 		void session
 			.abort()
 			.catch(() => {})
@@ -339,6 +359,7 @@ async function main() {
 		endedByGuard = hooks.takeEnded?.() ?? false;
 		if (endedByGuard) process.stdout.write("\n[harness: the loop guard ended the turn (the same call again after two notes)]\n");
 	};
+	let ranThrough = false;
 	try {
 		// solve: what is there is committed before the work and after it (mode.ts commitAll).
 		const commit = (subject: string) => {
@@ -515,7 +536,9 @@ async function main() {
 			const cut = why ? `; the checks passed, though the ${why}` : "";
 			console.log(`\n[done in ${secs} s, ${session.messages.length} messages${extra}${cut}]`);
 		}
+		ranThrough = true;
 	} finally {
+		summarise(ranThrough, { end: ranThrough ? "finished" : "error", exit: process.exitCode ?? (ranThrough ? 0 : 1) });
 		session.dispose();
 		// The open socket would keep the process alive.
 		closeProcessChannel();
