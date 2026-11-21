@@ -79,6 +79,8 @@ test("run.ts under Ralph: a turn the loop guard ended goes to the check and the 
 		assert.match(out, /\[harness: the loop guard ended the turn/, out.slice(-3000));
 		assert.doesNotMatch(out, /the model request failed/, out.slice(-3000));
 		assert.match(out, /\[ralph round \d+\/2/, "Ralph checked the work after the guard's end of the turn");
+		assert.match(out, /\[NOT DONE after \d+ s: the Ralph loop stopped without its checks passing \(its report above\); the last turn was ended by the loop guard\]/);
+		assert.doesNotMatch(out, /last reply stopped with error/);
 		assert.ok(code !== null, "the run ended by itself");
 		assert.ok(srv.requests() > 6, "the second round asked the model again");
 	} finally {

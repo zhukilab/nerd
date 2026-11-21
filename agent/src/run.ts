@@ -492,6 +492,10 @@ async function main() {
 		const why =
 			last?.role !== "assistant"
 				? `ended on a ${last?.role ?? "missing"} message`
+				: endedByGuard
+					? ralphStopped
+						? "the Ralph loop stopped without its checks passing (its report above); the last turn was ended by the loop guard"
+						: "loop guard ended the last turn (the same call again after two notes)"
 				: last.stopReason !== "stop"
 					? `last reply stopped with ${last.stopReason}${last.errorMessage ? `: ${last.errorMessage}` : ""}`
 					: ralphStopped
