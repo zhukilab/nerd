@@ -6,7 +6,7 @@
 #                                                     picks up the last session)
 #   docker exec <c> nerd-pi run "<task>"              the headless run on the task; exit
 #                                                     code as run.ts (0 done, 1 not done,
-#                                                     2 bad arguments, 130/143 SIGINT/SIGTERM)
+#                                                     2 bad arguments, 75 paused, 130/143 SIGINT/SIGTERM)
 #   docker exec <c> nerd-pi run --task-file <path>    the same, the task read from a file (no argv
 #                                                     word limit; read at the start, see run-args.ts)
 #
@@ -43,7 +43,8 @@ case "${1:-}" in
     shift
     if [ -z "${1:-}" ]; then
       # No task here: run.ts takes NERD_PROBLEM_FILE (relative to /workspace), or with NERD_MODE=ralph
-      # a PLAN.md, also from the settings file; with neither it prints the usage and exits 2.
+      # a PLAN.md, or with NERD_RALPH_RESUME=1 the paused run's saved task, also from the settings
+      # file; with none of them it prints the usage and exits 2.
       exec node /opt/nerd/agent/src/run.ts /workspace --log "/logs/events-$stamp.jsonl"
     fi
     if [ "$1" = --task-file ]; then

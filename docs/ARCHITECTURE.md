@@ -109,9 +109,11 @@ context compaction and the terminal UI. nerd adds, in `agent/src/`:
 | `web-notes.ts` | each page `web_fetch` read kept in the project's `notes/web/` (`NERD_WEB_NOTES`, on) |
 | `sampling.ts` | sampling fields added to every request (`NERD_SAMPLING`) |
 | `pair.ts` | the ping-pong pair: another model writes the plan and its checks (`NERD_PLAN_BASE_URL`; unset, one model) |
-| `event-log.ts` | what of a session event goes into the headless run's `--log` |
+| `event-log.ts` | what of a session event goes into the headless run's `--log` (`run.ts` adds `ts` and `session` to the lines, and the `session_summary` line last) |
 | `packages.ts` | third-party Pi packages, pinned and loaded from `node_modules`: [pi-vcc](https://www.npmjs.com/package/@sting8k/pi-vcc) replaces Pi's model-written compaction summary with an extracted one (no model call; patched at install, `agent/patches/`) (`NERD_PI_VCC`, on; its `vcc_recall` is not offered unless `NERD_VCC_RECALL=1`); [rpiv-web-tools](https://www.npmjs.com/package/@juicesharp/rpiv-web-tools): `web_search` through SearXNG in the container and `web_fetch` (`NERD_WEB`, on) |
-| `loop-guard.ts` | tells the model when it repeats the same call with the same result |
+| `loop-guard.ts` | tells the model when it repeats the same call with the same result (`NERD_LOOP_GUARD_N`); after `NERD_LOOP_GUARD_HARD` notes it cuts the reply, at most twice per task, then only ends the turn, which a headless run does not count as a failed model call |
+| `reflex.ts` | after an `edit` or `write`, the lines of the workspace's markdown notes that name the file, appended to the result once per note and cut from the context `NERD_REFLEX_KEEP_TURNS` turns later (`NERD_REFLEX`, on) |
+| `session-stats.ts` | session statistics (tokens, the context's peak, the model server's speed and MTP acceptance, time in tools): the TUI's status line, the agora channel's `context` event, the headless run's `session_summary` line |
 | `rules.ts` | the operator's rules for every project: `RULES.md` in the agent's home, in each turn's system prompt, written only by `/remember` and `/forget` |
 | `summary-goal.ts` | the compaction summary's goal set to the task in the operator's words, before each request |
 | `bash-tool.ts` | Pi's bash with a default timeout, so a foreground server cannot hang the run, and quiet defaults for the model's commands (`NERD_QUIET`) |
@@ -148,7 +150,7 @@ with docker; no GPU.
 | image | mode | runs | ends |
 |---|---|---|---|
 | agent | `tui` (what `./UP` starts) | sshd, waits for the server (as long as it takes), Pi in tmux (restarted with `--continue` if it exits) | when sshd exits; docker restarts it. A server that goes away is retried by Pi |
-| agent | `"<task>"` | waits for the server (up to 15 min), `run.ts` on the task | when the agent finishes; exit code 0 = final answer and the plan's checks shown passing |
+| agent | `"<task>"` | waits for the server (up to 15 min), `run.ts` on the task | when the agent finishes; exit code 0 = final answer and the plan's checks shown passing, 75 = paused (the round gate, or a long run's stall) |
 | agent | `hold` | SearXNG only, no Pi, no sshd: a session manager runs `docker exec -it <c> nerd-pi tui [--continue]` or `nerd-pi run "<task>"` (`container/nerd-pi.sh`) | when stopped (143 at once); Pi's life is the manager's |
 | server | `serve` (default) | download and check the model if needed, llama-server in the foreground | never; docker restarts it |
 | server | `fetch` | download and check the model | after the check |

@@ -207,7 +207,8 @@ elif [ "${1:-}" = hold ]; then
   exit 0
 else
   # The task: the argument, else NERD_PROBLEM_FILE, else NERD_TASK. With none of them run.ts
-  # decides, the settings file read (NERD_MODE=ralph with a PLAN.md needs no task; else exit 2).
+  # decides, the settings file read (NERD_MODE=ralph with a PLAN.md, or NERD_RALPH_RESUME=1, needs
+  # no task; else exit 2).
   task=$*
   [ -n "$task" ] || [ -n "${NERD_PROBLEM_FILE:-}" ] || task=${NERD_TASK:-}
 fi

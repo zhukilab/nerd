@@ -204,7 +204,11 @@ headless `NERD_MODE=plan`) a `PLAN.md` that is there (in the TUI, one made in th
 session) is revised to the task, not written anew, and committed as "Plan" on top. `NERD_PLAN_STEP=0` skips the step. The loop guard ([`agent/src/loop-guard.ts`](agent/src/loop-guard.ts))
 appends a note to a tool result when the same call with the same result has
 come `NERD_LOOP_GUARD_N` times (3; 0 = off) among the recent calls: the model is
-told it is repeating itself and must change approach. It does not stop the run.
+told it is repeating itself and must change approach. It does not stop the run:
+after `NERD_LOOP_GUARD_HARD` (2) notes on one call the reply is cut and the model
+told what the loop was, at most twice per task; a third time the turn just ends,
+and headless that is not a failed model call: the Ralph loop checks the work and
+goes on.
 The fetch guard ([`agent/src/fetch-guard.ts`](agent/src/fetch-guard.ts)) does the
 same for `web_fetch`: a 404 for an address that no `web_search` result had (the
 model guessed it) gets a note to search instead of guessing again, and
@@ -216,6 +220,10 @@ CSS and a page's inline scripts, ruff for Python, shellcheck for shell,
 what the linter calls an error, never style: a script that does not parse, an
 undeclared name (a missing import). It is appended to the tool's result; a
 clean file adds nothing (`NERD_LINT=0` = off).
+The same result also gets the lines of the workspace's markdown notes that name
+the edited file, once per note, and the harness cuts them out of the context
+`NERD_REFLEX_KEEP_TURNS` (2) turns later ([`agent/src/reflex.ts`](agent/src/reflex.ts);
+`NERD_REFLEX=0` = off).
 When a turn of work ends, the harness checks the committed project the way
 the operator's checker will, in a clean clone of HEAD
 ([`agent/src/done-gate.ts`](agent/src/done-gate.ts)): nothing left

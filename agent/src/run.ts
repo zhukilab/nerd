@@ -40,6 +40,8 @@
 //   NERD_FETCH_GUARD=0  no note on a web_fetch 404 for an address that no
 //                  web_search result had (src/fetch-guard.ts)
 //   NERD_LINT=0    no linter after write/edit (src/lint-check.ts)
+//   NERD_REFLEX=0  no workspace notes naming the file after write/edit (src/reflex.ts);
+//                  NERD_REFLEX_KEEP_TURNS: turns they stay in the context (default 2)
 //   NERD_WORK_MAX_MINUTES  the wall clock of each turn of work (default 0 = none): a
 //                  note to commit and sum up, 15 min later the tools go away; a reply still
 //                  streaming then is cut, the working tree committed by the harness, and a
@@ -60,7 +62,8 @@
 //                  clean clone, and failures start a new round from the files
 //                  (NERD_RALPH_ROUNDS, default 3; NERD_RALPH_MINUTES, default none);
 //                  NERD_RALPH_PROGRESS=work: "no progress" is two rounds in a row with the same
-//                  failures and the same committed tree (a long task; default: same failures once)
+//                  failures and the same committed tree, and it pauses the run (exit 75) instead of
+//                  ending it (a long task; default: same failures once)
 //   NERD_RALPH_GATE  a command asked before each next round and before the first turn (src/ralph-gate.ts,
 //                  #978): it may say continue, continue with a turn of N minutes, or pause; a pause
 //                  commits the work, saves the loop's state (NERD_RALPH_STATE, default inside .git)
@@ -96,7 +99,9 @@
 //
 // The temp agent dir (under $TMPDIR) is removed when the run ends, unless the
 // session is in it (no NERD_SESSION_DIR): then its path is printed. SIGINT and
-// SIGTERM abort the turn and end the run the same way (exit 130, 143).
+// SIGTERM abort the turn and end the run the same way (exit 130, 143). Exit 0: done, 1: not
+// done, 2: bad arguments, 75: paused (ralph-gate.ts). The events log ends with a
+// session_summary line (src/session-stats.ts).
 //
 // The interactive counterpart is tui.ts; what both share is in local.ts.
 

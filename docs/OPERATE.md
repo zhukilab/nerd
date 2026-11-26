@@ -366,18 +366,19 @@ hand".
 
 The exit code is 0 when the agent finished with a final answer and, under the
 checks, the plan's Done when showed it done (at least one check run and none
-failing); 1 when it did not, 2 for bad arguments, 75 when the round gate paused it (below); SIGTERM (`docker stop`) and SIGINT abort the turn and
+failing); 1 when it did not, 2 for bad arguments, 75 when it paused (the round gate, or a long run's stall; below); SIGTERM (`docker stop`) and SIGINT abort the turn and
 end the run cleanly, 143 and 130. Questions in
 the plan step are answered with `NERD_PLAN_ANSWER` (default «на твоё
 усмотрение», Russian for "your call").
-The event log goes to `/logs` (mount it to keep it). One JSON line per Pi event;
-every line but the per-token `message_update` also carries `ts` (UTC) and
+The event log goes to `/logs` (mount it to keep it). One JSON line per Pi event,
+and the harness's own `ralph_round` and `spec_check_round` lines (these carry only
+`t`, ms since the start); every Pi event line but the per-token `message_update` also carries `ts` (UTC) and
 `session` (Pi's session id), and an assistant `message_end` carries the reply's
 usage and its `message.responseId`. The last line is the session's summary:
 
 ```json
 {"type": "session_summary", "v": 1, "ts": "…Z", "complete": true, "session": "…", "model": "…", "server": "…",
- "wall_s": 0, "messages": 0, "tokens": {"in": 0, "out": 0, "cache_read": 0, "cache_write": 0, "server_cache_n": 0, "hit_ratio": 0},
+ "started": "…Z", "wall_s": 0, "messages": 0, "tokens": {"in": 0, "out": 0, "cache_read": 0, "cache_write": 0, "server_cache_n": 0, "hit_ratio": 0},
  "ctx": {"peak": 0, "window": 0}, "model_s": {"prompt": 0, "gen": 0}, "tool_s": 0, "wait_s": 0,
  "tps": {"prompt": 0, "gen": 0}, "mtp_accept": 0, "draft_n": 0, "ralph_rounds": 0, "compactions": 0, "end": "finished", "exit": 0}
 ```
@@ -424,7 +425,7 @@ On a pause the harness commits the work, saves the loop's state (inside the
 workspace's `.git` unless `NERD_RALPH_STATE` says where) and the run exits
 **75**. `NERD_RALPH_RESUME=1` (no task needed) goes on from it in a new
 session: no plan step, the round that was about to start, the loop's budget in
-active time. With the gate or a resume, SIGTERM saves the state too. A run
+active time. With the gate or a resume, SIGTERM or SIGINT saves the state too. A run
 that ends (done, or stopped by the loop) marks the state ended, so it is not
 resumed again. A new run the gate pauses before its first turn has done
 nothing and saved nothing (exit 75 all the same): start it again as new, not
@@ -439,8 +440,8 @@ The gate shipped with the agent works by the clock, in the window's time zone:
 ```
 
 Each turn gets the minutes left in the window less a reserve (the clock's
-15-minute grace and 10 for the checks); with less than 20 minutes left it
-pauses. `NERD_RALPH_PROGRESS=work` keeps a long task's loop going while the
+15-minute grace and 10 for the checks; `--reserve M`); when that leaves a
+turn of less than 20 minutes (`--min-turn M`), it pauses. `NERD_RALPH_PROGRESS=work` keeps a long task's loop going while the
 same checks stay red but the code moves on. Two rounds in a row that changed
 neither the failing checks nor the committed code are a stall: the run
 **pauses** (exit 75, the state marked `stalled`) for you to look at, and goes

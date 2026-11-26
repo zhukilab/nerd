@@ -779,7 +779,7 @@ export const SETTINGS: Setting[] = [
 		group: "loop and checks",
 		kind: { type: "text" },
 		default: "",
-		summary: "Where a paused run's state is saved (relative: to the workspace). Empty: nerd-ralph-state.json inside the workspace's .git.",
+		summary: "Where a paused run's state is saved (relative: to the workspace). Empty: nerd-ralph-state.json inside the workspace's .git (.nerd-ralph-state.json in the workspace when it is not a git repository).",
 		apply: "restart",
 		level: "advanced",
 	},
