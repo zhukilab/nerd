@@ -169,6 +169,8 @@ Read by the agent (Pi). Set them with `/nerd` in Pi or `./SETTINGS` on the host;
 | Setting | Default | Values | Change | What it does |
 |---|---|---|---|---|
 | `NERD_PI_VCC` | `1` | 1 / 0 | needs a Pi restart | 1: the pi-vcc package does every compaction, without a model call. 0: Pi's own compaction. |
+| `NERD_REFLEX` (advanced) | `1` | 1 / 0 | needs a Pi restart | 1: an edit or write of a file shows the workspace's notes that name that file (once per note), taken out of the context a few turns later. 0: off. |
+| `NERD_REFLEX_KEEP_TURNS` (advanced) | `2` | ≥ 0 | needs a Pi restart | Assistant turns a reflex note stays in the context before it is cut out (kept short: changing older messages costs the model server a re-read). |
 | `NERD_VCC_RECALL` (advanced) | `0` | 1 / 0 | needs a Pi restart | 1: with pi-vcc on, the model also has its vcc_recall tool, a search of the session's earlier history. |
 | `NERD_ANCHORS` (advanced) | `1` | 1 / 0 | acts after a reload | 1: after a compaction the task, PLAN.md, notes/ and the changed files are put back into the context. 0: off. |
 | `NERD_ANCHORS_MAX_CHARS` (advanced) | `4000` | ≥ 1 | acts after a reload | The anchors' size in characters; each part is cut to fit. |

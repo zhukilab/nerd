@@ -27,6 +27,7 @@ import { fetchGuard, fetchGuardOn } from "./fetch-guard.ts";
 import { lintCheck, lintOn } from "./lint-check.ts";
 import { calcOn, TOOLS } from "./local.ts";
 import { loopGuard, loopGuardHard } from "./loop-guard.ts";
+import { reflexExtension, reflexKeepTurns, reflexOn } from "./reflex.ts";
 import { sessionStatsExtension } from "./session-stats.ts";
 import { checkedMode, modes, newModeState, type PlanStepHandle } from "./mode.ts";
 import { outputCap } from "./output-cap.ts";
@@ -110,6 +111,8 @@ export function harness(operator: boolean, env = process.env, hooks: HarnessHook
 		pi.on("session_start", () => pi.setActiveTools(work));
 		// Session statistics (#993): fed by every session, the TUI's status line from it.
 		sessionStatsExtension(pi, { operator });
+		// The reflex by place of work (#1051): notes naming an edited file, shown once, forgotten soon.
+		if (reflexOn(env)) reflexExtension(pi, { keep: reflexKeepTurns(env) });
 		const lg = loopGuard(pi, { operator, hard: loopGuardHard(env) });
 		steers.push(lg.takeSteer);
 		hooks.takeEnded = lg.takeEnded;
